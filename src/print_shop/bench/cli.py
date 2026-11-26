@@ -798,8 +798,9 @@ def parser() -> Parser:
         action="store_true",
         help="read in two passes (mqucifer/print-shop#301): the whole, each bolt's bore stood "
         "in by a square one, for each joint's force and the movement; then each part on its "
-        "own, its bores meshed, for its strain. Without it, two passes run only where the "
-        "whole meets the container's memory",
+        "own, its bores meshed, for its strain, under an hour. Without it, two passes run only "
+        "where the whole meets the container's memory, or where an assembly's one pass wouldn't "
+        "end inside its limit",
     )
     optimise = sub.add_parser(
         "optimise",

@@ -59,13 +59,15 @@ def first_to_go() -> None:
         pass
 
 
-def ccx_one_thread(fea: Any) -> None:
+def ccx_one_thread(fea: Any, timeout: float | None = None) -> None:
     """CalculiX on one thread, where FreeCAD's own run starts it on as many as the host has
     CPUs, not the container's 2 (mqucifer/print-shop#295): its solver's memory grows with
     them, and a traced glass frame that solves in 2.8 GB on one ran out of the container's
     3 GiB on more. One thread, as gmsh is, also gives the same figures on any host. It runs
     as FreeCAD's does, in the input's folder on the input's name, and keeps what it says
-    where FreeCAD's `load_results` and the readings look for it."""
+    where FreeCAD's `load_results` and the readings look for it. Given a `timeout`, in s, it's
+    stopped there, and `subprocess.TimeoutExpired` is raised (`load`'s one pass, where two
+    passes could go on under the hour, mqucifer/print-shop#331)."""
     fea.setup_ccx()
     folder, name = os.path.split(fea.inp_file_name)
     done = subprocess.run(
@@ -75,6 +77,7 @@ def ccx_one_thread(fea: Any) -> None:
         env={**os.environ, "OMP_NUM_THREADS": "1"},
         check=False,
         preexec_fn=first_to_go,
+        timeout=None if timeout is None else max(timeout, 0.0),
     )
     fea.ccx_stdout = done.stdout.decode(errors="replace")
     fea.ccx_stderr = done.stderr.decode(errors="replace")

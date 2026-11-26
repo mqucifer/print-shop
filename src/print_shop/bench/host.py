@@ -62,11 +62,15 @@ TIMEOUTS = {"optimise": 3600}
 #: about 1,750 s, 1,047 s of it the bolts' own readings, as in one pass. With `--parts` it's
 #: asked for, so given from the start. Otherwise `load` tries one pass first, under `TIMEOUT`,
 #: and is offered this (`OFFER`); it takes it up as it starts two passes, where the whole met
-#: the container's memory, by one line on its stderr (`TAKEN`), and only then does the host
-#: wait for it. Any other `load` stops at `TIMEOUT`, as before.
+#: the container's memory, or, for an assembly of more than one part, where the one pass
+#: wouldn't end inside `TIMEOUT` (mqucifer/print-shop#331), by one line on its stderr (`TAKEN`),
+#: and only then does the host wait for it. Any other `load` stops at `TIMEOUT`, as before. A
+#: one pass that could go on to two passes says so first (`ABLE`), so that where the host stops
+#: it at `TIMEOUT`, past what its clock foresaw, the reply names `--parts` (`past`).
 TWO_PASSES = 3600
 OFFER = "BENCH_TIMEOUT_TWO_PASSES"
 TAKEN = "bench: two passes take the longer limit"
+ABLE = "bench: two passes could read it"
 HERE = Path(__file__).resolve().parent
 REPOSITORY = HERE.parent.parent.parent
 #: The container's own mount of this package: read-only, so nothing in it can change the bench.
@@ -288,16 +292,28 @@ def run(
         image=image or (IMAGE if python else image_for(args)),
         env=env,
     )
-    done, limit = _waited(argv, timeout, longer)
+    done, limit, could = _waited(argv, timeout, longer)
     if done is None:
         subprocess.run(["docker", "kill", name], capture_output=True, check=False)
-        message = f"verdict: NO ANSWER: it ran past the {limit} s limit and was stopped\n"
-        return subprocess.CompletedProcess(argv, 2, message, "")
+        return subprocess.CompletedProcess(argv, 2, past(limit, could), "")
     if done.returncode == KILLED:
         # A process that's killed takes its buffered output with it, so this may be all there is.
         message = f"verdict: NO ANSWER: it was killed, most likely at the {MEMORY} memory limit\n"
         return subprocess.CompletedProcess(argv, 2, done.stdout + message, done.stderr)
     return done
+
+
+def past(limit: int, could: bool) -> str:
+    """The verdict of a command stopped at its limit; and where it was a `load`'s one pass, of
+    an assembly two passes could read (`ABLE`), and they weren't started, what would read it
+    (mqucifer/print-shop#331)."""
+    said = f"verdict: NO ANSWER: it ran past the {limit} s limit and was stopped"
+    if could:
+        said += (
+            ", in one pass. Two passes can read this assembly, and are given the hour, "
+            f"{TWO_PASSES} s: run it again with --parts, which asks for them from the start"
+        )
+    return said + "\n"
 
 
 #: How often the host looks whether a command has ended, or taken up its longer limit, in s.
@@ -306,23 +322,25 @@ POLL = 0.5
 
 def _waited(
     argv: list[str], timeout: int, longer: int | None
-) -> tuple[subprocess.CompletedProcess[str] | None, int]:
-    """Run `argv` to its end, or None where it ran past its limit; and the limit it ran under:
-    `timeout`, or `longer` from when the command's stderr says it took it up (`TAKEN`). That
-    line is the host's, and isn't passed on."""
+) -> tuple[subprocess.CompletedProcess[str] | None, int, bool]:
+    """Run `argv` to its end, or None where it ran past its limit; the limit it ran under:
+    `timeout`, or `longer` from when the command's stderr says it took it up (`TAKEN`); and
+    whether it said two passes could read it (`ABLE`) and didn't take `longer` up. Those lines
+    are the host's, and aren't passed on."""
     if longer is None:
         try:
             done = subprocess.run(
                 argv, capture_output=True, text=True, timeout=timeout, check=False
             )
         except subprocess.TimeoutExpired:
-            return None, timeout
-        return done, timeout
+            return None, timeout, False
+        return done, timeout, False
     began = time.monotonic()
     process = subprocess.Popen(argv, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
     out: list[str] = []
     err: list[str] = []
     taken = threading.Event()
+    able = threading.Event()
 
     def read_out() -> None:
         assert process.stdout is not None
@@ -333,6 +351,8 @@ def _waited(
         for line in process.stderr:
             if line.rstrip("\n") == TAKEN:
                 taken.set()
+            elif line.rstrip("\n") == ABLE:
+                able.set()
             else:
                 err.append(line)
 
@@ -356,9 +376,10 @@ def _waited(
     for pipe in (process.stdout, process.stderr):
         if pipe is not None:
             pipe.close()
+    could = able.is_set() and not taken.is_set()
     if code is None:
-        return None, limit
-    return subprocess.CompletedProcess(argv, code, "".join(out), "".join(err)), limit
+        return None, limit, could
+    return subprocess.CompletedProcess(argv, code, "".join(out), "".join(err)), limit, could
 
 
 def others(image: str) -> list[str]:

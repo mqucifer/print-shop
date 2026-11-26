@@ -33,9 +33,11 @@ reply says so. Every other solve is the direct solver's, as in one pass.
 **Time.** The container's limit is read from `BENCH_TIMEOUT`, which the host sets. Two passes
 stop before a solve that wouldn't end inside it, and say which pass met it and what's read. They
 run under an hour (mqucifer/print-shop#325): with `--parts` the host gives it from the start;
-where the whole met the container's memory, `load` takes up the hour the host offered as two
-passes start (`take_longer`), and the clock, the glass band's reserve and the reply's `ran:`
-line all read it from there.
+where the whole met the container's memory, or where the one pass of an assembly wouldn't end
+inside the container's time (mqucifer/print-shop#331, `load._OnePass`), `load` takes up the hour
+the host offered as two passes start (`take_longer`), and the clock, the glass band's reserve and
+the reply's `ran:` line all read it from there. The hour counts from the command's start, so the
+one pass's try is in it.
 """
 
 from __future__ import annotations
@@ -101,9 +103,12 @@ TIMEOUT = "BENCH_TIMEOUT"
 MARGIN = 20.0
 #: The longer limit the host offers a `load` that may come to two passes, and the line on
 #: stderr that takes it up: the same as `host.OFFER` and `host.TAKEN`, which run outside the
-#: image (mqucifer/print-shop#325).
+#: image (mqucifer/print-shop#325). And the line that tells the host its one pass is of an
+#: assembly two passes could read, so that where it stops the one pass at its limit, it names
+#: `--parts` (`host.ABLE`, mqucifer/print-shop#331).
 OFFER = "BENCH_TIMEOUT_TWO_PASSES"
 TAKEN = "bench: two passes take the longer limit"
+ABLE = "bench: two passes could read it"
 #: Where a part names its glass band, two passes are given the container's time less this many
 #: times what the one pass's try took, held back for the band's lower bound: on the traced frame
 #: bolted to a block its read took 0.41 of the try on CI's amd64 runner, and 0.37 on the Mac.

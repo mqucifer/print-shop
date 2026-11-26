@@ -7,6 +7,7 @@ themselves are in `test_cae.py`.
 
 from __future__ import annotations
 
+import re
 import subprocess
 from pathlib import Path
 from typing import Any
@@ -169,9 +170,9 @@ def _ran_under(
     and the limit it was waited for under; nothing is run."""
     waited: list[tuple[int, int | None]] = []
 
-    def wait(argv: list[str], timeout: int, longer: int | None) -> tuple[Any, int]:
+    def wait(argv: list[str], timeout: int, longer: int | None) -> tuple[Any, int, bool]:
         waited.append((timeout, longer))
-        return subprocess.CompletedProcess(argv, 0, "", ""), timeout
+        return subprocess.CompletedProcess(argv, 0, "", ""), timeout, False
 
     monkeypatch.setattr(host, "image_id", lambda image=host.IMAGE: "sha256:x")
     monkeypatch.setattr(host, "code_version", lambda: "abc")
@@ -222,13 +223,15 @@ def test_the_host_waits_the_hour_only_once_two_passes_take_it_up() -> None:
     processes, with limits of seconds, not the bench's."""
     taken = f"import sys, time; print({load_parts.TAKEN!r}, file=sys.stderr, flush=True); "
     late = "time.sleep(3); print('read'); print('said', file=sys.stderr)"
-    done, limit = host._waited(_child(taken + late), 1, 30)
-    assert done is not None and limit == 30
+    done, limit, could = host._waited(_child(taken + late), 1, 30)
+    assert done is not None and limit == 30 and not could
     assert done.returncode == 0 and done.stdout == "read\n" and done.stderr == "said\n"
-    stopped, limit = host._waited(_child("import time; " + late), 1, 30)
+    stopped, limit, could = host._waited(_child("import time; " + late), 1, 30)
     assert stopped is None and limit == 1, "not taken up, it's stopped at its own"
-    stopped, limit = host._waited(_child(taken + "time.sleep(30)"), 1, 2)
+    assert not could, "it didn't say two passes could read it"
+    stopped, limit, could = host._waited(_child(taken + "time.sleep(30)"), 1, 2)
     assert stopped is None and limit == 2, "taken up, it's stopped at the longer"
+    assert not could
 
 
 def test_a_command_past_the_limit_it_took_up_says_that_limit(
@@ -237,7 +240,7 @@ def test_a_command_past_the_limit_it_took_up_says_that_limit(
     killed: list[list[str]] = []
     monkeypatch.setattr(host, "image_id", lambda image=host.IMAGE: "sha256:x")
     monkeypatch.setattr(host, "code_version", lambda: "abc")
-    monkeypatch.setattr(host, "_waited", lambda argv, timeout, longer: (None, longer))
+    monkeypatch.setattr(host, "_waited", lambda argv, timeout, longer: (None, longer, False))
     monkeypatch.setattr(subprocess, "run", lambda argv, **_: killed.append(argv))
     done = host.run(["load", "a.json"], tmp_path)
     assert done.stdout == "verdict: NO ANSWER: it ran past the 3600 s limit and was stopped\n"
@@ -317,7 +320,8 @@ def test_two_passes_take_up_the_hour_offered_and_the_clock_and_the_ran_line_read
     """In the container: two passes take up the host's offer, saying so on stderr, and from
     there the container's limit is the hour, for the clock (so the glass band's reserve comes
     out of the hour) and for the reply's `ran:` line. Not offered, nothing changes."""
-    assert (load_parts.OFFER, load_parts.TAKEN) == (host.OFFER, host.TAKEN)
+    mirrored = (load_parts.OFFER, load_parts.TAKEN, load_parts.ABLE)
+    assert mirrored == (host.OFFER, host.TAKEN, host.ABLE)
     monkeypatch.setenv(load_parts.TIMEOUT, "600")
     monkeypatch.delenv(load_parts.OFFER, raising=False)
     load_parts.take_longer()
@@ -340,6 +344,244 @@ def test_two_passes_take_up_the_hour_offered_and_the_clock_and_the_ran_line_read
     monkeypatch.delenv(load_parts.TIMEOUT)
     report.save(tmp_path)
     assert " limit" not in report.text.split("\nran: ")[1].split(", image")[0]
+
+
+# mqucifer/print-shop#331: a one pass that fits the memory but not its time
+
+
+def _assembly(tmp_path: Path, parts: int = 2) -> str:
+    """A made-up assembly file of `parts` blocks, bolted where there are two."""
+    import json
+
+    data: dict[str, Any] = {
+        "parts": [
+            {"name": f"p{k}", "file": f"p{k}.step", "at": [40 * k, 0, 0], "layers": "z"}
+            for k in range(parts)
+        ],
+        "joints": [
+            {"between": ["p0", "p1"], "kind": "bolted", "bolt": "m4-8.8",
+             "insert": "m4-heat-set", "at": [[40, 10, 5]]}
+        ] if parts > 1 else [],
+        "held": [{"plane": "x=0", "how": "fixed"}],
+    }  # fmt: skip
+    for k in range(parts):
+        (tmp_path / f"p{k}.step").write_text("")
+    path = tmp_path / "assembly.json"
+    path.write_text(json.dumps(data))
+    return str(path)
+
+
+def _plain_load(monkeypatch: pytest.MonkeyPatch, limit: str = "600") -> None:
+    """The container as the host starts a plain `load`: its limit, and the hour offered."""
+    monkeypatch.setenv(load_parts.TIMEOUT, limit)
+    monkeypatch.setenv(load_parts.OFFER, str(host.TWO_PASSES))
+    monkeypatch.setattr(load, "_clock", {"now": None})
+
+
+def _one_pass_reading_bolts(
+    monkeypatch: pytest.MonkeyPatch, bolt: float, calls: list[dict[str, Any]]
+) -> None:
+    """`load._run` stood in for, as it reads the one pass: it starts the one pass's clock as
+    `_run` does, reads the whole in 30 s, then a bolt that took `bolt` s, then asks before the
+    next; and in two passes, says what it was given. No FreeCAD."""
+    from print_shop.bench.assembly import read
+
+    def run(
+        args: Any, report: Report, without_bands: bool = False, two_pass: str | None = None,
+        reserve: float = 0.0, tried: float = 0.0,
+    ) -> None:  # fmt: skip
+        calls.append({"two_pass": two_pass, "tried": tried, "limit": load_parts.Clock(0).limit})
+        if two_pass is None:
+            load._one_pass(read(args.assembly), report.started)
+            load._timed("whole", 30.0)
+            load._in_time("bolt", "the reading round p0+p1's first bolt")
+            load._timed("bolt", bolt)
+            load._in_time("bolt", "the reading round p0+p1's second bolt")
+            report.verdict("OK", "read in one pass")
+            return
+        report.numbers["two_passes"] = {"why": two_pass}
+        report.verdict("OK", "read in two passes")
+
+    monkeypatch.setattr(load, "_run", run)
+
+
+def _args(path: str, parts: bool = False) -> Any:
+    import argparse
+
+    return argparse.Namespace(assembly=path, parts=parts, lift=None)
+
+
+def test_a_one_pass_that_fits_the_memory_but_not_its_time_goes_to_two_passes_under_the_hour(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """mqucifer/print-shop#331: the furniture assembly whose one pass ran past 600 s, round
+    after round, without meeting the memory. Here its next bolt wouldn't end inside the 600 s,
+    so the one pass stops itself before it and goes on to two passes, without being asked:
+    they take up the hour, counted from the command's start, and the reply says why."""
+    import time
+
+    _plain_load(monkeypatch)
+    calls: list[dict[str, Any]] = []
+    _one_pass_reading_bolts(monkeypatch, 1e4, calls)
+    report = Report("load", ["assembly.json"])
+    report.started = time.time() - 100
+    load.run(_args(_assembly(tmp_path)), report)
+    assert [c["two_pass"] is None for c in calls] == [True, False]
+    why = calls[1]["two_pass"]
+    assert why.startswith("the one pass wouldn't end inside the container's 600 s: it had run ")
+    assert why.endswith(" s, before the reading round p0+p1's second bolt, which would end past it")
+    assert calls[1]["limit"] == host.TWO_PASSES, "the hour, taken up"
+    assert calls[1]["tried"] == 30.0, "a whole takes at most what the one pass's whole took"
+    assert capsys.readouterr().err == f"{host.ABLE}\n{host.TAKEN}\n"
+    assert report.numbers["two_passes"]["one_pass_late"] == why
+    assert report.started == pytest.approx(time.time() - 100, abs=5), "the hour counts the try"
+    assert load._clock["now"] is None
+
+
+def test_a_one_pass_stopped_in_its_solve_goes_to_two_passes(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Where the one pass's solve of the whole runs to the container's time, less its margin,
+    CalculiX is stopped there (`cae.ccx_one_thread`'s timeout), and that's said the same way.
+    A real process stands in for CalculiX; FreeCAD's part of it is in the proof run."""
+    import time
+
+    from print_shop.bench import cae
+
+    _plain_load(monkeypatch, limit="21.5")
+    clock = load._OnePass(time.time(), 21.5)
+    load._clock["now"] = clock
+    left = load._ccx_left()
+    assert left is not None and 0.5 < left <= 1.5, "the limit less the margin"
+    ccx = tmp_path / "ccx"
+    ccx.write_text("#!/bin/sh\nsleep 30\n")
+    ccx.chmod(0o755)
+
+    class Fea:
+        ccx_binary = str(ccx)
+        inp_file_name = str(tmp_path / "solve.inp")
+
+        def setup_ccx(self) -> None:
+            pass
+
+    began = time.time()
+    with pytest.raises(subprocess.TimeoutExpired):
+        cae.ccx_one_thread(Fea(), timeout=left)
+    assert time.time() - began < 10, "stopped at what's left, not left to run"
+    late = clock.late("in CalculiX's solve of the whole at 4 mm")
+    assert isinstance(late, load._Unread) and not late.memory
+    said = r"21\.5 s: it had run \d+ s, in CalculiX's solve of the whole at 4 mm$"
+    assert re.search(said, str(late))
+    # Two passes' own clock, or no clock, gives a solve no timeout: as on main.
+    load._clock["now"] = load_parts.Clock(time.time())
+    assert load._ccx_left() is None
+    load._clock["now"] = None
+    assert load._ccx_left() is None
+
+
+def test_a_one_pass_that_reads_inside_its_time_reads_as_on_main(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Its bolts each well inside what's left: read in one pass, never two, under 600 s, and
+    the hour isn't taken up. Only the line that tells the host two passes could read it is
+    said, and the host doesn't pass that on."""
+    _plain_load(monkeypatch)
+    calls: list[dict[str, Any]] = []
+    _one_pass_reading_bolts(monkeypatch, 2.0, calls)
+    report = Report("load", ["assembly.json"])
+    load.run(_args(_assembly(tmp_path)), report)
+    assert [c["two_pass"] for c in calls] == [None]
+    assert report.word == "OK" and "two_passes" not in report.numbers
+    assert capsys.readouterr().err == f"{host.ABLE}\n"
+    assert load_parts.Clock(0).limit == 600 and load_parts.OFFER in __import__("os").environ
+
+
+@pytest.mark.parametrize(
+    ("parts", "offered", "limit"),
+    [(1, True, "600"), (2, False, "600"), (2, True, None)],
+    ids=["a single part", "not offered the hour", "no limit given"],
+)
+def test_a_load_that_can_t_go_to_two_passes_keeps_its_limit_and_says_nothing(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    parts: int,
+    offered: bool,
+    limit: str | None,
+) -> None:
+    """A single part, a script or a limit the caller gave (nothing offered), and a command with
+    no limit: no clock in the one pass, so it's never stopped early, and the host isn't told two
+    passes could read it. A single part past 600 s is stopped there, its reply as now."""
+    _plain_load(monkeypatch)
+    if not offered:
+        monkeypatch.delenv(load_parts.OFFER)
+    if limit is None:
+        monkeypatch.delenv(load_parts.TIMEOUT)
+    calls: list[dict[str, Any]] = []
+    _one_pass_reading_bolts(monkeypatch, 1e4, calls)
+    report = Report("load", ["assembly.json"])
+    load.run(_args(_assembly(tmp_path, parts)), report)
+    assert [c["two_pass"] for c in calls] == [None] and report.word == "OK"
+    assert capsys.readouterr().err == ""
+    assert host.past(600, False) == (
+        "verdict: NO ANSWER: it ran past the 600 s limit and was stopped\n"
+    )
+
+
+def test_a_one_pass_the_host_stops_names_parts_where_two_passes_could_read_it(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Past what the one pass's clock foresees, as a mesh that runs past the limit, the host
+    stops it at 600 s. Where it said two passes could read it, and they weren't started, the
+    reply names `--parts` and the hour; a single part's reply, and two passes' past the hour,
+    are as on main. Real processes, with limits of seconds."""
+    able = f"import sys, time; print({host.ABLE!r}, file=sys.stderr, flush=True); "
+    taken = f"print({host.TAKEN!r}, file=sys.stderr, flush=True); "
+    stopped, limit, could = host._waited(_child(able + "time.sleep(30)"), 1, 30)
+    assert stopped is None and limit == 1 and could
+    stopped, limit, could = host._waited(_child(able + taken + "time.sleep(30)"), 1, 2)
+    assert stopped is None and limit == 2 and not could, "two passes ran out of the hour"
+    done, _, _ = host._waited(_child(able + "print('read')"), 5, 30)
+    assert done is not None and done.stdout == "read\n" and done.stderr == "", "not passed on"
+    killed: list[list[str]] = []
+    monkeypatch.setattr(host, "image_id", lambda image=host.IMAGE: "sha256:x")
+    monkeypatch.setattr(host, "code_version", lambda: "abc")
+    monkeypatch.setattr(subprocess, "run", lambda argv, **_: killed.append(argv))
+    monkeypatch.setattr(host, "_waited", lambda argv, timeout, longer: (None, timeout, True))
+    said = host.run(["load", "a.json"], tmp_path).stdout
+    assert said == (
+        "verdict: NO ANSWER: it ran past the 600 s limit and was stopped, in one pass. Two "
+        "passes can read this assembly, and are given the hour, 3600 s: run it again with "
+        "--parts, which asks for them from the start\n"
+    )
+    monkeypatch.setattr(host, "_waited", lambda argv, timeout, longer: (None, timeout, False))
+    assert host.run(["load", "a.json"], tmp_path).stdout == (
+        "verdict: NO ANSWER: it ran past the 600 s limit and was stopped\n"
+    )
+
+
+def test_a_design_round_s_one_pass_stopped_names_parts_where_two_passes_could_read_it(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The harness's own wait, where the issue was met: the model read the timeout as the
+    bench's limit and waited for the hour. Now the reply it's shown names `--parts`, and the
+    line that said two passes could read it isn't in it."""
+    able = f"import time; print('a'); print({host.ABLE!r}, flush=True); "
+    box, _ = _box(monkeypatch, tmp_path, able + "time.sleep(3)", timeout=1)
+    stopped = box.bench(["load", "a.json"])
+    assert stopped.timed_out
+    assert stopped.output == "a\n\n" + host.past(1, True), stopped.output
+    assert "run it again with --parts" in stopped.output
+    box, _ = _box(monkeypatch, tmp_path, able + "print('read')", timeout=5)
+    done = box.bench(["load", "a.json"])
+    assert done.output == "a\nread\n", "the line is the harness's"
+    taken = f"print({host.TAKEN!r}, flush=True); "
+    box, _ = _box(monkeypatch, tmp_path, able + taken + "time.sleep(5)", timeout=1)
+    monkeypatch.setattr(host, "offered", lambda args: 2)
+    late = box.bench(["load", "a.json"])
+    assert late.timed_out and late.output.endswith(host.past(2, False)), "as on main"
+    box, _ = _box(monkeypatch, tmp_path, "import time; time.sleep(3)", timeout=1)
+    assert box.bench(["load", "a.json"]).output.endswith(host.past(1, False))
 
 
 def test_time_kept_for_a_glass_band_is_left_out_of_two_passes_and_its_read_says_so(
