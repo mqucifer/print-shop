@@ -21,14 +21,15 @@ A part pushed together across its layers isn't pulled apart, so only a pull coun
 
 **Each joint:** the force and the moment through the faces that meet, from the solve's own balance
 at each node there: what the first part's elements carry, less what's put on it from outside
-(`element_forces`). Every joint is solved as one piece, the faces tied all over, as a glued joint
-is and as a bolted one is while its bolts hold. So a bolted joint is judged by what its bolts then
-have to hold: the joint's pull shared between them, and its bending moment taken about the face's
-edge on the pushed side, each bolt in proportion to its distance from that edge, against the least
-of the bolt's proof load, the insert's pull-out where one is sourced, and the joint's own figure.
-An insert pulls out of printed plastic long before a steel bolt gives, so
-where a bolt has a pull to hold and neither its insert nor its joint has a figure, the answer is
-`UNREAD`, never `OK` on the bolt alone. A bonded joint that carries anything is `UNREAD` too
+(`element_forces`), each element's nodes taken in FreeCAD's own order and checked
+(mqucifer/print-shop#320). Every joint is solved as one piece, the faces tied all over, as a glued
+joint is and as a bolted one is while its bolts hold. So a bolted joint is judged by what its bolts
+then have to hold: the joint's pull shared between them, and its bending moment taken about the
+face's edge on the pushed side, each bolt in proportion to its distance from that edge, against the
+least of the bolt's proof load, the insert's pull-out where one is sourced, and the joint's own
+figure. An insert pulls out of printed plastic long before a steel bolt gives, so where a bolt has
+a pull to hold and neither its insert nor its joint has a figure, the answer is `UNREAD`, never
+`OK` on the bolt alone. A bonded joint that carries anything is `UNREAD` too
 (mqucifer/print-shop#170): glue is a second hold only, and no glue line has a figure here.
 
 **A through joint** (mqucifer/print-shop#168, `load_through.py`) is a bolt right through both
@@ -136,6 +137,8 @@ NOTHING = 1e-3
 ON_FACE = 0.01
 #: How a mesh whose elements' sides are straight is said where a step names it.
 STRAIGHT = ", its elements straight-sided"
+#: The most elements whose parts are looked for, where their nodes' order can't be read.
+WIRING_NAMED = 50
 #: The held faces' reaction is the weight within this share, or nothing is said: CalculiX's own
 #: sum of the forces it solved for.
 REACTION = 0.01
@@ -218,6 +221,44 @@ def element_forces(
         weight = np.abs(np.linalg.det(mapped)) / 24
         forces += weight[:, None, None] * np.einsum("nij,naj->nai", stress, in_space)
     return forces
+
+
+def misordered(wired: np.ndarray, points: np.ndarray) -> np.ndarray:
+    """Which elements' nodes aren't in `MIDS`' order (mqucifer/print-shop#320), as a flag for
+    each row of `wired`, each element's ten nodes as rows of `points`. Each element's nodes are
+    in order where its ten are distinct; each of its mid-side nodes is its side's, as every
+    element with that side has it, and of no other side or corner; and each lies on its own
+    side's curve: in the middle half of the side along its chord, as a second-order side has
+    to be not to fold back on itself, and no further off the chord than half its length, as a
+    side bent round no more than a half circle is. A node given to another side lies on none
+    of these."""
+    if wired.ndim != 2 or wired.shape[1] != 4 + len(MIDS):
+        return np.ones(len(wired), dtype=bool)
+    ends = np.array(MIDS)
+    corners, mids = wired[:, :4], wired[:, 4:]
+    ordered = np.sort(wired, axis=1)
+    wrong = (ordered[:, 1:] == ordered[:, :-1]).any(axis=1)
+    # Each side by its two corners, and the one mid-side node every element gives it.
+    first, second = corners[:, ends[:, 0]], corners[:, ends[:, 1]]
+    sides = np.stack([np.minimum(first, second), np.maximum(first, second)], axis=2)
+    _, side = np.unique(sides.reshape(-1, 2), axis=0, return_inverse=True)
+    side = side.reshape(mids.shape)
+    pairs = np.unique(np.stack([side.ravel(), mids.ravel()], axis=1), axis=0)
+    shared_side = np.bincount(pairs[:, 0], minlength=side.max() + 1) > 1
+    nodes, count = np.unique(pairs[:, 1], return_counts=True)
+    two_sides = nodes[count > 1]
+    wrong |= shared_side[side].any(axis=1)
+    wrong |= np.isin(mids, two_sides).any(axis=1)
+    wrong |= np.isin(mids, corners).any(axis=1)
+    # Each on its own side's curve.
+    start, end = points[first], points[second]
+    chord = end - start
+    length = np.linalg.norm(chord, axis=2)
+    off = points[mids] - (start + end) / 2
+    along = np.einsum("nsk,nsk->ns", off, chord) / np.where(length > 0, length, 1.0)
+    aside = np.sqrt(np.maximum(np.einsum("nsk,nsk->ns", off, off) - along**2, 0.0))
+    wrong |= ~((np.abs(along) < length / 4) & (aside <= length / 2)).all(axis=1)
+    return np.asarray(wrong, dtype=bool)
 
 
 def beyond(
@@ -339,6 +380,8 @@ class _Model:
         #: Whether its second-order elements are straight-sided (mqucifer/print-shop#295).
         self.straight = straight
         self._surface_nodes: list[tuple[int, ...]] | None = None
+        #: Each element's nodes as rows, once read and checked (`_wired`).
+        self._wiring: np.ndarray | None = None
         #: Whether, where CalculiX's direct solver meets the container's memory, it's solved
         #: again by its iterative one and corrected (`_iterated`): in two passes only
         #: (mqucifer/print-shop#301). None, or what the direct solver met, once it has.
@@ -681,20 +724,54 @@ class _Model:
             )
 
     def _wired(self) -> np.ndarray:
-        """Each element's nodes as rows, its corners first and then `MIDS`' mid-side nodes.
-        FreeCAD gives them in that order already (SMESH's for a ten-node tetrahedron). The one
-        pass finds each mid-side node by where it lies, as it always has, which on a curved
-        element can take one side's for another's; two passes (mqucifer/print-shop#301) take
-        FreeCAD's order, as correcting an iterative solve needs each element's own stiffness."""
-        ids = self.fem.Volumes
-        wired = np.array([[self.row[n] for n in self.fem.getElementNodes(e)] for e in ids])
-        if self.two_pass:
-            return wired
-        places = self.points[wired]
-        between = np.stack([(places[:, i] + places[:, j]) / 2 for i, j in MIDS], axis=1)
-        apart = np.linalg.norm(between[:, :, None, :] - places[:, None, 4:, :], axis=3)
-        order = apart.argmin(axis=2)
-        return np.concatenate([wired[:, :4], np.take_along_axis(wired[:, 4:], order, axis=1)], 1)
+        """Each element's nodes as rows, its corners first and then `MIDS`' mid-side nodes,
+        in FreeCAD's own order (SMESH's for a ten-node tetrahedron), in one pass as in two
+        (mqucifer/print-shop#320). The one pass found each mid-side node by where it lies, and
+        on a small curved element took one side's for another's, so that element's forces went
+        twice to one node and never to its sixth. The order is checked (`misordered`): where
+        it can't be read, nothing is read from it."""
+        if self._wiring is not None:
+            return self._wiring
+        given = [self.fem.getElementNodes(e) for e in self.fem.Volumes]
+        if any(len(nodes) != 4 + len(MIDS) for nodes in given):
+            short = [k for k, nodes in enumerate(given) if len(nodes) != 4 + len(MIDS)]
+            raise NoAnswer(
+                f"the mesh's elements can't be read in their order: {len(short)} element(s) "
+                f"of {self._parts_of([given[k][:4] for k in short])} haven't ten nodes, at a "
+                f"mesh of at most {self.size:g} mm{STRAIGHT if self.straight else ''}, so no "
+                "force on a joint is read from them, and nothing is read"
+            )
+        wired = np.array([[self.row[n] for n in nodes] for nodes in given])
+        wrong = np.flatnonzero(misordered(wired, self.points))
+        if wrong.size:
+            raise NoAnswer(
+                f"the mesh's elements can't be read in FreeCAD's order: {wrong.size} "
+                f"element(s) of {self._parts_of([given[k][:4] for k in wrong])} haven't six "
+                "mid-side nodes of their own, each on its own side, at a mesh of at most "
+                f"{self.size:g} mm{STRAIGHT if self.straight else ''}, so no force on a joint is "
+                "read from them, and nothing is read"
+            )
+        self._wiring = wired
+        return wired
+
+    def _parts_of(self, corners: list[Any]) -> str:
+        """The parts some elements are in, named, from each one's corners, by node number."""
+        import FreeCAD as App
+
+        names = [p.name for p in self.assembly.parts]
+        found: list[str] = []
+        for nodes in corners[:WIRING_NAMED]:
+            middle = App.Vector(*np.mean([self.nodes[n] for n in nodes[:4]], axis=0))
+            part = next(
+                (n for n, s in zip(names, self.solids, strict=True)
+                 if s.isInside(middle, 1e-6, False)),
+                None,
+            )  # fmt: skip
+            if part is not None and part not in found:
+                found.append(part)
+        if not found:
+            return "the joined parts"
+        return ("the part " if len(found) == 1 else "the parts ") + ", ".join(found)
 
     def _unbalanced(self) -> np.ndarray:
         """What's left unbalanced at each node, as rows: the load put on it less what the
