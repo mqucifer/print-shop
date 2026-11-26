@@ -23,8 +23,11 @@ from print_shop.bench.load import (
     beyond,
     bolt_pulls,
     element_forces,
+    element_stiffness,
+    figures,
     lies_on,
     memory_met,
+    misordered,
     oom_kills,
     step,
 )
@@ -1317,6 +1320,118 @@ def test_an_element_s_forces_balance_and_do_the_work_its_strain_stores() -> None
     turn = np.array([[0.0, -1e-3, 0], [1e-3, 0, 0], [0, 0, 0]])
     still = element_forces(places, places @ turn.T + 0.5, 1500.0, 0.38)[0]
     assert still == pytest.approx(np.zeros((10, 3)), abs=1e-9)
+
+
+def wired_mesh(corners: np.ndarray, elements: list[list[int]], bent: dict[tuple[int, int], Any]
+               ) -> tuple[np.ndarray, np.ndarray]:  # fmt: skip
+    """Second-order tetrahedra on `corners`, as FreeCAD gives them: each element's four corners
+    and then its mid-side nodes in `MIDS`' order, one node to each side, shared by every element
+    with that side, halfway along it or moved by `bent[side]`. The nodes, and the elements as
+    rows of them."""
+    points = [*corners]
+    mid: dict[tuple[int, int], int] = {}
+    rows = []
+    for element in elements:
+        row = list(element)
+        for i, j in MIDS:
+            side = (min(element[i], element[j]), max(element[i], element[j]))
+            if side not in mid:
+                mid[side] = len(points)
+                points.append((corners[side[0]] + corners[side[1]]) / 2 + bent.get(side, 0.0))
+            row.append(mid[side])
+        rows.append(row)
+    return np.array(points), np.array(rows)
+
+
+def guessed(wired: np.ndarray, points: np.ndarray) -> np.ndarray:
+    """The one pass's wiring before mqucifer/print-shop#320: each side the mid-side node
+    nearest its straight midpoint."""
+    places = points[wired]
+    between = np.stack([(places[:, i] + places[:, j]) / 2 for i, j in MIDS], axis=1)
+    apart = np.linalg.norm(between[:, :, None, :] - places[:, None, 4:, :], axis=3)
+    pick = apart.argmin(axis=2)
+    return np.concatenate([wired[:, :4], np.take_along_axis(wired[:, 4:], pick, axis=1)], 1)
+
+
+def test_each_element_s_mid_side_nodes_are_freecad_s_and_checked_on_their_own_sides() -> None:
+    """mqucifer/print-shop#320: the one pass took each mid-side node by where it lies, the one
+    nearest its side's straight midpoint. On a small curved element, as on a bolt's bore, that
+    gave one side's node to another: a sliver whose two crossing sides' midpoints are 0.1 mm
+    apart, one of them bent 0.12 mm off its chord toward the other, had its other node wired
+    twice and its own never. FreeCAD's order is taken, and checked: every node distinct, each
+    mid-side node its side's in every element with that side, and on its own side's curve. The
+    guess's wiring fails that; FreeCAD's passes, and so does a side bent round a quarter circle.
+    One node swapped for another, or moved past the middle half of its side, or further off it
+    than half its length, or a corner given as a mid-side node, fails."""
+    h = 0.1
+    sliver = np.array([[0.0, 0, 0], [1, 1, 0], [1, 0, h], [0, 1, h], [1, 1, 1]])
+    points, wired = wired_mesh(sliver, [[0, 1, 2, 3], [1, 2, 3, 4]], {(2, 3): [0, 0, -0.12]})
+    assert not misordered(wired, points).any()
+    guess = guessed(wired, points)
+    assert len(set(guess[0].tolist())) == 9, "a node wired twice, and the sixth never"
+    assert misordered(guess, points)[0]
+    # A side of a bore 2.75 mm round, a quarter circle of it: its node 0.81 mm off its chord.
+    r = 2.75
+    quarter = np.array([[r, 0, 0], [0, r, 0], [0, 0, 3.0], [r, r, 3]])
+    sag = r * (1 - math.cos(math.pi / 4))
+    out = np.array([1.0, 1, 0]) / math.sqrt(2)
+    points, wired = wired_mesh(quarter, [[0, 1, 2, 3]], {(0, 1): -sag * out})
+    assert not misordered(wired, points).any()
+
+    def wrong(change: Any) -> bool:
+        points, wired = wired_mesh(sliver, [[0, 1, 2, 3], [1, 2, 3, 4]], {})
+        points, wired = points.copy(), wired.copy()
+        change(points, wired)
+        return bool(misordered(wired, points).any())
+
+    assert not wrong(lambda p, w: None)
+
+    def swapped(p: np.ndarray, w: np.ndarray) -> None:
+        w[1, [5, 6]] = w[1, [6, 5]]
+
+    def along(p: np.ndarray, w: np.ndarray) -> None:
+        p[w[0, 4]] += 0.26 * (p[w[0, 1]] - p[w[0, 0]])
+
+    def aside(p: np.ndarray, w: np.ndarray) -> None:
+        p[w[0, 4]] += [0, 0, 0.75]
+
+    def a_corner(p: np.ndarray, w: np.ndarray) -> None:
+        w[1, 9] = 0
+
+    for change in (swapped, along, aside, a_corner):
+        assert wrong(change), change.__name__
+    assert misordered(wired[:, :9], points).all(), "nine nodes aren't an element's ten"
+
+
+def test_an_element_s_stiffness_times_its_movement_is_its_forces() -> None:
+    """mqucifer/print-shop#320: the one pass's balance holds what's left at each node to what
+    the solve's own figures can leave there, through each element's stiffness. On 50 made-up
+    second-order tetrahedra, long, flat and with their sides bent, the stiffness times any
+    movement is the element's forces (`element_forces`), and it's symmetric."""
+    rng = np.random.default_rng(320)
+    for _ in range(50):
+        corners = rng.normal(size=(4, 3)) * [3.0, 1.0, 0.3]
+        mids = np.array([(corners[i] + corners[j]) / 2 for i, j in MIDS])
+        places = np.concatenate([corners, mids + rng.normal(size=(6, 3)) * 0.02])[None]
+        moved = rng.normal(size=(1, 10, 3))
+        stiffness = element_stiffness(places, 1500.0, 0.38)
+        forces = np.einsum("naibk,nbk->nai", stiffness, moved)
+        assert forces == pytest.approx(element_forces(places, moved, 1500.0, 0.38), rel=1e-9)
+        flat = stiffness.reshape(30, 30)
+        assert flat == pytest.approx(flat.T, rel=1e-9, abs=1e-9 * float(np.abs(flat).max()))
+
+
+def test_a_movement_read_back_is_within_half_a_unit_in_its_last_figure() -> None:
+    """mqucifer/print-shop#320: CalculiX prints each movement to seven figures, E13.6, and its
+    .frd has six, E12.5: one read back is within half a unit in its last figure of what was
+    solved, and naught is naught."""
+    solved = np.array([1.23456749e-3, -9.99999949e-1, 0.0, 4.4e-12])
+    printed = np.array([float(f"{v:.6E}") for v in solved])
+    apart = figures(printed)
+    assert np.all(np.abs(printed - solved) <= apart)
+    assert apart == pytest.approx([5e-10, 5e-8, 0.0, 5e-19], rel=1e-9, abs=0)
+    written = np.array([float(f"{v:.5E}") for v in solved])
+    assert np.all(np.abs(written - solved) <= figures(written, 6))
 
 
 # Statics across a joint

@@ -873,6 +873,33 @@ def stool() -> None:
     assembly(out / "stool-one-out.json", parts, fewer, fixed)
 
 
+#: The sleeved core (mqucifer/print-shop#320): a core `CORE_R` round and `CORE_H` tall in a sleeve
+#: `SLEEVE_T` thick, in a ring `RING_T` thick.
+CORE_R, CORE_H, SLEEVE_T, RING_T = 10.0, 8.0, 0.5, 5.0
+
+
+def sleeved() -> None:
+    """A core in a thin sleeve in a ring, each joint bonded all round, the ring held at its
+    foot and the core pushed down (mqucifer/print-shop#320). Meshed curved at 5 mm, the sleeve
+    is one element thick, each a sliver between its two curved faces, with every node on a
+    joint's faces: there the guess by position took one side's mid-side node for another's."""
+    out = Path("order")
+    up = App.Vector(0, 0, 1)
+
+    def round_(radius: float) -> Any:
+        return Part.makeCylinder(radius, CORE_H, App.Vector(0, 0, 0), up)
+
+    outer = CORE_R + SLEEVE_T
+    save(round_(CORE_R), out / "core.step")
+    save(round_(outer).cut(round_(CORE_R)), out / "sleeve.step")
+    save(round_(outer + RING_T).cut(round_(outer)), out / "ring.step")
+    parts = [{"name": n, "file": f"{n}.step", "layers": "z"} for n in ("core", "sleeve", "ring")]
+    joints = [{"between": ["core", "sleeve"], "kind": "bonded"},
+              {"between": ["sleeve", "ring"], "kind": "bonded"}]  # fmt: skip
+    held = [{"plane": "z=0", "how": "fixed", "part": "ring"}]
+    assembly(out / "sleeved.json", parts, joints, held)
+
+
 #: The shelf bracket and the ribbed slices (mqucifer/print-shop#319), in mm and degrees.
 SHELF_T, SHELF_W, SHELF_H, SHELF_L, SHELF_WALL, SHELF_ROUND = 5.0, 10.0, 25.0, 30.0, 10.0, 3.0
 RIB_IN, RIB_OUT, RIB_CAP, RIB_TALL, RIB_LOW, RIB_HIGH = 50.0, 56.0, 4.0, 80.0, 30.0, 40.0
@@ -1009,6 +1036,7 @@ def main() -> None:
     turns()
     large()
     stool()
+    sleeved()
     out = Path("snap")
     seated = WALL_Y + ROOM
     save(base(seated), out / "box.step")
