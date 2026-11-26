@@ -509,8 +509,9 @@ def _alone_read(model: _Alone, doc: Any) -> dict[str, Any]:
         for node, push in model.held_force.items():
             held_turns += np.cross(model.nodes[node] - middle, push)
         reach = float(np.linalg.norm(np.ptp(model.points, axis=0)))
+        mesh = f"a mesh of at most {model.size:g} mm" + (load.STRAIGHT if model.straight else "")
         return {
-            "part": model.parts_read()[model.part.name],
+            "part": model.parts_read(f"{mesh}, on its own in pass 2")[model.part.name],
             "mesh_mm": model.size,
             "nodes": model.fem.NodeCount,
             "elements": model.fem.VolumeCount,

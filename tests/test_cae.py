@@ -1562,6 +1562,149 @@ def test_the_snap_on_check_and_bend_read_a_latch_on_a_dovetail(cae: Any) -> None
     assert bent.numbers["worst"] == "near"
 
 
+# Parts placed by their turns (mqucifer/print-shop#319): `make_fixtures.turns`.
+
+#: The shelf bracket's arm, pushed down near its end, on a mesh four elements across its 5 mm;
+#: and the rib's cap, pushed along x at its far end, 60 mm out at 50°, half way up its 10.
+SHELF_AT = ("--weight", "1", "--at", "28,5,25", "--mesh", "1")
+RIB_AT = ("--weight", "0.5", "--at", "38.5673,45.9627,35", "--toward", "+x")
+#: The peg in its hole, as `make_fixtures.turns` draws it.
+PEG_R, PEG_DEEP = 3.0, 10.0
+#: main's own run-to-run spread in `load`'s figures, relative (mqucifer/print-shop#302).
+RUN_TO_RUN = 2e-4
+
+
+def forced(cae: Any, mode: str, *args: str) -> Answer:
+    """`load` with one step forced, by `cae_cases/load_forced.py`."""
+    shutil.copy(CASES / "load_forced.py", cae.work / "load_forced.py")
+    done = host.run(["load_forced.py", mode, *args], cae.work, python=True, image=host.CAE_IMAGE)
+    found = re.search(r"saved: (\S+)\.txt and \.json", done.stdout)
+    assert found, done.stdout + done.stderr
+    record = json.loads((cae.work / f"{found.group(1)}.json").read_text())
+    return Answer(done.returncode, done.stdout, record)
+
+
+def reads_as(turned: Answer, placed: Answer) -> None:
+    """Every figure judged reads turned as it does in place, within the bench's second check:
+    each reading is worth what its own coarser mesh moves it, so the two are the same where
+    they're no further apart than that, both added, and main's own run-to-run spread. A turn
+    meshes the parts afresh, as another mesh would, and one coarser mesh is a sample of what
+    that moves a figure, not a bound: so within `SAME` too, the tolerance here for one
+    geometry meshed two ways. And the layers are the same."""
+    assert turned.verdict == placed.verdict, turned.text
+
+    def near(pair: tuple[Any, Any], coarse: tuple[Any, Any], what: str) -> None:
+        (found, against), (found_c, against_c) = (
+            (np.asarray(a, dtype=float), np.asarray(b, dtype=float)) for a, b in (pair, coarse)
+        )
+        spread = float(np.linalg.norm(against - against_c) + np.linalg.norm(found - found_c))
+        spread = max(spread, SAME * float(np.linalg.norm(against)))
+        spread += RUN_TO_RUN * float(np.linalg.norm(against))
+        assert np.linalg.norm(found - against) <= spread, (what, pair, coarse)
+
+    for name, part in placed.numbers["parts"].items():
+        other = turned.numbers["parts"][name]
+        assert other["layers"] == pytest.approx(part["layers"], abs=1e-9), name
+        for key in ("across_layers_pct", "stretch_pct"):
+            near((other[key], part[key]), (other[f"coarse_{key}"], part[f"coarse_{key}"]),
+                 f"{name}.{key}")  # fmt: skip
+    for one, other in zip(placed.numbers["loads"], turned.numbers["loads"], strict=True):
+        near((other["moves_mm"], one["moves_mm"]),
+             (other["coarse_moves_mm"], one["coarse_moves_mm"]), "moves_mm")  # fmt: skip
+    for name, joint in placed.numbers["joints"].items():
+        other = turned.numbers["joints"][name]
+        for key in ("force_n", "moment_nmm"):
+            coarse = f"coarse_{key}"
+            near((other[key], joint[key]), (other[coarse], joint[coarse]), f"{name}.{key}")
+
+
+def test_a_bracket_drawn_on_its_side_and_placed_by_its_turns_reads_as_drawn_in_place(
+    cae: Any,
+) -> None:
+    """mqucifer/print-shop#319: a design run draws each part in its print pose and places it by
+    `turn`. A shelf bracket printed on its side, drawn so and placed by a turn about x, about y,
+    about z, and by two turns, x then z, reads every figure as the same bracket drawn in place:
+    its layers along its width, and each figure within the second check."""
+    placed = cae("load", "turns/shelf.json", *SHELF_AT)
+    assert placed.verdict == "OK", placed.text
+    assert placed.numbers["parts"]["bracket"]["layers"] == pytest.approx([0, 1, 0])
+    for name in ("x", "y", "z", "xz"):
+        turned = cae("load", f"turns/shelf-{name}.json", *SHELF_AT)
+        reads_as(turned, placed)
+        assert turned.numbers["joints"]["wall+bracket"]["bolt_pull_n"] == pytest.approx(
+            placed.numbers["joints"]["wall+bracket"]["bolt_pull_n"], rel=0.02
+        )
+
+
+def test_a_rib_touching_curved_slices_reads_turned_on_a_curved_or_a_straight_mesh(
+    cae: Any,
+) -> None:
+    """mqucifer/print-shop#319: a lamp's rib, drawn in its print pose and placed by a turn about
+    x, read `NO ANSWER: ValueError: attempt to get argmax of an empty sequence`. Where gmsh
+    can't curve the mesh, which a turn can bring about, it's made with its elements' sides
+    straight, and a curved face where two parts meet then had no triangle FreeCAD found: the
+    rib and the slices it touches were taken for one part, and the part left with no element
+    stopped the reading. A rib touching two curved slices, its cap round their outsides and its
+    fin in the seam, reads turned about x, and about x then z, as it does in place, on the
+    mesh as it comes and on one forced straight, as main's code didn't."""
+    for placed_file, turned_file in (("ribbed", "ribbed-x"), ("ribbed-z30", "ribbed-xz30")):
+        placed = cae("load", f"turns/{placed_file}.json", *RIB_AT)
+        assert placed.verdict == "OK", placed.text
+        assert "straight sides" not in placed.text
+        reads_as(cae("load", f"turns/{turned_file}.json", *RIB_AT), placed)
+        straight = forced(cae, "straight", "load", f"turns/{placed_file}.json", *RIB_AT)
+        assert straight.verdict == "OK", straight.text
+        assert "its elements second-order with straight sides" in straight.text
+        assert set(straight.numbers["parts"]) == {"slice1", "slice2", "rib"}
+        assert all(p["nodes"] > 0 for p in straight.numbers["parts"].values())
+        reads_as(forced(cae, "straight", "load", f"turns/{turned_file}.json", *RIB_AT), straight)
+
+
+def test_a_peg_in_a_hole_on_a_straight_mesh_reads_each_face_it_meets_once(cae: Any) -> None:
+    """mqucifer/print-shop#319: on a straight-sided mesh a triangle is on a face where its
+    corners are and it lies on it, so a triangle of the hole's floor with its corners all on
+    the round edge it shares with the wall is never the wall's too. A peg 6 across standing in a
+    blind hole 10 deep, touching its wall and floor, pressed down, on a coarse mesh: the faces
+    they meet by are read over no more than their own area, the chords' less, as on the curved
+    mesh, and the joint carries the weight."""
+    true = math.pi * PEG_R**2 + 2 * math.pi * PEG_R * PEG_DEEP
+    args = ("load", "turns/peg.json", "--weight", "1", "--at", "10,10,30", "--mesh", "6")
+    curved = cae(*args)
+    straight = forced(cae, "straight", *args)
+    for answer in (curved, straight):
+        assert answer.verdict == "OK", answer.text
+        joint = answer.numbers["joints"]["peg+socket"]
+        assert 0.95 * true < joint["area_mm2"] <= true, joint["area_mm2"]
+        assert joint["force_n"] == pytest.approx([0, 0, G], abs=0.01)
+    assert "its elements second-order with straight sides" in straight.text
+    assert straight.numbers["joints"]["peg+socket"]["area_mm2"] == pytest.approx(
+        curved.numbers["joints"]["peg+socket"]["area_mm2"], rel=0.01
+    )
+
+
+def test_what_load_cant_read_is_no_answer_naming_the_part_and_the_step(cae: Any) -> None:
+    """mqucifer/print-shop#319: nothing `load` can't read reaches the reply as an error's last
+    line alone. With the mesh's triangles where the parts meet not found, the part left with no
+    element of its own is named, and why; and the error the rib met is said with the part and
+    the step it stopped at."""
+    unfound = forced(cae, "unfound", "load", "turns/ribbed-x.json", *RIB_AT)
+    assert unfound.verdict == "NO ANSWER" and unfound.code == 2, unfound.text
+    assert re.search(
+        r"the mesh gives (rib|slice1|slice2)(, (rib|slice1|slice2))* no element of its own, at a "
+        r"mesh of at most [\d.]+ mm: the mesh's triangles on the faces where it meets .+ weren't "
+        "found, so it isn't parted from them, and nothing of it is read",
+        unfound.record["why"],
+    ), unfound.record["why"]
+    assert "Error" not in unfound.record["why"]
+    raised = forced(cae, "raises", "load", "turns/ribbed-x.json", *RIB_AT)
+    assert raised.verdict == "NO ANSWER" and raised.code == 2, raised.text
+    why = raised.record["why"]
+    assert why.startswith("load stopped reading the part rib, at a mesh of at most"), why
+    assert why.endswith("ValueError: attempt to get argmax of an empty sequence"), why
+    for answer in (unfound, raised):
+        assert "Traceback" not in answer.text
+
+
 # A whole furniture assembly (mqucifer/print-shop#295): a turned latch, a large assembly and a
 # glass frame. Marked `assembly`, so CI runs them in a job of their own beside the rest of `cae`:
 # together they take about 23 minutes of solves, and the cae job has 30.

@@ -50,6 +50,14 @@ the tail, a slip fit's play. A slender tab hangs from the upper into a pocket in
 top, its hook in a window in the pocket's wall 0.2 mm under its ledge: near the +x edge, with
 seat beside it all round, or at the middle with the window's sides drawn touching the hook's.
 And the socket 1.5 mm clear, more play than a tilt closes, and 2.5 mm clear, more than is read.
+
+`turns/` (mqucifer/print-shop#319): a shelf bracket, an L 5 mm thick and 10 wide, its upright
+25 tall bolted to a wall 10 thick at x 0 and its arm 30 long along x at the top, its inside
+corner rounded 3 mm, printed on its side; and two wall slices of a ring, 50 to 56 mm from its
+axis and 80 tall, with a 2° seam between them, and a rib across the seam: a cap 4 thick curved
+round the slices' outsides, and a fin under it that fills the seam, touching both. Each is drawn
+in place, and again in its print pose and placed by its turns: about x, y or z, and two combined.
+And a peg 6 across standing in a blind hole 10 deep in a cube of 20, touching its wall and floor.
 """
 
 from __future__ import annotations
@@ -865,6 +873,130 @@ def stool() -> None:
     assembly(out / "stool-one-out.json", parts, fewer, fixed)
 
 
+#: The shelf bracket and the ribbed slices (mqucifer/print-shop#319), in mm and degrees.
+SHELF_T, SHELF_W, SHELF_H, SHELF_L, SHELF_WALL, SHELF_ROUND = 5.0, 10.0, 25.0, 30.0, 10.0, 3.0
+RIB_IN, RIB_OUT, RIB_CAP, RIB_TALL, RIB_LOW, RIB_HIGH = 50.0, 56.0, 4.0, 80.0, 30.0, 40.0
+#: Each slice's angles, the seam's between them, and the cap's.
+RIB_SLICES, RIB_SEAM, RIB_SPAN = ((0.0, 29.0), (31.0, 60.0)), (29.0, 31.0), (10.0, 50.0)
+#: The peg in its hole: the socket a cube `PEG_SIDE` with a hole `PEG_DEEP` deep, the peg as
+#: wide and `PEG_LONG` long, standing on the hole's floor.
+PEG_R, PEG_DEEP, PEG_SIDE, PEG_LONG = 3.0, 10.0, 20.0, 20.0
+#: Each way the print pose is placed: its name in the files and its turns, in order.
+PLACINGS = {
+    "x": [["x", -90]], "y": [["y", 90]], "z": [["z", 90]], "xz": [["x", -90], ["z", 90]],
+}  # fmt: skip
+
+
+def _turned(turns: list[list[Any]]) -> Any:
+    """Turns about the origin's axes, in order, as one rotation."""
+    total = App.Matrix()
+    for axis, degrees in turns:
+        one = App.Matrix()
+        {"x": one.rotateX, "y": one.rotateY, "z": one.rotateZ}[axis](math.radians(degrees))
+        total = one.multiply(total)
+    return total
+
+
+def print_pose(shape: Part.Shape, turns: list[list[Any]]) -> Part.Shape:
+    """A part drawn in place, drawn again as it lies on the bed: turned back from where `turns`
+    take it, in its geometry, with no placement left, as a design run draws it."""
+    drawn = shape.copy()
+    drawn.transformShape(_turned(turns).inverse(), True)
+    assert drawn.Placement.isIdentity()
+    return drawn
+
+
+def layers_drawn(layers: str, turns: list[list[Any]]) -> str:
+    """The axis of the print pose's own file that its layers, `layers` in place, are along."""
+    way = _turned(turns).inverse().multVec(App.Vector(*(float(a == layers) for a in "xyz")))
+    return "xyz"[max(range(3), key=lambda k: abs(way[k]))]
+
+
+def ring_slice(inner: float, outer: float, angles: tuple[float, float], low: float,
+               high: float) -> Part.Shape:  # fmt: skip
+    """A ring's slice round z, between two angles in degrees, drawn where it is."""
+    way, at, wide = App.Vector(0, 0, 1), App.Vector(0, 0, low), angles[1] - angles[0]
+    made = Part.makeCylinder(outer, high - low, at, way, wide)
+    made = made.cut(Part.makeCylinder(inner, high - low, at, way, wide))
+    made.transformShape(_turned([["z", angles[0]]]), True)
+    assert made.Placement.isIdentity()
+    return made
+
+
+def turns() -> None:
+    """Each part drawn in place, and in its print pose placed by its turns."""
+    out = Path("turns")
+    upright = box((0, 0, 0), (SHELF_T, SHELF_W, SHELF_H))
+    arm = box((0, 0, SHELF_H - SHELF_T), (SHELF_L, SHELF_W, SHELF_H))
+    bracket = upright.fuse(arm).removeSplitter()
+    # Its inside corner rounded, so no figure is a sharp corner's, which no mesh reads alike.
+    inside = [e for e in bracket.Edges
+              if abs(e.BoundBox.XMin - SHELF_T) < 1e-6 and abs(e.BoundBox.XMax - SHELF_T) < 1e-6
+              and abs(e.BoundBox.ZMin - (SHELF_H - SHELF_T)) < 1e-6 and e.BoundBox.ZLength < 1e-6]
+    assert len(inside) == 1, inside
+    bracket = bracket.makeFillet(SHELF_ROUND, inside)
+    save(box((-SHELF_WALL, 0, 0), (0, SHELF_W, SHELF_H)), out / "wall.step")
+    save(bracket, out / "bracket.step")
+    middle = [[0, SHELF_W / 2, SHELF_H / 2]]
+    shelf_joint: Rows = [{"between": ["wall", "bracket"], **BOLT, **HOLDS, "at": middle}]
+    held = [{"plane": f"x={-SHELF_WALL:g}", "how": "fixed"}]
+
+    def shelf(bracket_row: dict[str, Any]) -> Rows:
+        # Printed on its side: the L flat on the bed, its layers along its width.
+        return [{"name": "wall", "file": "wall.step", "layers": "z"},
+                {"name": "bracket", **bracket_row}]  # fmt: skip
+
+    assembly(out / "shelf.json", shelf({"file": "bracket.step", "layers": "y"}), shelf_joint, held)
+    for name, placing in PLACINGS.items():
+        save(print_pose(bracket, placing), out / f"bracket-{name}.step")
+        row = {"file": f"bracket-{name}.step", "turn": placing,
+               "layers": layers_drawn("y", placing)}  # fmt: skip
+        assembly(out / f"shelf-{name}.json", shelf(row), shelf_joint, held)
+    # The ribbed slices: the rib touches each slice on its cap's curved inside and its fin's
+    # flat side, and nothing else holds it.
+    for k, angles in enumerate(RIB_SLICES, 1):
+        save(ring_slice(RIB_IN, RIB_OUT, angles, 0, RIB_TALL), out / f"slice{k}.step")
+    cap = ring_slice(RIB_OUT, RIB_OUT + RIB_CAP, RIB_SPAN, RIB_LOW, RIB_HIGH)
+    fin = ring_slice(RIB_IN, RIB_OUT, RIB_SEAM, RIB_LOW, RIB_HIGH)
+    rib = cap.fuse(fin).removeSplitter()
+    touching: Rows = [{"between": ["rib", f"slice{k}"], "kind": "touching"} for k in (1, 2)]
+    floor = [{"plane": "z=0", "how": "fixed"}]
+
+    def ribbed(rib_row: dict[str, Any]) -> Rows:
+        slices: Rows = [{"name": f"slice{k}", "file": f"slice{k}.step", "layers": "z"}
+                        for k in (1, 2)]  # fmt: skip
+        return [*slices, {"name": "rib", **rib_row}]
+
+    # In place, printed with its cap on the bed: its layers along y once placed.
+    save(rib, out / "rib.step")
+    assembly(out / "ribbed.json", ribbed({"file": "rib.step", "layers": "y"}), touching, floor)
+    on_side = PLACINGS["x"]
+    save(print_pose(rib, on_side), out / "rib-x.step")
+    row = {"file": "rib-x.step", "turn": on_side, "layers": layers_drawn("y", on_side)}
+    assembly(out / "ribbed-x.json", ribbed(row), touching, floor)
+    # Turned 30° about z as well, as a lamp's second rib is: in place but for that turn, and in
+    # its print pose placed by both.
+    round_z = [["z", 30.0]]
+    save(print_pose(rib, round_z), out / "rib-z30.step")
+    row = {"file": "rib-z30.step", "turn": round_z, "layers": "y"}
+    assembly(out / "ribbed-z30.json", ribbed(row), touching, floor)
+    both = [*on_side, *round_z]
+    save(print_pose(rib, both), out / "rib-xz30.step")
+    row = {"file": "rib-xz30.step", "turn": both, "layers": layers_drawn("y", on_side)}
+    assembly(out / "ribbed-xz30.json", ribbed(row), touching, floor)
+    # A peg in a blind hole, touching its wall and its floor, which meet along a round edge: on
+    # a coarse straight-sided mesh the floor's triangles have all their corners on that edge.
+    hole = Part.makeCylinder(PEG_R, PEG_DEEP, App.Vector(PEG_SIDE / 2, PEG_SIDE / 2,
+                                                         PEG_SIDE - PEG_DEEP))  # fmt: skip
+    save(box((0, 0, 0), (PEG_SIDE, PEG_SIDE, PEG_SIDE)).cut(hole), out / "socket.step")
+    peg = Part.makeCylinder(PEG_R, PEG_LONG, App.Vector(PEG_SIDE / 2, PEG_SIDE / 2,
+                                                        PEG_SIDE - PEG_DEEP))  # fmt: skip
+    save(peg, out / "peg.step")
+    pegged: Rows = [{"name": "socket", "file": "socket.step", "layers": "z"},
+                    {"name": "peg", "file": "peg.step", "layers": "z"}]  # fmt: skip
+    assembly(out / "peg.json", pegged, [{"between": ["peg", "socket"], "kind": "touching"}], floor)
+
+
 def main() -> None:
     loads()
     throughs()
@@ -874,6 +1006,7 @@ def main() -> None:
     dovetails()
     plays()
     turned()
+    turns()
     large()
     stool()
     out = Path("snap")
