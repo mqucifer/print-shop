@@ -310,7 +310,7 @@ def past(limit: int, could: bool) -> str:
     said = f"verdict: NO ANSWER: it ran past the {limit} s limit and was stopped"
     if could:
         said += (
-            ", in one pass. Two passes can read this assembly, and are given the hour, "
+            ", in one pass. Two passes may read this assembly, and are given the hour, "
             f"{TWO_PASSES} s: run it again with --parts, which asks for them from the start"
         )
     return said + "\n"
@@ -324,9 +324,10 @@ def _waited(
     argv: list[str], timeout: int, longer: int | None
 ) -> tuple[subprocess.CompletedProcess[str] | None, int, bool]:
     """Run `argv` to its end, or None where it ran past its limit; the limit it ran under:
-    `timeout`, or `longer` from when the command's stderr says it took it up (`TAKEN`); and
-    whether it said two passes could read it (`ABLE`) and didn't take `longer` up. Those lines
-    are the host's, and aren't passed on."""
+    `timeout`, or `longer` from when the command's stderr says it took it up (`TAKEN`); and,
+    where it was stopped, whether that was in a one pass that said two passes could read it
+    (`ABLE`): under `timeout`, as the host read it at the moment it stopped it, whatever the
+    command says while it's being stopped. Those lines are the host's, and aren't passed on."""
     if longer is None:
         try:
             done = subprocess.run(
@@ -360,10 +361,13 @@ def _waited(
     for reader in readers:
         reader.start()
     code: int | None = None
+    could = False
     while code is None:
         limit = longer if taken.is_set() else timeout
         left = limit - (time.monotonic() - began)
         if left <= 0:
+            # Read as it's stopped: a line that lands while it's being stopped changes nothing.
+            could = able.is_set() and limit == timeout
             process.kill()
             process.wait()
             break
@@ -376,10 +380,9 @@ def _waited(
     for pipe in (process.stdout, process.stderr):
         if pipe is not None:
             pipe.close()
-    could = able.is_set() and not taken.is_set()
     if code is None:
         return None, limit, could
-    return subprocess.CompletedProcess(argv, code, "".join(out), "".join(err)), limit, could
+    return subprocess.CompletedProcess(argv, code, "".join(out), "".join(err)), limit, False
 
 
 def others(image: str) -> list[str]:

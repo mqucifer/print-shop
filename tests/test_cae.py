@@ -1892,6 +1892,41 @@ def test_two_passes_that_can_t_end_in_time_leave_a_glass_band_its_lower_bound(
     assert record["seconds"] < host.TIMEOUT
 
 
+@pytest.mark.assembly
+def test_an_assembly_s_one_pass_that_can_t_end_in_its_time_goes_on_to_two_passes(
+    cae: Any, stool: dict[str, Answer]
+) -> None:
+    """mqucifer/print-shop#331: the stool, offered the hour as the host offers a plain `load`,
+    given a limit its one pass can't end inside on any machine (`cae_cases/slow_forced.py`,
+    which replaces nothing of `load`): the margin and a second. CalculiX's solve of the whole is
+    stopped at what's left (`load._ccx`), the hour is taken up at once, and two passes read it
+    without being asked: the same verdict and figures as asked for with `--parts`, and the
+    reply says why."""
+    from print_shop.bench import load
+
+    shutil.copy(CASES / "slow_forced.py", cae.work / "slow_forced.py")
+    limit = f"{load.ONE_PASS_MARGIN + 1:g}"
+    done = host.run(
+        ["slow_forced.py", limit, str(host.TWO_PASSES), "load", "large/stool.json", *PUSH],
+        cae.work, python=True, image=host.CAE_IMAGE,
+    )  # fmt: skip
+    found = re.search(r"saved: (\S+)\.txt and \.json", done.stdout)
+    assert found, done.stdout + done.stderr
+    record = json.loads((cae.work / f"{found.group(1)}.json").read_text())
+    asked = stool["one/2"]
+    assert record["verdict"] == asked.verdict == "OK", done.stdout
+    late = record["numbers"]["two_passes"]["one_pass_late"]
+    assert late.startswith(f"the one pass wouldn't end inside the container's {limit} s: ")
+    assert late.endswith(" s, in CalculiX's solve of the whole at 5.662 mm"), late
+    assert f"read in two passes ({late}): " in done.stdout
+    assert record["numbers"]["moves_mm"] == pytest.approx(asked.numbers["moves_mm"], rel=1e-3)
+    assert record["ran"]["limit_s"] == host.TWO_PASSES, "the hour, taken up"
+    # Said to the host once each: two passes don't say again that they could.
+    lines = done.stderr.splitlines()
+    assert lines.count(host.ABLE) == 1 and lines.count(host.TAKEN) == 1, done.stderr
+    assert lines.index(host.ABLE) < lines.index(host.TAKEN)
+
+
 #: The stool pushed sideways at its top (mqucifer/print-shop#295).
 PUSH = ("--weight", "5", "--at", "0,100,154", "--toward", "+x")
 

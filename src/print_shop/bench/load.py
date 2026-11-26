@@ -583,15 +583,7 @@ class _Model:
         fea.write_inp_file()
         self._add_to(fea.inp_file_name)
         kills = oom_kills()
-        try:
-            ccx_one_thread(fea, timeout=_ccx_left())
-        except subprocess.TimeoutExpired:
-            # The one pass's solve ran to the container's time, less its margin: it goes on to
-            # two passes, under the hour (mqucifer/print-shop#331).
-            tidy_solve(fea)
-            clock = _clock["now"]
-            assert isinstance(clock, _OnePass), "only the one pass's solve is given a timeout"
-            raise clock.late(f"in CalculiX's solve of the whole at {self.size:g} mm") from None
+        _ccx(fea, self.size)
         fea.load_results()
         self.solve_s = round(time.time() - began, 2)
         results = [o for o in analysis.Group if o.isDerivedFrom("Fem::FemResultObject")]
@@ -1435,49 +1427,101 @@ class _Slow(_Unread):
         self.whole = whole
 
 
+#: How long before the container's limit the one pass stops to go on to two passes, in s: the
+#: hand-off to the host, from the stop to the host reading `load_parts.TAKEN`, as the one pass
+#: takes up the hour before anything is tidied (mqucifer/print-shop#331). It's the container's
+#: start after the host's clock began, and the line's way out: 0.16 to 0.28 s over nine runs of
+#: the planted stool on the Mac, stopped in CalculiX's solve (`proofs/ux-331/handoff.py`), and
+#: this is about seven times that. A one pass that would have ended in its last 2 s goes to two
+#: passes; one whose hand-off took longer is stopped by the host, which names `--parts`.
+ONE_PASS_MARGIN = 2.0
+
+
 class _OnePass:
     """The one pass's clock, where two passes could read the assembly under the hour the host
-    offered (mqucifer/print-shop#331). As two passes' clock does, it stops before a reading round
-    a bolt that wouldn't end inside the container's time, at the longest so far; and CalculiX's
-    solves of the whole are given what's left, and stopped there. Either way the one pass goes on
-    to two passes, before the host would stop it, and says why. Past what it can foresee, as a
-    mesh that runs past the limit, the host stops the command and names `--parts`."""
+    offered (mqucifer/print-shop#331). Every step it can stop at is asked before it starts, as
+    two passes' clock is, never interrupted, but for CalculiX, a process of its own:
+    - before a reading round a bolt, at the longest so far (`check`);
+    - before the coarser mesh of the whole, at what the whole at the mesh took before its solve
+      and after it, which is no less than the coarser's (`check_coarser`);
+    - CalculiX's solve of the whole is given what's left, less what the whole's reading after its
+      solve took, and stopped there (`_ccx`).
+    Each way the one pass takes up the hour at once and goes on to two passes, before the host
+    would stop it, and says why. Past what it can foresee, as the whole's first mesh, or a
+    reading round the first bolt, running past the limit, the host stops the command and names
+    `--parts`."""
 
     def __init__(self, started: float, limit: float) -> None:
-        from .load_parts import MARGIN
-
         self.started = started
         self.limit = limit
-        self.margin = MARGIN
         self.longest: dict[str, float] = {}
+        #: When the whole at the mesh began, and its CalculiX solve began and ended, where it has.
+        self.whole_began: float | None = None
+        self.ccx_began: float | None = None
+        self.ccx_ended: float | None = None
+        #: What the whole at the mesh took before its solve and after it, in s.
+        self.before = 0.0
+        self.after = 0.0
 
     def time(self, kind: str, seconds: float) -> None:
         self.longest[kind] = max(self.longest.get(kind, 0.0), seconds)
 
     def left(self) -> float:
-        return self.limit - self.margin - (time.time() - self.started)
+        return self.limit - ONE_PASS_MARGIN - (time.time() - self.started)
 
     def check(self, kind: str, what: str) -> None:
         if self.left() < self.longest.get(kind, 0.0):
-            raise self.late(f"before {what}, which would end past it")
+            raise self.stop(f"before {what}, which would end past it")
 
-    def late(self, where: str) -> _Slow:
-        spent = time.time() - self.started
+    def whole_read(self) -> None:
+        """The whole at the mesh is read: what it took in all, and before and after its solve."""
+        assert self.whole_began is not None, "a whole is timed from when it began"
+        now = time.time()
+        self.time("whole", now - self.whole_began)
+        if self.ccx_began is not None and self.ccx_ended is not None:
+            self.before = self.ccx_began - self.whole_began
+            self.after = now - self.ccx_ended
+
+    def check_coarser(self, size: float) -> None:
+        if self.left() < self.before + self.after:
+            raise self.stop(
+                f"before the whole's coarser mesh, at {size:g} mm, whose meshing and reading "
+                f"would end past it, as the mesh's took {self.before + self.after:.0f} s"
+            )
+
+    def stop(self, where: str) -> _Slow:
+        """Why the one pass stops, where it stops: the hour is taken up at once, before
+        anything is tidied, so the host waits for two passes."""
+        from . import load_parts
+
+        load_parts.take_longer()
+        now = time.time()
+        spent = now - self.started
+        # The whole's time for two passes' clock: what it took, or, stopped in it, what it had
+        # taken by then.
+        whole = self.longest.get("whole", 0.0)
+        if not whole and self.whole_began is not None:
+            whole = now - self.whole_began
         return _Slow(
             f"the one pass wouldn't end inside the container's {self.limit:g} s: it had run "
             f"{spent:.0f} s, {where}",
-            self.longest.get("whole", 0.0),
+            whole,
         )
 
 
-def _one_pass(assembly: Assembly, started: float) -> None:
-    """Where the host offered two passes the hour, and this assembly can go to them, more than
-    one part, the one pass runs on `_OnePass`'s clock, and the host is told that two passes could
-    read it (`load_parts.ABLE`), so that if it stops the one pass itself it names `--parts`
-    (mqucifer/print-shop#331). Otherwise nothing changes: a single part, a script, or a limit the
-    caller gave, keeps its own, and is stopped there as before."""
+def _one_pass(
+    assembly: Assembly, started: float, two_pass: str | None, without_bands: bool
+) -> None:
+    """Where this is the one pass, the host offered two passes the hour, and the assembly can go
+    to them, more than one part, the one pass runs on `_OnePass`'s clock, and the host is told
+    that two passes could read it (`load_parts.ABLE`), so that if it stops the one pass itself it
+    names `--parts` (mqucifer/print-shop#331). Otherwise nothing changes: two passes and a glass
+    band's read keep their own clocks; a single part, a script, or a limit the caller gave, keeps
+    its own, and is stopped there as before."""
     from . import load_parts
 
+    if two_pass is not None or without_bands:
+        return
     given = os.environ.get(load_parts.TIMEOUT, "")
     if len(assembly.parts) < 2 or not os.environ.get(load_parts.OFFER, "").isdigit():
         return
@@ -1487,10 +1531,28 @@ def _one_pass(assembly: Assembly, started: float) -> None:
     _clock["now"] = _OnePass(started, float(given))
 
 
-def _ccx_left() -> float | None:
-    """The time a solve of the one pass's whole is given, where it runs on `_OnePass`'s clock."""
+def _on_one_pass() -> _OnePass | None:
     clock = _clock["now"]
-    return clock.left() if isinstance(clock, _OnePass) else None
+    return clock if isinstance(clock, _OnePass) else None
+
+
+def _ccx(fea: Any, size: float) -> None:
+    """CalculiX's solve of the whole, as `ccx_one_thread` runs it. On the one pass's clock, it's
+    given what's left, less what the whole's reading after its solve took, and where it's stopped
+    there the one pass goes on to two passes (mqucifer/print-shop#331): the hour first, then the
+    solve's files tidied. Anywhere else, as before."""
+    clock = _on_one_pass()
+    if clock is None:
+        ccx_one_thread(fea)
+        return
+    clock.ccx_began = time.time()
+    try:
+        ccx_one_thread(fea, timeout=clock.left() - clock.after)
+    except subprocess.TimeoutExpired:
+        late = clock.stop(f"in CalculiX's solve of the whole at {size:g} mm")
+        tidy_solve(fea)
+        raise late from None
+    clock.ccx_ended = time.time()
 
 
 class _Curved(NoAnswer):
@@ -1638,12 +1700,13 @@ def _read(args: Any, report: Report) -> None:
         from . import load_parts
         from .load_parts import OutOfTime
 
+        # Two passes run under the hour the host offered (mqucifer/print-shop#325), and so does
+        # what follows them here: taken up before anything's tidied. It counts from the
+        # command's start, so the one pass's try is in it. A one pass that ran out of time took
+        # it up as it stopped (`_OnePass.stop`), and this does nothing more.
+        load_parts.take_longer()
         _give_back()
         report.again()
-        # Two passes run under the hour the host offered (mqucifer/print-shop#325), and so does
-        # what follows them here. It counts from the command's start, so the one pass's try is
-        # in it.
-        load_parts.take_longer()
         try:
             _run(
                 args,
@@ -1764,9 +1827,8 @@ def _run(
     stiff = {(p.material.modulus_mpa, p.material.poisson) for p in assembly.parts}
     if len(stiff) > 1:
         raise NoAnswer("parts of different stiffness aren't solved together yet: one material")
-    if two_pass is None and not without_bands:
-        # The one pass, timed where two passes could go on from it (mqucifer/print-shop#331).
-        _one_pass(assembly, report.started)
+    # The one pass, timed where two passes could go on from it (mqucifer/print-shop#331).
+    _one_pass(assembly, report.started, two_pass, without_bands)
     placed = _placed(assembly, without_bands)
     # Each through-bolt's way through both parts, before anything is solved.
     with step("finding each through joint's bolts' way through its parts"):
@@ -1847,9 +1909,13 @@ def _run(
         }
         coarse = {**coarse, "parts": {n: r["part"] for n, r in rough.items()}}
     else:
-        began = time.time()
+        one = _on_one_pass()
+        if one is not None:
+            one.whole_began = time.time()
         fine = _solved(assembly, placed, args, size)
-        _timed("whole", time.time() - began)
+        if one is not None:
+            one.whole_read()
+            one.check_coarser(round(size * COARSER, 3))
         coarse = _solved(assembly, placed, args, round(size * COARSER, 3))
     force = float(sum(np.linalg.norm(one["force"]) for one in fine["raw_loads"]))
     meshed = (

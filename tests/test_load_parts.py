@@ -366,7 +366,7 @@ def _assembly(tmp_path: Path, parts: int = 2) -> str:
     }  # fmt: skip
     for k in range(parts):
         (tmp_path / f"p{k}.step").write_text("")
-    path = tmp_path / "assembly.json"
+    path = tmp_path / f"assembly-{parts}.json"
     path.write_text(json.dumps(data))
     return str(path)
 
@@ -378,51 +378,86 @@ def _plain_load(monkeypatch: pytest.MonkeyPatch, limit: str = "600") -> None:
     monkeypatch.setattr(load, "_clock", {"now": None})
 
 
-def _one_pass_reading_bolts(
-    monkeypatch: pytest.MonkeyPatch, bolt: float, calls: list[dict[str, Any]]
-) -> None:
-    """`load._run` stood in for, as it reads the one pass: it starts the one pass's clock as
-    `_run` does, reads the whole in 30 s, then a bolt that took `bolt` s, then asks before the
-    next; and in two passes, says what it was given. No FreeCAD."""
-    from print_shop.bench.assembly import read
-
-    def run(
-        args: Any, report: Report, without_bands: bool = False, two_pass: str | None = None,
-        reserve: float = 0.0, tried: float = 0.0,
-    ) -> None:  # fmt: skip
-        calls.append({"two_pass": two_pass, "tried": tried, "limit": load_parts.Clock(0).limit})
-        if two_pass is None:
-            load._one_pass(read(args.assembly), report.started)
-            load._timed("whole", 30.0)
-            load._in_time("bolt", "the reading round p0+p1's first bolt")
-            load._timed("bolt", bolt)
-            load._in_time("bolt", "the reading round p0+p1's second bolt")
-            report.verdict("OK", "read in one pass")
-            return
-        report.numbers["two_passes"] = {"why": two_pass}
-        report.verdict("OK", "read in two passes")
-
-    monkeypatch.setattr(load, "_run", run)
-
-
 def _args(path: str, parts: bool = False) -> Any:
     import argparse
 
     return argparse.Namespace(assembly=path, parts=parts, lift=None)
 
 
+def _ccx_binary(tmp_path: Path, seconds: float) -> Any:
+    """What `cae.ccx_one_thread` runs CalculiX from, a real process that takes `seconds`."""
+    ccx = tmp_path / "ccx"
+    ccx.write_text(f"#!/bin/sh\nsleep {seconds}\n")
+    ccx.chmod(0o755)
+    folder = tmp_path / "solve"
+    folder.mkdir(exist_ok=True)
+
+    class Fea:
+        ccx_binary = str(ccx)
+        inp_file_name = str(folder / "solve.inp")
+        working_dir = str(folder)
+
+        def setup_ccx(self) -> None:
+            pass
+
+    return Fea()
+
+
+def _stood_in(
+    monkeypatch: pytest.MonkeyPatch,
+    calls: list[dict[str, Any]],
+    one_pass: Any,
+) -> None:
+    """`load._run` stood in for where it needs FreeCAD: it starts the one pass's clock by the real
+    gate (`load._one_pass`, given what `_run` is given), then `one_pass(clock)` does the one
+    pass's steps through the real clock; in two passes, it says what it was given."""
+    from print_shop.bench.assembly import read
+
+    def run(
+        args: Any, report: Report, without_bands: bool = False, two_pass: str | None = None,
+        reserve: float = 0.0, tried: float = 0.0,
+    ) -> None:  # fmt: skip
+        limit = load_parts.Clock(0).limit
+        calls.append({"two_pass": two_pass, "tried": tried, "limit": limit})
+        load._one_pass(read(args.assembly), report.started, two_pass, without_bands)
+        if two_pass is None:
+            one_pass(load._on_one_pass())
+            report.verdict("OK", "read in one pass")
+            return
+        assert load._on_one_pass() is None, "two passes don't run on the one pass's clock"
+        report.numbers["two_passes"] = {"why": two_pass}
+        report.verdict("OK", "read in two passes")
+
+    monkeypatch.setattr(load, "_run", run)
+
+
+def _bolts(bolt: float) -> Any:
+    """The one pass's whole read in 30 s, then a bolt's reading that took `bolt` s, then the
+    next asked for, as `_through` asks."""
+
+    def steps(clock: Any) -> None:
+        assert clock is not None
+        clock.whole_began = clock.ccx_began = clock.ccx_ended = __import__("time").time() - 30
+        clock.whole_read()
+        load._in_time("bolt", "the reading round p0+p1's first bolt")
+        load._timed("bolt", bolt)
+        load._in_time("bolt", "the reading round p0+p1's second bolt")
+
+    return steps
+
+
 def test_a_one_pass_that_fits_the_memory_but_not_its_time_goes_to_two_passes_under_the_hour(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    """mqucifer/print-shop#331: the furniture assembly whose one pass ran past 600 s, round
-    after round, without meeting the memory. Here its next bolt wouldn't end inside the 600 s,
-    so the one pass stops itself before it and goes on to two passes, without being asked:
-    they take up the hour, counted from the command's start, and the reply says why."""
+    """The furniture assembly whose one pass ran past 600 s, round after round, without meeting
+    the memory. Here its next bolt wouldn't end inside the 600 s, so the one pass stops itself
+    before it and goes on to two passes, without being asked: they take up the hour, counted
+    from the command's start, and the reply says why."""
     import time
 
     _plain_load(monkeypatch)
     calls: list[dict[str, Any]] = []
-    _one_pass_reading_bolts(monkeypatch, 1e4, calls)
+    _stood_in(monkeypatch, calls, _bolts(1e4))
     report = Report("load", ["assembly.json"])
     report.started = time.time() - 100
     load.run(_args(_assembly(tmp_path)), report)
@@ -431,52 +466,140 @@ def test_a_one_pass_that_fits_the_memory_but_not_its_time_goes_to_two_passes_und
     assert why.startswith("the one pass wouldn't end inside the container's 600 s: it had run ")
     assert why.endswith(" s, before the reading round p0+p1's second bolt, which would end past it")
     assert calls[1]["limit"] == host.TWO_PASSES, "the hour, taken up"
-    assert calls[1]["tried"] == 30.0, "a whole takes at most what the one pass's whole took"
-    assert capsys.readouterr().err == f"{host.ABLE}\n{host.TAKEN}\n"
+    assert calls[1]["tried"] == pytest.approx(30.0, abs=1), "what the one pass's whole took"
+    assert capsys.readouterr().err == f"{host.ABLE}\n{host.TAKEN}\n", "each said once"
     assert report.numbers["two_passes"]["one_pass_late"] == why
     assert report.started == pytest.approx(time.time() - 100, abs=5), "the hour counts the try"
     assert load._clock["now"] is None
 
 
-def test_a_one_pass_stopped_in_its_solve_goes_to_two_passes(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+def test_a_one_pass_stopped_in_calculix_s_solve_goes_to_two_passes(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
     """Where the one pass's solve of the whole runs to the container's time, less its margin,
-    CalculiX is stopped there (`cae.ccx_one_thread`'s timeout), and that's said the same way.
-    A real process stands in for CalculiX; FreeCAD's part of it is in the proof run."""
+    `load._ccx` stops CalculiX there, a real process standing in for it, and `_read` goes on to
+    two passes. The hour is taken up before the solve's files are tidied, and two passes' clock
+    is given what the whole had taken when it was stopped."""
+    import os
     import time
 
     from print_shop.bench import cae
 
-    _plain_load(monkeypatch, limit="21.5")
-    clock = load._OnePass(time.time(), 21.5)
+    _plain_load(monkeypatch, limit=f"{load.ONE_PASS_MARGIN + 1:g}")
+    tidied: list[bool] = []
+
+    def tidy(fea: Any) -> None:
+        tidied.append(load_parts.OFFER not in os.environ)
+        cae.tidy_solve(fea)
+
+    monkeypatch.setattr(load, "tidy_solve", tidy)
+    fea = _ccx_binary(tmp_path, 30)
+
+    def solve(clock: Any) -> None:
+        assert clock is not None and clock.left() <= 1.0
+        clock.whole_began = time.time()
+        load._ccx(fea, 5.662)
+        pytest.fail("CalculiX wasn't stopped")
+
+    calls: list[dict[str, Any]] = []
+    _stood_in(monkeypatch, calls, solve)
+    report = Report("load", ["assembly.json"])
+    began = time.time()
+    load.run(_args(_assembly(tmp_path)), report)
+    assert time.time() - began < 10, "stopped at what's left, not left to run"
+    assert [c["two_pass"] is None for c in calls] == [True, False]
+    why = calls[1]["two_pass"]
+    assert re.fullmatch(
+        rf"the one pass wouldn't end inside the container's {load.ONE_PASS_MARGIN + 1:g} s: it "
+        r"had run \d+ s, in CalculiX's solve of the whole at 5\.662 mm",
+        why,
+    ), why
+    assert calls[1]["limit"] == host.TWO_PASSES
+    assert tidied == [True], "the hour taken up first, then the solve's files tidied"
+    assert not Path(fea.working_dir).exists()
+    assert 0 <= calls[1]["tried"] < 10, "what the whole had taken when it was stopped"
+    assert capsys.readouterr().err == f"{host.ABLE}\n{host.TAKEN}\n"
+
+
+def test_a_solve_off_the_one_pass_s_clock_has_no_timeout(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Two passes' own clock, or none, gives CalculiX no timeout, as on main; on the one pass's
+    clock it's given what's left less what the whole's reading after its solve took."""
+    import time
+
+    from print_shop.bench import cae
+
+    given: list[float | None] = []
+    monkeypatch.setattr(load, "ccx_one_thread", lambda fea, timeout=None: given.append(timeout))
+    monkeypatch.setattr(load, "_clock", {"now": None})
+    load._ccx(object(), 4.0)
+    load._clock["now"] = load_parts.Clock(time.time())
+    load._ccx(object(), 4.0)
+    clock = load._OnePass(time.time(), 600.0)
+    clock.after = 25.0
     load._clock["now"] = clock
-    left = load._ccx_left()
-    assert left is not None and 0.5 < left <= 1.5, "the limit less the margin"
-    ccx = tmp_path / "ccx"
-    ccx.write_text("#!/bin/sh\nsleep 30\n")
-    ccx.chmod(0o755)
-
-    class Fea:
-        ccx_binary = str(ccx)
-        inp_file_name = str(tmp_path / "solve.inp")
-
-        def setup_ccx(self) -> None:
-            pass
-
+    load._ccx(object(), 4.0)
+    assert given[:2] == [None, None]
+    assert given[2] == pytest.approx(600 - load.ONE_PASS_MARGIN - 25.0, abs=1)
+    assert clock.ccx_began is not None and clock.ccx_ended is not None
+    # And `ccx_one_thread` holds to what it's given, a real process standing in for CalculiX.
     began = time.time()
     with pytest.raises(subprocess.TimeoutExpired):
-        cae.ccx_one_thread(Fea(), timeout=left)
-    assert time.time() - began < 10, "stopped at what's left, not left to run"
-    late = clock.late("in CalculiX's solve of the whole at 4 mm")
-    assert isinstance(late, load._Unread) and not late.memory
-    said = r"21\.5 s: it had run \d+ s, in CalculiX's solve of the whole at 4 mm$"
-    assert re.search(said, str(late))
-    # Two passes' own clock, or no clock, gives a solve no timeout: as on main.
-    load._clock["now"] = load_parts.Clock(time.time())
-    assert load._ccx_left() is None
-    load._clock["now"] = None
-    assert load._ccx_left() is None
+        cae.ccx_one_thread(_ccx_binary(tmp_path, 30), timeout=0.5)
+    assert time.time() - began < 10
+
+
+def test_the_one_pass_s_coarser_mesh_is_asked_for_first(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The operator's review: gmsh's meshing isn't stopped, so before the whole's coarser mesh
+    the one pass asks whether what the mesh's whole took before its solve and after it, which the
+    coarser's is no longer than, would end inside what's left. Its solve is then given what's
+    left less the reading after it. A fine whole of 560 s, 20 s of it outside its solve: 13 s
+    left after it stops the one pass; 38 s goes on to the coarser mesh."""
+    import time
+
+    monkeypatch.setattr(load, "_clock", {"now": None})
+    now = time.time()
+    for spent, stops in ((585.0, True), (560.0, False)):
+        clock = load._OnePass(now - spent, 600.0)
+        clock.whole_began, clock.ccx_began, clock.ccx_ended = now - 560, now - 550, now - 10
+        clock.whole_read()
+        assert (clock.before, clock.after) == pytest.approx((10.0, 10.0), abs=0.5)
+        assert clock.longest["whole"] == pytest.approx(560.0, abs=0.5)
+        left = 600 - load.ONE_PASS_MARGIN - spent
+        if stops:
+            with pytest.raises(load._Slow) as late:
+                clock.check_coarser(8.493)
+            assert str(late.value).endswith(
+                "s, before the whole's coarser mesh, at 8.493 mm, whose meshing and reading "
+                "would end past it, as the mesh's took 20 s"
+            ), str(late.value)
+            assert late.value.whole == pytest.approx(560.0, abs=0.5)
+        else:
+            clock.check_coarser(8.493)  # 38 s left, against 20
+            assert left > clock.before + clock.after
+
+
+def test_a_one_pass_near_its_limit_reads_in_one_pass_to_within_the_margin(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The operator's review: the margin is the hand-off's, measured, and no more
+    (`load.ONE_PASS_MARGIN`). A next bolt that ends a second inside it is read in one pass, as on
+    main; one that would end past it goes to two passes. So a one pass that ended at 590 s on
+    main still does."""
+    import time
+
+    assert load.ONE_PASS_MARGIN == 2.0
+    monkeypatch.setattr(load, "_clock", {"now": None})
+    now = time.time()
+    clock = load._OnePass(now - 580, 600.0)
+    clock.time("bolt", 10.0)
+    left = clock.left()
+    assert left == pytest.approx(600 - 2 - 580, abs=0.5)
+    clock.check("bolt", "a bolt that ends at 590 s")  # 18 s left, and a bolt takes 10
+    clock.time("bolt", left + 1)
+    with pytest.raises(load._Slow):
+        clock.check("bolt", "a bolt that would end past 598 s")
 
 
 def test_a_one_pass_that_reads_inside_its_time_reads_as_on_main(
@@ -487,7 +610,7 @@ def test_a_one_pass_that_reads_inside_its_time_reads_as_on_main(
     said, and the host doesn't pass that on."""
     _plain_load(monkeypatch)
     calls: list[dict[str, Any]] = []
-    _one_pass_reading_bolts(monkeypatch, 2.0, calls)
+    _stood_in(monkeypatch, calls, _bolts(2.0))
     report = Report("load", ["assembly.json"])
     load.run(_args(_assembly(tmp_path)), report)
     assert [c["two_pass"] for c in calls] == [None]
@@ -497,75 +620,148 @@ def test_a_one_pass_that_reads_inside_its_time_reads_as_on_main(
 
 
 @pytest.mark.parametrize(
-    ("parts", "offered", "limit"),
-    [(1, True, "600"), (2, False, "600"), (2, True, None)],
-    ids=["a single part", "not offered the hour", "no limit given"],
-)
-def test_a_load_that_can_t_go_to_two_passes_keeps_its_limit_and_says_nothing(
+    ("parts", "offered", "limit", "two_pass", "without_bands"),
+    [
+        (1, True, "600", None, False),
+        (2, False, "600", None, False),
+        (2, True, None, None, False),
+        (2, True, "600", "asked for with --parts", False),
+        (2, True, "600", None, True),
+    ],
+    ids=["a single part", "not offered the hour", "no limit given", "two passes",
+         "a glass band's read"],
+)  # fmt: skip
+def test_a_load_that_isn_t_a_one_pass_that_could_go_to_two_has_no_clock_and_says_nothing(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
     capsys: pytest.CaptureFixture[str],
     parts: int,
     offered: bool,
     limit: str | None,
+    two_pass: str | None,
+    without_bands: bool,
 ) -> None:
-    """A single part, a script or a limit the caller gave (nothing offered), and a command with
-    no limit: no clock in the one pass, so it's never stopped early, and the host isn't told two
-    passes could read it. A single part past 600 s is stopped there, its reply as now."""
+    """`load._one_pass`, the gate `_run` calls with what it's given: a single part, a script or
+    a limit the caller gave (nothing offered), and a command with no limit keep theirs, never
+    stopped early; two passes and a glass band's read keep their own clocks. None is told to the
+    host as one two passes could read."""
+    from print_shop.bench.assembly import read
+
     _plain_load(monkeypatch)
     if not offered:
         monkeypatch.delenv(load_parts.OFFER)
     if limit is None:
         monkeypatch.delenv(load_parts.TIMEOUT)
-    calls: list[dict[str, Any]] = []
-    _one_pass_reading_bolts(monkeypatch, 1e4, calls)
-    report = Report("load", ["assembly.json"])
-    load.run(_args(_assembly(tmp_path, parts)), report)
-    assert [c["two_pass"] for c in calls] == [None] and report.word == "OK"
-    assert capsys.readouterr().err == ""
-    assert host.past(600, False) == (
-        "verdict: NO ANSWER: it ran past the 600 s limit and was stopped\n"
-    )
+    load._one_pass(read(_assembly(tmp_path, parts)), 0.0, two_pass, without_bands)
+    assert load._clock["now"] is None and capsys.readouterr().err == ""
+    load._one_pass(read(_assembly(tmp_path, 2)), 0.0, None, False)
+    assert (load._on_one_pass() is not None) == (offered and limit is not None)
+
+
+def _contained(monkeypatch: pytest.MonkeyPatch, path: str) -> None:
+    """`host.run`'s `docker run` stood in by a real Python process on this machine that runs
+    `load._one_pass` on the assembly at `path`, in the environment the host gives the container,
+    then a one pass that runs past any limit. So what's said, the host's wait and its reply are
+    the real ones."""
+    import json
+    import sys
+
+    def container(work: Path, command: list[str], name: str, **more: Any) -> list[str]:
+        code = (
+            "import os, sys, time\n"
+            f"os.environ.update({json.dumps(more.get('env') or {})})\n"
+            "from print_shop.bench import load\n"
+            "from print_shop.bench.assembly import read\n"
+            f"load._one_pass(read({path!r}), time.time(), None, False)\n"
+            "time.sleep(60)\n"
+        )
+        return [sys.executable, "-c", code]
+
+    monkeypatch.setattr(host, "image_id", lambda image=host.IMAGE: "sha256:x")
+    monkeypatch.setattr(host, "code_version", lambda: "abc")
+    monkeypatch.setattr(host, "container", container)
+    real = subprocess.run
+
+    def run(argv: list[str], **more: Any) -> Any:
+        # `docker kill`: the host has stopped the process itself.
+        return None if argv[:2] == ["docker", "kill"] else real(argv, **more)
+
+    monkeypatch.setattr(subprocess, "run", run)
+
+
+def test_a_single_part_past_its_limit_is_stopped_there_its_reply_as_now(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A single part can't go to two passes: its one pass has no clock, says nothing, and the
+    host stops it at its limit with the reply it has always given. Seconds here, not 600."""
+    _contained(monkeypatch, _assembly(tmp_path, 1))
+    monkeypatch.setattr(host, "TIMEOUT", 8)
+    done = host.run(["load", "a.json", "--weight", "1"], tmp_path)
+    assert done.stdout == "verdict: NO ANSWER: it ran past the 8 s limit and was stopped\n"
+    assert done.returncode == 2
 
 
 def test_a_one_pass_the_host_stops_names_parts_where_two_passes_could_read_it(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    """Past what the one pass's clock foresees, as a mesh that runs past the limit, the host
-    stops it at 600 s. Where it said two passes could read it, and they weren't started, the
-    reply names `--parts` and the hour; a single part's reply, and two passes' past the hour,
-    are as on main. Real processes, with limits of seconds."""
-    able = f"import sys, time; print({host.ABLE!r}, file=sys.stderr, flush=True); "
-    taken = f"print({host.TAKEN!r}, file=sys.stderr, flush=True); "
-    stopped, limit, could = host._waited(_child(able + "time.sleep(30)"), 1, 30)
+    """Past what the one pass's clock foresees, as its first mesh running past the limit, the
+    host stops it there. An assembly's one pass said first that two passes could read it, so
+    the reply names `--parts` and the hour, and doesn't promise they will."""
+    _contained(monkeypatch, _assembly(tmp_path, 2))
+    monkeypatch.setattr(host, "TIMEOUT", 8)
+    done = host.run(["load", "a.json", "--weight", "1"], tmp_path)
+    assert done.stdout == (
+        "verdict: NO ANSWER: it ran past the 8 s limit and was stopped, in one pass. Two passes "
+        "may read this assembly, and are given the hour, 3600 s: run it again with --parts, "
+        "which asks for them from the start\n"
+    )
+    assert host.ABLE not in done.stdout + done.stderr
+
+
+def _late_taken(child: str, out: str = "sys.stderr", then: str = "None") -> str:
+    """`child`, which says TAKEN on `out` when it's signalled, then does `then`: as two passes
+    starting at the moment the host stops the one pass would."""
+    return (
+        "import signal, sys, time\n"
+        f"signal.signal(signal.SIGUSR1, lambda *_: (print({host.TAKEN!r}, file={out}, "
+        f"flush=True), {then}))\n" + child
+    )
+
+
+def test_a_taken_line_that_lands_as_the_host_stops_the_one_pass_doesn_t_change_its_reply(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The operator's review: the host reads whether it was a one pass that two passes could
+    read at the moment it stops it, under its own limit. TAKEN, landing while it's being
+    stopped, leaves the reply naming `--parts`. Real processes, with limits of seconds."""
+    import os
+    import signal
+    import time
+
+    popen = subprocess.Popen
+
+    class Late(popen):  # type: ignore[misc, valid-type]
+        def kill(self) -> None:
+            os.kill(self.pid, signal.SIGUSR1)
+            time.sleep(0.5)  # the line read by the host as it stops it
+            super().kill()
+
+    monkeypatch.setattr(subprocess, "Popen", Late)
+    able = f"print({host.ABLE!r}, file=sys.stderr, flush=True); time.sleep(30)"
+    stopped, limit, could = host._waited(_child(_late_taken(able)), 1, 30)
     assert stopped is None and limit == 1 and could
-    stopped, limit, could = host._waited(_child(able + taken + "time.sleep(30)"), 1, 2)
-    assert stopped is None and limit == 2 and not could, "two passes ran out of the hour"
-    done, _, _ = host._waited(_child(able + "print('read')"), 5, 30)
-    assert done is not None and done.stdout == "read\n" and done.stderr == "", "not passed on"
-    killed: list[list[str]] = []
-    monkeypatch.setattr(host, "image_id", lambda image=host.IMAGE: "sha256:x")
-    monkeypatch.setattr(host, "code_version", lambda: "abc")
-    monkeypatch.setattr(subprocess, "run", lambda argv, **_: killed.append(argv))
-    monkeypatch.setattr(host, "_waited", lambda argv, timeout, longer: (None, timeout, True))
-    said = host.run(["load", "a.json"], tmp_path).stdout
-    assert said == (
-        "verdict: NO ANSWER: it ran past the 600 s limit and was stopped, in one pass. Two "
-        "passes can read this assembly, and are given the hour, 3600 s: run it again with "
-        "--parts, which asks for them from the start\n"
-    )
-    monkeypatch.setattr(host, "_waited", lambda argv, timeout, longer: (None, timeout, False))
-    assert host.run(["load", "a.json"], tmp_path).stdout == (
-        "verdict: NO ANSWER: it ran past the 600 s limit and was stopped\n"
-    )
 
 
 def test_a_design_round_s_one_pass_stopped_names_parts_where_two_passes_could_read_it(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     """The harness's own wait, where the issue was met: the model read the timeout as the
-    bench's limit and waited for the hour. Now the reply it's shown names `--parts`, and the
-    line that said two passes could read it isn't in it."""
+    bench's limit and waited for the hour. Now the reply it's shown names `--parts`, the line
+    that said two passes could read it isn't in it, and TAKEN landing during `docker kill`
+    doesn't change that."""
+    import os
+    import signal
+
     able = f"import time; print('a'); print({host.ABLE!r}, flush=True); "
     box, _ = _box(monkeypatch, tmp_path, able + "time.sleep(3)", timeout=1)
     stopped = box.bench(["load", "a.json"])
@@ -580,8 +776,27 @@ def test_a_design_round_s_one_pass_stopped_names_parts_where_two_passes_could_re
     monkeypatch.setattr(host, "offered", lambda args: 2)
     late = box.bench(["load", "a.json"])
     assert late.timed_out and late.output.endswith(host.past(2, False)), "as on main"
+    monkeypatch.setattr(host, "offered", lambda args: 30)
     box, _ = _box(monkeypatch, tmp_path, "import time; time.sleep(3)", timeout=1)
     assert box.bench(["load", "a.json"]).output.endswith(host.past(1, False))
+    # TAKEN as `docker kill` runs, which here signals the child to say it, then end.
+    child = _late_taken(able.replace("import time; ", "") + "time.sleep(30)", "sys.stdout",
+                        "sys.exit(0)")
+    box, _ = _box(monkeypatch, tmp_path, child, timeout=1)
+    pids: list[int] = []
+    real_popen = subprocess.Popen
+
+    def popen(*a: Any, **k: Any) -> Any:
+        process = real_popen(*a, **k)
+        pids.append(process.pid)
+        return process
+
+    monkeypatch.setattr(subprocess, "Popen", popen)
+    monkeypatch.setattr(
+        subprocess, "run", lambda argv, **_: os.kill(pids[-1], signal.SIGUSR1)
+    )
+    raced = box.bench(["load", "a.json"])
+    assert raced.timed_out and raced.output.endswith(host.past(1, True)), raced.output
 
 
 def test_time_kept_for_a_glass_band_is_left_out_of_two_passes_and_its_read_says_so(

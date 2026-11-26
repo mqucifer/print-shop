@@ -191,6 +191,7 @@ class Box:
         reader = threading.Thread(target=drain, daemon=True)
         reader.start()
         timed_out = False
+        could = False
         code: int | None = None
         while True:
             if longer is not None and taken.is_set():
@@ -198,6 +199,8 @@ class Box:
             left = limit - (time.monotonic() - began)
             if left <= 0:
                 timed_out = True
+                # Read as it's stopped, as `host._waited` does: a one pass under its own limit.
+                could = able.is_set() and limit != longer
                 break
             try:
                 code = process.wait(timeout=min(left, POLL))
@@ -223,7 +226,7 @@ class Box:
         if code == DOCKER_FAILED and not timed_out:
             raise Gone(f"docker couldn't run the container: {text[-400:]}")
         if timed_out:
-            text += "\n" + host.past(limit, able.is_set() and not taken.is_set())
+            text += "\n" + host.past(limit, could)
             code = 2 if command[1:2] == ["-I"] else 124
         elif code == host.KILLED:
             text += (
