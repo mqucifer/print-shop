@@ -1747,8 +1747,8 @@ def test_a_joint_on_curved_slivers_reads_as_statics_says_in_freecad_s_order_not_
     why = held.record["why"]
     assert re.search(
         r"^the mesh's elements don't balance as CalculiX solved them: at \d+ node\(s\) of the "
-        r"parts? [a-z, ]*sleeve[a-z, ]*, what they carry is further from the load than the six "
-        r"figures CalculiX gives each movement can make it",
+        r"parts? [a-z, ]*sleeve[a-z, ]*, what they carry is further from the load than the "
+        r"seven figures CalculiX prints each movement to can make it",
         why,
     ), why
     assert "joints" not in held.numbers
@@ -1784,8 +1784,8 @@ def test_an_element_whose_nodes_aren_t_in_freecad_s_order_is_no_answer_naming_it
     assert alone.verdict == "NO ANSWER" and alone.code == 2, alone.text
     assert re.search(
         r"^the mesh's elements don't balance as CalculiX solved them: at \d+ node\(s\) of the "
-        r"part tip, what they carry is further from the load than the six figures CalculiX "
-        r"gives each movement can make it, up to [\d.e+]+ times as far, at a mesh of at most "
+        r"part tip, what they carry is further from the load than the seven figures CalculiX "
+        r"prints each movement to can make it, up to [\d.e+]+ times as far, at a mesh of at most "
         r"[\d.]+ mm: an element's nodes there aren't in the order CalculiX solved them, so no "
         r"force on a joint is read from them, and nothing is read$",
         alone.record["why"],

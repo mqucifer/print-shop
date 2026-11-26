@@ -137,9 +137,12 @@ NOTHING = 1e-3
 ON_FACE = 0.01
 #: How a mesh whose elements' sides are straight is said where a step names it.
 STRAIGHT = ", its elements straight-sided"
-#: CalculiX is given each load to nine figures (`_write`) and solves it directly to far closer
-#: than six: what's left at a node, past what its six figures for each movement account for
-#: (`figures`), as a share of the whole load (mqucifer/print-shop#320).
+#: CalculiX prints each node's movement to seven figures (`*NODE PRINT`, E13.6), where its .frd
+#: file, which FreeCAD reads, has six (mqucifer/print-shop#320).
+PRINTED = 7
+#: It's given each load to nine figures (`_write`) and solves it directly to far closer than
+#: seven: what's left at a node, past what the seven figures for each movement account for
+#: (`figures`), as a share of the whole load.
 LOADS = 1e-8
 #: The elements whose stiffness is taken at once, for the balance (`_Model._imbalance`).
 GROUP = 2048
@@ -256,12 +259,12 @@ def element_stiffness(places: np.ndarray, modulus: float, poisson: float) -> np.
     return stiffness
 
 
-def figures(moved: np.ndarray) -> np.ndarray:
+def figures(moved: np.ndarray, given: int = PRINTED) -> np.ndarray:
     """How far each movement read back can be from what CalculiX solved, in mm: half a unit in
-    its sixth figure, as its .frd file writes each to six (E12.5). Nothing where it's naught."""
+    its last figure, written to `given` of them. Nothing where it's naught."""
     size = np.abs(moved)
     place = np.floor(np.log10(np.where(size > 0, size, 1.0)))
-    return np.where(size > 0, 0.5 * 10.0 ** (place - 5), 0.0)
+    return np.where(size > 0, 0.5 * 10.0 ** (place - (given - 1)), 0.0)
 
 
 def misordered(wired: np.ndarray, points: np.ndarray) -> np.ndarray:
@@ -425,6 +428,9 @@ class _Model:
         self._surface_nodes: list[tuple[int, ...]] | None = None
         #: Each element's nodes as rows, once read and checked (`_wired`).
         self._wiring: np.ndarray | None = None
+        #: Each node's movement as CalculiX printed it to seven figures, by row, in one pass
+        #: (`_printed`), for the elements' balance (mqucifer/print-shop#320).
+        self.printed: np.ndarray | None = None
         #: Whether, where CalculiX's direct solver meets the container's memory, it's solved
         #: again by its iterative one and corrected (`_iterated`): in two passes only
         #: (mqucifer/print-shop#301). None, or what the direct solver met, once it has.
@@ -705,6 +711,8 @@ class _Model:
         self.row, self.strain, self.stress, self.moved = _arrays(results[0])
         self.points = np.array([self.nodes[n] for n in results[0].NodeNumbers])
         self.reaction, self.held_force = _reaction(os.path.splitext(fea.inp_file_name)[0] + ".dat")
+        if not self.two_pass:
+            self.printed = _printed(os.path.splitext(fea.inp_file_name)[0] + ".dat", self.row)
         tidy_solve(fea)
         self._balance()
 
@@ -827,29 +835,41 @@ class _Model:
             left[self.row[node], sorted(axes)] = 0.0
         return left
 
-    def _imbalance(self, wired: np.ndarray, forces: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
-        """What's left unbalanced at each node on each axis not held, in N, and the most the
-        solve's own figures can leave there: each element's stiffness (`element_stiffness`),
-        each term taken as its size, times how far each of its nodes' movements can be from
-        what CalculiX solved (`figures`), summed over the elements at the node; and `LOADS` of
-        the whole load. Element by element, in groups of `GROUP`, so it fits the memory."""
+    def _imbalance(self, wired: np.ndarray, moved: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+        """What's left unbalanced at each node on each axis not held, in N, with each node
+        `moved` as CalculiX printed it (`_printed`), and the most the print's own figures can
+        leave there: each element's stiffness (`element_stiffness`), each term taken as its
+        size, times how far each of its nodes' movements can be from what CalculiX solved
+        (`figures`), summed over the elements at the node; and `LOADS` of the whole load.
+        Element by element, in groups of `GROUP`, so it fits the memory."""
         material = self.assembly.parts[0].material
-        apart = figures(self.moved)
+        apart = figures(moved)
+        left = np.zeros((len(self.points), 3))
         allowed = np.zeros((len(self.points), 3))
         for start in range(0, len(wired), GROUP):
             rows = wired[start : start + GROUP]
-            stiff = element_stiffness(self.points[rows], material.modulus_mpa, material.poisson)
+            places = self.points[rows]
+            forces = element_forces(places, moved[rows], material.modulus_mpa, material.poisson)
+            np.add.at(left, rows, -forces)
+            stiff = element_stiffness(places, material.modulus_mpa, material.poisson)
             np.add.at(allowed, rows, np.einsum("naibk,nbk->nai", np.abs(stiff), apart[rows]))
+        for node, push in self.pushed.items():
+            left[self.row[node]] += push
+        for node, axes in self.constrained.items():
+            left[self.row[node], sorted(axes)] = 0.0
         allowed += LOADS * sum(float(np.linalg.norm(p)) for p in self.pushed.values())
-        return np.abs(self._left(wired, forces)), allowed
+        return np.abs(left), allowed
 
-    def _balanced(self, wired: np.ndarray, forces: np.ndarray, owned: np.ndarray) -> None:
+    def _balanced(self, wired: np.ndarray, owned: np.ndarray) -> None:
         """The one pass's elements balance as CalculiX solved them (mqucifer/print-shop#320): at
-        every node not held, what they carry is the load put on it, within what the solve's
-        own figures can leave (`_imbalance`). An element whose nodes aren't in the order
-        CalculiX took them carries other forces, and leaves the rest at its nodes: wherever
-        that's more than the figures account for, nothing is read, and the parts are named."""
-        left, allowed = self._imbalance(wired, forces)
+        every node not held, what they carry, with each node moved as CalculiX printed it to
+        seven figures, is the load put on it, within what those figures can leave
+        (`_imbalance`). An element whose nodes aren't in the order CalculiX took them carries
+        other forces, and leaves the rest at its nodes: wherever that's more than the figures
+        account for, nothing is read, and the parts are named."""
+        if self.printed is None:
+            raise NoAnswer("CalculiX printed no node's movement to hold the elements' balance to")
+        left, allowed = self._imbalance(wired, self.printed)
         over = np.flatnonzero((left > allowed).any(axis=1))
         if not over.size:
             return
@@ -860,8 +880,9 @@ class _Model:
         raise NoAnswer(
             "the mesh's elements don't balance as CalculiX solved them: at "
             f"{over.size} node(s) of {'the part ' if len(names) == 1 else 'the parts '}"
-            f"{', '.join(names)}, what they carry is further from the load than the six "
-            f"figures CalculiX gives each movement can make it, up to {worst:.3g} times as far, "
+            f"{', '.join(names)}, what they carry is further from the load than the seven "
+            f"figures CalculiX prints each movement to can make it, up to {worst:.3g} times as "
+            "far, "
             f"at a mesh of at most {self.size:g} mm{STRAIGHT if self.straight else ''}: an "
             "element's nodes there aren't in the order CalculiX solved them, so no force on a "
             "joint is read from them, and nothing is read"
@@ -919,7 +940,7 @@ class _Model:
         )
         owned = self._owned(wired, self.row, self.points)
         if not self.two_pass:
-            self._balanced(wired, forces, owned)
+            self._balanced(wired, owned)
         self.part_rows = {name: np.unique(wired[owned[k]]) for k, name in enumerate(names)}
         self.within = {}
         for k, name in enumerate(names):
@@ -1253,6 +1274,9 @@ class _Model:
         step += pins
         held = sorted({*held, *more})
         step += "*NODE PRINT, NSET=HELDALL, TOTALS=YES\nRF\n"
+        if not self.two_pass:
+            # Every node's movement to seven figures, for the elements' balance (`_balanced`).
+            step += "*NODE PRINT, NSET=Nall\nU\n"
         text = Path(path).read_text()
         start, outputs = text.find("\n*STEP"), text.find("** Outputs")
         if start < 0 or outputs < 0:
@@ -1411,6 +1435,26 @@ def _reaction(path: str) -> tuple[np.ndarray, dict[int, np.ndarray]]:
         words = line.split()
         nodes[int(words[0])] = np.array([float(v) for v in words[1:4]])
     return np.array([float(v) for v in total.groups()]), nodes
+
+
+def _printed(path: str, row: dict[int, int]) -> np.ndarray:
+    """Each node's movement as CalculiX printed it to seven figures, by `row`."""
+    try:
+        text = Path(path).read_text()
+    except OSError as exc:
+        raise NoAnswer("CalculiX wrote no table of the nodes' movements") from exc
+    table = r"displacements \(vx,vy,vz\) for set NALL.*?\n\s*\n(.*?)(?:\n\s*\n|\Z)"
+    found = re.search(table, text, re.S)
+    if not found:
+        raise NoAnswer("CalculiX's table has no movement for the nodes")
+    moved = np.full((len(row), 3), np.nan)
+    for line in found.group(1).splitlines():
+        words = line.split()
+        if int(words[0]) in row:
+            moved[row[int(words[0])]] = [float(v) for v in words[1:4]]
+    if np.isnan(moved).any():
+        raise NoAnswer("CalculiX's table of the nodes' movements leaves some out")
+    return moved
 
 
 def _arrays(result: Any) -> tuple[dict[int, int], np.ndarray, np.ndarray, np.ndarray]:

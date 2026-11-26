@@ -1421,14 +1421,17 @@ def test_an_element_s_stiffness_times_its_movement_is_its_forces() -> None:
         assert flat == pytest.approx(flat.T, rel=1e-9, abs=1e-9 * float(np.abs(flat).max()))
 
 
-def test_a_movement_read_back_is_within_half_a_unit_in_its_sixth_figure() -> None:
-    """mqucifer/print-shop#320: CalculiX writes each movement to six figures, E12.5, so one read
-    back is within half a unit in its sixth figure of what was solved, and naught is naught."""
-    solved = np.array([1.2345649e-3, -9.9999949e-1, 0.0, 4.4e-12])
-    read = np.array([float(f"{v:.5E}") for v in solved])
-    apart = figures(read)
-    assert np.all(np.abs(read - solved) <= apart)
-    assert apart == pytest.approx([5e-9, 5e-7, 0.0, 5e-18], rel=1e-9, abs=0)
+def test_a_movement_read_back_is_within_half_a_unit_in_its_last_figure() -> None:
+    """mqucifer/print-shop#320: CalculiX prints each movement to seven figures, E13.6, and its
+    .frd has six, E12.5: one read back is within half a unit in its last figure of what was
+    solved, and naught is naught."""
+    solved = np.array([1.23456749e-3, -9.99999949e-1, 0.0, 4.4e-12])
+    printed = np.array([float(f"{v:.6E}") for v in solved])
+    apart = figures(printed)
+    assert np.all(np.abs(printed - solved) <= apart)
+    assert apart == pytest.approx([5e-10, 5e-8, 0.0, 5e-19], rel=1e-9, abs=0)
+    written = np.array([float(f"{v:.5E}") for v in solved])
+    assert np.all(np.abs(written - solved) <= figures(written, 6))
 
 
 # Statics across a joint
