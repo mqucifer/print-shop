@@ -11,6 +11,9 @@ import pytest
 from print_shop.bench.printed import (
     ORCA,
     PATTERNS,
+    Cylinder,
+    Layers,
+    Mesh,
     Printed,
     Region,
     Settings,
@@ -26,6 +29,10 @@ WHOLE: dict[str, Any] = {
          "why": "round the bolt hole, 3 mm margin"},
         {"name": "latch", "box": [[10, 0, 0], [30, 12, 8]], "infill": 40, "pattern": "grid",
          "infill_angle": 0, "top": 8, "bottom": 6},
+        {"name": "hole", "cylinder": {"at": [50, 6, 0], "axis": "z", "radius": 5, "length": 8},
+         "walls": 5},
+        {"name": "face", "mesh": "faces/leg-face.stl", "infill": 40},
+        {"name": "tab", "layers": [3, 6], "walls": 4, "layer_height": 0.1},
     ],
 }
 
@@ -34,8 +41,13 @@ def test_a_whole_part_reads_and_writes_back_the_same() -> None:
     printed = read(WHOLE)
     assert printed.settings == Settings(walls=3, line_width=0.45, top=5, bottom=4, infill=15.0,
                                         pattern="gyroid", infill_angle=45.0, layer_height=0.2)
-    assert [r.name for r in printed.regions] == ["bolt-1", "latch"]
-    assert printed.regions[0].box == ((0.0, 0.0, 0.0), (20.0, 12.0, 8.0))
+    assert [r.name for r in printed.regions] == ["bolt-1", "latch", "hole", "face", "tab"]
+    assert [r.kind for r in printed.regions] == ["box", "box", "cylinder", "mesh", "layers"]
+    assert printed.regions[0].shape == ((0.0, 0.0, 0.0), (20.0, 12.0, 8.0))
+    assert printed.regions[2].shape == Cylinder((50.0, 6.0, 0.0), (0.0, 0.0, 1.0), 5.0, 8.0)
+    assert printed.regions[3].shape == Mesh("faces/leg-face.stl")
+    assert printed.regions[4].shape == Layers(3.0, 6.0)
+    assert printed.regions[4].settings == Settings(walls=4, layer_height=0.1)
     assert printed.regions[0].settings == Settings(walls=6, infill=60.0)
     assert printed.regions[0].why == "round the bolt hole, 3 mm margin"
     assert read(as_json(printed)) == printed
@@ -47,7 +59,7 @@ def test_nothing_given_is_the_profiles_own() -> None:
 
 
 def test_a_point_takes_the_last_region_that_holds_it_over_the_part() -> None:
-    printed = read(WHOLE)
+    printed = read({**WHOLE, "regions": WHOLE["regions"][:2]})
     # Only bolt-1: its walls and infill, the part's pattern and shells.
     assert printed.at((5, 5, 5)) == Settings(walls=6, line_width=0.45, top=5, bottom=4,
                                              infill=60.0, pattern="gyroid", infill_angle=45.0,
@@ -60,10 +72,38 @@ def test_a_point_takes_the_last_region_that_holds_it_over_the_part() -> None:
     assert printed.at((50, 5, 5)) == printed.settings
 
 
+def test_each_shape_places_a_point() -> None:
+    printed = read(WHOLE)
+    hole, face, tab = printed.regions[2:]
+    assert hole.contains((52, 6, 4)) and not hole.contains((56, 6, 4))
+    assert not hole.contains((50, 6, 9))  # past its length
+    turned = Region("r", Cylinder((0, 0, 0), (-1.0, 0.0, 0.0), 2.0, 10.0), Settings(walls=3))
+    assert turned.contains((-5, 1, 1)) and not turned.contains((5, 0, 0))
+    assert tab.contains((0, 0, 0), height=4.0) and not tab.contains((0, 0, 0), height=7.0)
+    with pytest.raises(ValueError, match="a point's height above the bed is needed"):
+        tab.contains((0, 0, 0))
+    with pytest.raises(ValueError, match="it's read with its mesh"):
+        face.contains((0, 0, 0))
+    assert face.contains((0, 0, 0), in_mesh=lambda p: True)
+    found = printed.at((50, 6, 4), height=4.0, in_mesh={"face": lambda p: False})
+    assert (found.walls, found.layer_height) == (4, 0.1)  # tab is later than hole
+
+
+def test_a_part_given_whole_misses_nothing() -> None:
+    assert read(WHOLE).settings.missing() == []
+    assert read({"walls": 3, "infill": 15}).settings.missing() == [
+        "line_width", "top", "bottom", "pattern", "infill_angle", "layer_height"]
+
+
 def test_settings_are_said_in_orcas_own_keys() -> None:
     assert Settings(walls=6, infill=60.0, pattern="gyroid", infill_angle=0.0, top=8).orca() == {
         "wall_loops": "6", "sparse_infill_density": "60%", "sparse_infill_pattern": "gyroid",
-        "infill_direction": "0", "top_shell_layers": "8",
+        "infill_direction": "0", "top_shell_layers": "8", "top_shell_thickness": "0",
+    }
+    # One line width is both walls'; shells are layers, exactly.
+    assert Settings(line_width=0.45, bottom=4).orca() == {
+        "inner_wall_line_width": "0.45", "outer_wall_line_width": "0.45",
+        "bottom_shell_layers": "4", "bottom_shell_thickness": "0",
     }
     assert set(ORCA) == {f for f in Settings.__dataclass_fields__}
 
@@ -71,6 +111,12 @@ def test_settings_are_said_in_orcas_own_keys() -> None:
 def test_a_region_says_where_it_is_and_what_it_sets() -> None:
     region = Region("bolt-1", ((0, 0, 0), (20, 12, 8)), Settings(walls=6, infill=60.0), "why")
     assert region.said() == "bolt-1 (why): from (0, 0, 0) to (20, 12, 8), 6 walls, 60% infill"
+    said = [r.said() for r in read(WHOLE).regions[2:]]
+    assert said == [
+        "hole: a cylinder 5 mm in radius and 8 long from (50, 6, 0) along (0, 0, 1), 5 walls",
+        "face: the mesh faces/leg-face.stl, 40% infill",
+        "tab: the layers from 3 to 6 mm above the bed, 4 walls, 0.1 mm layers",
+    ]
 
 
 @pytest.mark.parametrize("raw,said", [
@@ -96,7 +142,25 @@ def test_each_field_is_checked_and_named(raw: dict[str, Any], said: str) -> None
 
 
 @pytest.mark.parametrize("region,said", [
-    ({"name": "r", "infill": 60}, "print's region r has a box"),
+    ({"name": "r", "infill": 60}, "print's region r has one shape, one of box, cylinder"),
+    ({"name": "r", "box": [[0, 0, 0], [1, 1, 1]], "layers": [0, 1], "infill": 60},
+     "print's region r has one shape, one of box, cylinder, mesh, layers: not box and layers"),
+    ({"name": "r", "cylinder": {"at": [0, 0, 0], "axis": "z", "radius": 1}, "infill": 60},
+     "print's region r's cylinder is"),
+    ({"name": "r", "cylinder": {"at": [0, 0, 0], "axis": "w", "radius": 1, "length": 2},
+      "infill": 60}, "print's region r's cylinder's axis is x, y or z"),
+    ({"name": "r", "cylinder": {"at": [0, 0, 0], "axis": [0, 0, 0], "radius": 1, "length": 2},
+      "infill": 60}, "print's region r's cylinder's axis has no length"),
+    ({"name": "r", "cylinder": {"at": [0, 0, math.nan], "axis": "z", "radius": 1, "length": 2},
+      "infill": 60}, "print's region r's cylinder's at is a finite number"),
+    ({"name": "r", "cylinder": {"at": [0, 0, 0], "axis": "z", "radius": 0, "length": 2},
+      "infill": 60}, "print's region r's cylinder's radius and length are each more than"),
+    ({"name": "r", "mesh": "face.step", "infill": 60}, "print's region r's mesh is an STL"),
+    ({"name": "r", "mesh": "../face.stl", "infill": 60},
+     "print's region r's mesh is named relative to the assembly or job file, inside"),
+    ({"name": "r", "layers": [6, 3], "infill": 60}, "print's region r's layers run from 6 to 3"),
+    ({"name": "r", "layers": [-1, 3], "infill": 60}, "print's region r's layers run from -1"),
+    ({"name": "r", "layers": [1], "infill": 60}, "print's region r's layers are \\[low, high\\]"),
     ({"name": "r", "box": [[0, 0, 0], [1, 1, 1]]}, "print's region r sets nothing of its own"),
     ({"name": "r", "box": [[0, 0], [1, 1]], "infill": 60}, "print's region r's box is two"),
     ({"name": "r", "box": [[0, 0, 0], [1, 1, math.inf]], "infill": 60},
