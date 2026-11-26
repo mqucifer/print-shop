@@ -95,8 +95,8 @@ FINER_SAID = (
 TIMEOUT = "BENCH_TIMEOUT"
 MARGIN = 20.0
 #: Where a part names its glass band, two passes are given the container's time less this many
-#: times what the one pass's try took, held back for the band's lower bound: on the Mac its
-#: read took 0.63 of the try on the traced frame bolted to a block.
+#: times what the one pass's try took, held back for the band's lower bound: on the traced frame
+#: bolted to a block its read took 0.41 of the try on CI's amd64 runner, and 0.37 on the Mac.
 RESERVE = 1.25
 
 
