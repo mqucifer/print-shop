@@ -334,20 +334,25 @@ def _waited(
     readers = [threading.Thread(target=f, daemon=True) for f in (read_out, read_err)]
     for reader in readers:
         reader.start()
-    while True:
+    code: int | None = None
+    while code is None:
         limit = longer if taken.is_set() else timeout
         left = limit - (time.monotonic() - began)
         if left <= 0:
             process.kill()
             process.wait()
-            return None, limit
+            break
         try:
             code = process.wait(timeout=min(left, POLL))
-            break
         except subprocess.TimeoutExpired:
             continue
     for reader in readers:
         reader.join(timeout=30)
+    for pipe in (process.stdout, process.stderr):
+        if pipe is not None:
+            pipe.close()
+    if code is None:
+        return None, limit
     return subprocess.CompletedProcess(argv, code, "".join(out), "".join(err)), limit
 
 
