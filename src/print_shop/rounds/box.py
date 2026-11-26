@@ -24,9 +24,12 @@ mark dropped with its start, and each file read "can't tell" though the bench ha
 Each container is told its limit (`BENCH_TIMEOUT`), as `host.run` tells it. A `load` that reads in
 two passes runs under an hour, as from `host.run` (mqucifer/print-shop#325): with `--parts` from
 the start; otherwise it's offered the hour, and the harness waits for it only once its output
-says it took it up, as two passes start (`host.TAKEN`). So a design round's `load` of a large
-assembly may take up to an hour, and every other command, and a script, keeps the run's own
-`command_seconds`.
+says it took it up, as two passes start (`host.TAKEN`): where the whole meets the container's
+memory, or where an assembly's one pass wouldn't end inside the run's own limit
+(mqucifer/print-shop#331). So a design round's `load` of a large assembly may take up to an hour,
+and every other command, and a script, keeps the run's own `command_seconds`. A one pass stopped
+at that limit, of an assembly two passes could read (`host.ABLE`), is told to ask for them with
+`--parts` (`host.past`).
 """
 
 from __future__ import annotations
@@ -51,8 +54,10 @@ from print_shop.rounds import paths
 #: A run's or a bench command's output kept, in bytes: the end of it.
 KEEP = 256_000
 #: The line, on a line of its own, that says a command took up the longer limit it was
-#: offered, and how often its container is looked at, in s.
+#: offered; the one that says two passes could read it (mqucifer/print-shop#331); and how often
+#: its container is looked at, in s.
 TAKEN_LINE = f"\n{host.TAKEN}\n".encode()
+ABLE_LINE = f"\n{host.ABLE}\n".encode()
 POLL = 0.5
 #: The exit code docker itself gives when it couldn't start the container.
 DOCKER_FAILED = 125
@@ -162,7 +167,9 @@ class Box:
         kept: deque[bytes] = deque()
         size = [0, 0]
         taken = threading.Event()
-        line = TAKEN_LINE
+        able = threading.Event()
+        lines_seen = ((TAKEN_LINE, taken), (ABLE_LINE, able))
+        reach = max(len(one) for one, _ in lines_seen)
 
         def drain() -> None:
             assert process.stdout is not None
@@ -171,9 +178,10 @@ class Box:
             for chunk in iter(lambda: os.read(descriptor, 65536), b""):
                 if longer is not None:
                     window = carry + chunk
-                    if line in window:
-                        taken.set()
-                    carry = window[-len(line) :]
+                    for one, seen in lines_seen:
+                        if one in window:
+                            seen.set()
+                    carry = window[-reach:]
                 kept.append(chunk)
                 size[0] += len(chunk)
                 while size[0] - len(kept[0]) >= KEEP:
@@ -183,6 +191,7 @@ class Box:
         reader = threading.Thread(target=drain, daemon=True)
         reader.start()
         timed_out = False
+        could = False
         code: int | None = None
         while True:
             if longer is not None and taken.is_set():
@@ -190,6 +199,8 @@ class Box:
             left = limit - (time.monotonic() - began)
             if left <= 0:
                 timed_out = True
+                # Read as it's stopped, as `host._waited` does: a one pass under its own limit.
+                could = able.is_set() and limit != longer
                 break
             try:
                 code = process.wait(timeout=min(left, POLL))
@@ -207,14 +218,15 @@ class Box:
         assert code is not None, "waited for to its end, or stopped and waited for"
         text = b"".join(kept).decode("utf-8", errors="replace")
         if longer is not None:
-            # The line that took the longer limit up is the harness's, not the answer's.
+            # The lines that took the longer limit up, or said two passes could, are the
+            # harness's, not the answer's.
             lines = text.splitlines(keepends=True)
-            text = "".join(one for one in lines if one.rstrip("\n") != host.TAKEN)
+            text = "".join(one for one in lines if one.rstrip("\n") not in (host.TAKEN, host.ABLE))
         seconds = round(time.monotonic() - began, 1)
         if code == DOCKER_FAILED and not timed_out:
             raise Gone(f"docker couldn't run the container: {text[-400:]}")
         if timed_out:
-            text += f"\nverdict: NO ANSWER: it ran past the {limit} s limit and was stopped\n"
+            text += "\n" + host.past(limit, could)
             code = 2 if command[1:2] == ["-I"] else 124
         elif code == host.KILLED:
             text += (
