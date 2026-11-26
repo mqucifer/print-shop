@@ -1403,6 +1403,7 @@ def run(args: Any, report: Report) -> None:
     (mqucifer/print-shop#301); or, where neither reads it, and parts of it name their glass
     band, read again with each band left out, as a lower bound (mqucifer/print-shop#295). The
     reply leads with that, names the parts and says why."""
+    _clock["now"] = None
     try:
         _read(args, report)
     finally:
@@ -1417,28 +1418,41 @@ def _read(args: Any, report: Report) -> None:
     if getattr(args, "parts", False):
         _run(args, report, two_pass="asked for with --parts")
         return
+    began = time.time()
     try:
         _run(args, report)
         return
     except _Unread as whole:
         unread = whole
+    tried = time.time() - began
     failed: NoAnswer | None = None
+    banded = [p.name for p in read(args.assembly).parts if p.band is not None]
     if unread.memory:
         # Read in two passes, inside the container's limits as they are
-        # (mqucifer/print-shop#301), before any part is read without its band.
+        # (mqucifer/print-shop#301), before any part is read without its band. Where a part
+        # names one, they're given the container's time less what the one pass's try took,
+        # held back for the band's lower bound, which reads a mesh smaller than that try's:
+        # so the lower bound is never lost to two passes that can't end in time.
+        from . import load_parts
         from .load_parts import OutOfTime
 
         _give_back()
         report.again()
         try:
-            _run(args, report, two_pass="the whole, read at once, met the container's memory")
+            _run(
+                args,
+                report,
+                two_pass="the whole, read at once, met the container's memory",
+                reserve=load_parts.RESERVE * tried if banded else 0.0,
+            )
             report.numbers["two_passes"]["whole_met"] = unread.evidence
             return
-        except OutOfTime:
-            raise
+        except OutOfTime as late:
+            if not banded:
+                raise
+            failed = late
         except NoAnswer as again:
             failed = again
-    banded = [p.name for p in read(args.assembly).parts if p.band is not None]
     if not banded:
         raise failed or unread
     why = unread.evidence + (f"; and in two passes, {failed}" if failed else "")
@@ -1446,7 +1460,16 @@ def _read(args: Any, report: Report) -> None:
     if refused:
         raise NoAnswer(refused)
     report.again()
+    from . import load_parts
+
+    # The band's read has the container's time left, and says so where that runs out.
+    clock = load_parts.Clock(report.started, label="the glass band's lower bound")
+    clock.done.append("its whole met the container's memory, and two passes were tried first")
+    _clock["now"] = clock
+    clock.start()
+    band_began = time.time()
     _run(args, report, without_bands=True)
+    clock.stop()
     names = ", ".join(banded)
     report.facts.insert(
         0,
@@ -1456,7 +1479,13 @@ def _read(args: Any, report: Report) -> None:
         "the band gone, never with a stiffness made up for it, and the band itself is unread. "
         f"{BOUND}",
     )
-    report.numbers["lower_bound"] = {"parts": banded, "why": why}
+    report.numbers["lower_bound"] = {
+        "parts": banded,
+        "why": why,
+        # How long the one pass's try took, and the band's read (mqucifer/print-shop#301).
+        "tried_s": round(tried, 1),
+        "band_s": round(time.time() - band_began, 1),
+    }
     report.why = f"read as a lower bound, {names} with its glass band left out: {report.why}"
 
 
@@ -1485,7 +1514,11 @@ def band_refused(lift: str | None, banded: list[str], why: str) -> str | None:
 
 
 def _run(
-    args: Any, report: Report, without_bands: bool = False, two_pass: str | None = None
+    args: Any,
+    report: Report,
+    without_bands: bool = False,
+    two_pass: str | None = None,
+    reserve: float = 0.0,
 ) -> None:
     freecad("load")
     args.lift = getattr(args, "lift", None)
@@ -1579,7 +1612,7 @@ def _run(
         # Here, as it builds on this module's own model.
         from . import load_parts
 
-        clock = load_parts.Clock(report.started)
+        clock = load_parts.Clock(report.started, reserve)
         _clock["now"] = clock
         clock.start()
         try:
@@ -1597,7 +1630,6 @@ def _run(
         }
         coarse = {**coarse, "parts": {n: r["part"] for n, r in rough.items()}}
     else:
-        _clock["now"] = None
         fine = _solved(assembly, placed, args, size)
         coarse = _solved(assembly, placed, args, round(size * COARSER, 3))
     force = float(sum(np.linalg.norm(one["force"]) for one in fine["raw_loads"]))

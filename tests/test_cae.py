@@ -13,6 +13,7 @@ import json
 import math
 import re
 import shutil
+import warnings
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -1682,6 +1683,35 @@ def test_two_passes_stand_in_only_a_bolt_s_bore_by_a_square_no_narrower_than_it(
         assert whole - squared == pytest.approx(corners, rel=1e-3), name
 
 
+@pytest.mark.assembly
+def test_two_passes_that_can_t_end_in_time_leave_a_glass_band_its_lower_bound(
+    cae: Any, glass: Path
+) -> None:
+    """mqucifer/print-shop#301, the operator's ruling: where a part names its glass band, two
+    passes keep back time for the band's lower bound, and fall back to it, saying why, where
+    they'd run past what's left. Forced (`cae_cases/reserve_forced.py`), so on any machine: the
+    one pass is said to have met the container's memory, and two passes are left two seconds.
+    The band's read is in time, its `why` says the two passes ran out, and it reads as the
+    lower bound always has."""
+    shutil.copy(CASES / "reserve_forced.py", cae.work / "reserve_forced.py")
+    done = host.run(
+        ["reserve_forced.py", "load", f"{glass.name}/joined.json", "--weight", "1",
+         "--at", "-6,50,6"],
+        cae.work, python=True, image=host.CAE_IMAGE,
+    )  # fmt: skip
+    found = re.search(r"saved: (\S+)\.txt and \.json", done.stdout)
+    assert found, done.stdout + done.stderr
+    record = json.loads((cae.work / f"{found.group(1)}.json").read_text())
+    assert record["verdict"] == "OK", done.stdout
+    lower = record["numbers"]["lower_bound"]
+    assert lower["parts"] == ["frame"]
+    assert "; and in two passes, two passes met the container's time, 600 s, less the " in (
+        lower["why"]
+    ), lower["why"]
+    assert "kept for a glass band's lower bound" in lower["why"]
+    assert record["seconds"] < host.TIMEOUT
+
+
 #: The stool pushed sideways at its top (mqucifer/print-shop#295).
 PUSH = ("--weight", "5", "--at", "0,100,154", "--toward", "+x")
 
@@ -1868,7 +1898,16 @@ def test_a_glass_frame_bolted_to_a_block_reads_as_a_lower_bound_with_its_band_le
     lower = answer.numbers["lower_bound"]
     assert lower["parts"] == ["frame"]
     assert "it met the container's memory, 3 GiB, and the kernel stopped it" in lower["why"]
-    assert "; and in two passes, the mesh gives block no element of its own" in lower["why"]
+    # Two passes were tried first. On the Mac, the straight-sided mesh gives the block no element
+    # of its own and they're refused; on CI's runner it parts them, and they run past the time
+    # kept for the band. Either way the band's read fits in what's kept for it.
+    assert ("; and in two passes, the mesh gives block no element of its own" in lower["why"]
+            or "kept for a glass band's lower bound" in lower["why"]), lower["why"]  # fmt: skip
+    assert lower["band_s"] <= 1.25 * lower["tried_s"], lower
+    warnings.warn(
+        f"amd64 or not, the joined frame's one-pass try took {lower['tried_s']} s and its band's "
+        f"read {lower['band_s']} s", stacklevel=1,
+    )  # fmt: skip
     assert "how far the loaded places move along the load, taken together, is a bound" in (
         answer.text
     )

@@ -95,6 +95,10 @@ FINER_SAID = (
 #: written.
 TIMEOUT = "BENCH_TIMEOUT"
 MARGIN = 20.0
+#: Where a part names its glass band, two passes are given the container's time less this many
+#: times what the one pass's try took, held back for the band's lower bound: on the Mac its
+#: read took 0.63 of the try on the traced frame bolted to a block.
+RESERVE = 1.25
 
 
 # The first pass
@@ -546,10 +550,14 @@ class Clock:
     `MARGIN`, in whatever step it's in, so even a first step longer than any yet stops in time
     to say where it was."""
 
-    def __init__(self, started: float) -> None:
+    def __init__(self, started: float, reserve: float = 0.0, label: str = "two passes") -> None:
         given = os.environ.get(TIMEOUT, "")
         self.limit = float(given) if given.replace(".", "", 1).isdigit() else None
         self.started = started
+        #: Time held back from the two passes for a glass band's lower bound, in s, and what's
+        #: timed: two passes, or that lower bound.
+        self.reserve = reserve
+        self.label = label
         self.longest: dict[str, float] = {}
         self.done: list[str] = []
         self.now = "the first pass"
@@ -573,7 +581,7 @@ class Clock:
     def left(self) -> float | None:
         if self.limit is None:
             return None
-        return self.limit - MARGIN - (time.time() - self.started)
+        return self.limit - MARGIN - self.reserve - (time.time() - self.started)
 
     def check(self, kind: str, what: str) -> None:
         """Stop before `what`, a step of `kind`, where the longest of its kind so far
@@ -585,8 +593,13 @@ class Clock:
 
     def _said(self, where: str) -> str:
         spent = time.time() - self.started
+        kept = (
+            f", less the {self.reserve:.0f} s kept for a glass band's lower bound"
+            if self.reserve
+            else ""
+        )
         return (
-            f"two passes met the container's time, {self.limit:g} s, after {spent:.0f} s, "
+            f"{self.label} met the container's time, {self.limit:g} s{kept}, after {spent:.0f} s, "
             f"{where}: "
             + "; ".join(self.done or ["nothing was read yet"])
             + ". Nothing is judged on part of an assembly"
