@@ -23,6 +23,8 @@ from print_shop.bench.load import (
     beyond,
     bolt_pulls,
     element_forces,
+    element_stiffness,
+    figures,
     lies_on,
     memory_met,
     misordered,
@@ -1399,6 +1401,34 @@ def test_each_element_s_mid_side_nodes_are_freecad_s_and_checked_on_their_own_si
     for change in (swapped, along, aside, a_corner):
         assert wrong(change), change.__name__
     assert misordered(wired[:, :9], points).all(), "nine nodes aren't an element's ten"
+
+
+def test_an_element_s_stiffness_times_its_movement_is_its_forces() -> None:
+    """mqucifer/print-shop#320: the one pass's balance holds what's left at each node to what
+    the solve's own figures can leave there, through each element's stiffness. On 50 made-up
+    second-order tetrahedra, long, flat and with their sides bent, the stiffness times any
+    movement is the element's forces (`element_forces`), and it's symmetric."""
+    rng = np.random.default_rng(320)
+    for _ in range(50):
+        corners = rng.normal(size=(4, 3)) * [3.0, 1.0, 0.3]
+        mids = np.array([(corners[i] + corners[j]) / 2 for i, j in MIDS])
+        places = np.concatenate([corners, mids + rng.normal(size=(6, 3)) * 0.02])[None]
+        moved = rng.normal(size=(1, 10, 3))
+        stiffness = element_stiffness(places, 1500.0, 0.38)
+        forces = np.einsum("naibk,nbk->nai", stiffness, moved)
+        assert forces == pytest.approx(element_forces(places, moved, 1500.0, 0.38), rel=1e-9)
+        flat = stiffness.reshape(30, 30)
+        assert flat == pytest.approx(flat.T, rel=1e-9, abs=1e-9 * float(np.abs(flat).max()))
+
+
+def test_a_movement_read_back_is_within_half_a_unit_in_its_sixth_figure() -> None:
+    """mqucifer/print-shop#320: CalculiX writes each movement to six figures, E12.5, so one read
+    back is within half a unit in its sixth figure of what was solved, and naught is naught."""
+    solved = np.array([1.2345649e-3, -9.9999949e-1, 0.0, 4.4e-12])
+    read = np.array([float(f"{v:.5E}") for v in solved])
+    apart = figures(read)
+    assert np.all(np.abs(read - solved) <= apart)
+    assert apart == pytest.approx([5e-9, 5e-7, 0.0, 5e-18], rel=1e-9, abs=0)
 
 
 # Statics across a joint

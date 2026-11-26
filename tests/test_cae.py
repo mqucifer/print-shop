@@ -1740,6 +1740,18 @@ def test_a_joint_on_curved_slivers_reads_as_statics_says_in_freecad_s_order_not_
     assert inside["force_n"] == pytest.approx(inside["statics_force_n"], abs=1e-3)
     apart = np.linalg.norm(np.subtract(outside["force_n"], outside["statics_force_n"]))
     assert apart > 0.2 * G, outside["force_n"]
+    # Held to the balance, as the one pass is now, the guess is read as nothing: its elements
+    # don't carry what CalculiX solved, and the sleeve they're in is named.
+    held = forced(cae, "guess-checked", *SLEEVED)
+    assert held.verdict == "NO ANSWER" and held.code == 2, held.text
+    why = held.record["why"]
+    assert re.search(
+        r"^the mesh's elements don't balance as CalculiX solved them: at \d+ node\(s\) of the "
+        r"parts? [a-z, ]*sleeve[a-z, ]*, what they carry is further from the load than the six "
+        r"figures CalculiX gives each movement can make it",
+        why,
+    ), why
+    assert "joints" not in held.numbers
 
 
 def test_an_element_whose_nodes_aren_t_in_freecad_s_order_is_no_answer_naming_its_part(
@@ -1748,8 +1760,13 @@ def test_an_element_whose_nodes_aren_t_in_freecad_s_order_is_no_answer_naming_it
     """mqucifer/print-shop#320: the one pass takes each element's nodes in FreeCAD's own order,
     checked. With two of one element's mid-side nodes given the other way round, as they'd be
     were that order wrong, nothing is read from it: the reply is `NO ANSWER`, naming the part
-    the element is in and why, and no figure of a joint is given. The elements beside it that
-    share those sides are named too: their sides' nodes now differ from its."""
+    the element is in and why, and no figure of a joint is given. The element has no node on a
+    joint's faces, so every element beside it that shares those sides, whose nodes now differ
+    from its, is of that part too.
+
+    And with the checks of the sides' shared nodes and of where they lie turned off, as for a
+    swap on an element no other shares a side with, which they can't tell: the elements don't
+    balance as CalculiX solved them, and that's `NO ANSWER` too, naming the part."""
     args = ("load", "load/two.json", "--weight", "1", *TIP)
     assert cae(*args).verdict == "OK"
     wrong = forced(cae, "misordered", *args)
@@ -1763,6 +1780,17 @@ def test_an_element_whose_nodes_aren_t_in_freecad_s_order_is_no_answer_naming_it
     ), why
     assert "joints" not in wrong.numbers
     assert "Traceback" not in wrong.text
+    alone = forced(cae, "unshared", *args)
+    assert alone.verdict == "NO ANSWER" and alone.code == 2, alone.text
+    assert re.search(
+        r"^the mesh's elements don't balance as CalculiX solved them: at \d+ node\(s\) of the "
+        r"part tip, what they carry is further from the load than the six figures CalculiX "
+        r"gives each movement can make it, up to [\d.e+]+ times as far, at a mesh of at most "
+        r"[\d.]+ mm: an element's nodes there aren't in the order CalculiX solved them, so no "
+        r"force on a joint is read from them, and nothing is read$",
+        alone.record["why"],
+    ), alone.record["why"]
+    assert "joints" not in alone.numbers
 
 
 # A whole furniture assembly (mqucifer/print-shop#295): a turned latch, a large assembly and a

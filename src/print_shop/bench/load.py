@@ -137,8 +137,12 @@ NOTHING = 1e-3
 ON_FACE = 0.01
 #: How a mesh whose elements' sides are straight is said where a step names it.
 STRAIGHT = ", its elements straight-sided"
-#: The most elements whose parts are looked for, where their nodes' order can't be read.
-WIRING_NAMED = 50
+#: CalculiX is given each load to nine figures (`_write`) and solves it directly to far closer
+#: than six: what's left at a node, past what its six figures for each movement account for
+#: (`figures`), as a share of the whole load (mqucifer/print-shop#320).
+LOADS = 1e-8
+#: The elements whose stiffness is taken at once, for the balance (`_Model._imbalance`).
+GROUP = 2048
 #: The held faces' reaction is the weight within this share, or nothing is said: CalculiX's own
 #: sum of the forces it solved for.
 REACTION = 0.01
@@ -223,6 +227,43 @@ def element_forces(
     return forces
 
 
+def element_stiffness(places: np.ndarray, modulus: float, poisson: float) -> np.ndarray:
+    """Each second-order tetrahedron's stiffness matrix, in N/mm, as `[element, node, axis,
+    node, axis]`: the force on each of its ten nodes along each axis for a millimetre's
+    movement of each along each, which `element_forces` is the sum of. At each integration
+    point, for node a along i and node b along k, with each node's slope in space g, it's
+    μ g_a·g_b where i is k, and μ g_ak g_bi + λ g_ai g_bk, weighted as the forces are."""
+    lame = modulus * poisson / ((1 + poisson) * (1 - 2 * poisson))
+    shear = modulus / (2 * (1 + poisson))
+    corners = np.array([[-1.0, -1, -1], [1, 0, 0], [0, 1, 0], [0, 0, 1]])
+    stiffness = np.zeros((len(places), 10, 3, 10, 3))
+    for point in POINTS:
+        share = np.array([1 - sum(point), *point])
+        slopes = np.zeros((10, 3))
+        for i in range(4):
+            slopes[i] = (4 * share[i] - 1) * corners[i]
+        for k, (i, j) in enumerate(MIDS, 4):
+            slopes[k] = 4 * (share[i] * corners[j] + share[j] * corners[i])
+        mapped = np.einsum("ak,nai->nki", slopes, places)
+        g = np.einsum("nik,ak->nai", np.linalg.inv(mapped), slopes)
+        weight = (np.abs(np.linalg.det(mapped)) / 24)[:, None, None, None, None]
+        both = np.einsum("nac,nbc->nab", g, g)[:, :, None, :, None] * np.eye(3)[None, None, :, None]
+        stiffness += weight * (
+            shear * both
+            + shear * np.einsum("nak,nbi->naibk", g, g)
+            + lame * np.einsum("nai,nbk->naibk", g, g)
+        )
+    return stiffness
+
+
+def figures(moved: np.ndarray) -> np.ndarray:
+    """How far each movement read back can be from what CalculiX solved, in mm: half a unit in
+    its sixth figure, as its .frd file writes each to six (E12.5). Nothing where it's naught."""
+    size = np.abs(moved)
+    place = np.floor(np.log10(np.where(size > 0, size, 1.0)))
+    return np.where(size > 0, 0.5 * 10.0 ** (place - 5), 0.0)
+
+
 def misordered(wired: np.ndarray, points: np.ndarray) -> np.ndarray:
     """Which elements' nodes aren't in `MIDS`' order (mqucifer/print-shop#320), as a flag for
     each row of `wired`, each element's ten nodes as rows of `points`. Each element's nodes are
@@ -230,8 +271,10 @@ def misordered(wired: np.ndarray, points: np.ndarray) -> np.ndarray:
     element with that side has it, and of no other side or corner; and each lies on its own
     side's curve: in the middle half of the side along its chord, as a second-order side has
     to be not to fold back on itself, and no further off the chord than half its length, as a
-    side bent round no more than a half circle is. A node given to another side lies on none
-    of these."""
+    side bent round no more than a half circle is. That last says only that each node is near
+    a side: a neighbouring side's midpoint lies within those bounds too, so it doesn't tell two
+    sides of one element apart. Where another element has the side, its shared node does; and
+    for any element that carries load, the balance does (`_Model._balanced`)."""
     if wired.ndim != 2 or wired.shape[1] != 4 + len(MIDS):
         return np.ones(len(wired), dtype=bool)
     ends = np.array(MIDS)
@@ -733,45 +776,36 @@ class _Model:
         if self._wiring is not None:
             return self._wiring
         given = [self.fem.getElementNodes(e) for e in self.fem.Volumes]
-        if any(len(nodes) != 4 + len(MIDS) for nodes in given):
-            short = [k for k, nodes in enumerate(given) if len(nodes) != 4 + len(MIDS)]
+        corners = np.array([[self.row[n] for n in nodes[:4]] for nodes in given])
+        short = [k for k, nodes in enumerate(given) if len(nodes) != 4 + len(MIDS)]
+        if short:
             raise NoAnswer(
                 f"the mesh's elements can't be read in their order: {len(short)} element(s) "
-                f"of {self._parts_of([given[k][:4] for k in short])} haven't ten nodes, at a "
-                f"mesh of at most {self.size:g} mm{STRAIGHT if self.straight else ''}, so no "
-                "force on a joint is read from them, and nothing is read"
+                f"of {self._parts_of(corners, short)} haven't ten nodes, at a mesh of at most "
+                f"{self.size:g} mm{STRAIGHT if self.straight else ''}, so no force on a joint is "
+                "read from them, and nothing is read"
             )
         wired = np.array([[self.row[n] for n in nodes] for nodes in given])
         wrong = np.flatnonzero(misordered(wired, self.points))
         if wrong.size:
             raise NoAnswer(
                 f"the mesh's elements can't be read in FreeCAD's order: {wrong.size} "
-                f"element(s) of {self._parts_of([given[k][:4] for k in wrong])} haven't six "
-                "mid-side nodes of their own, each on its own side, at a mesh of at most "
+                f"element(s) of {self._parts_of(corners, wrong)} haven't six mid-side nodes of "
+                "their own, each on its own side, at a mesh of at most "
                 f"{self.size:g} mm{STRAIGHT if self.straight else ''}, so no force on a joint is "
                 "read from them, and nothing is read"
             )
         self._wiring = wired
         return wired
 
-    def _parts_of(self, corners: list[Any]) -> str:
-        """The parts some elements are in, named, from each one's corners, by node number."""
-        import FreeCAD as App
-
-        names = [p.name for p in self.assembly.parts]
-        found: list[str] = []
-        for nodes in corners[:WIRING_NAMED]:
-            middle = App.Vector(*np.mean([self.nodes[n] for n in nodes[:4]], axis=0))
-            part = next(
-                (n for n, s in zip(names, self.solids, strict=True)
-                 if s.isInside(middle, 1e-6, False)),
-                None,
-            )  # fmt: skip
-            if part is not None and part not in found:
-                found.append(part)
-        if not found:
-            return "the joined parts"
-        return ("the part " if len(found) == 1 else "the parts ") + ", ".join(found)
+    def _parts_of(self, corners: np.ndarray, elements: Any) -> str:
+        """The parts some of the mesh's elements are in, named: each part is what's reached from
+        one of its elements without crossing a joint (`_owned`), which takes each element's
+        corners alone, so it's told whatever its mid-side nodes are."""
+        owned = self._owned(corners, self.row, self.points)
+        names = [p.name for p, mine in zip(self.assembly.parts, owned, strict=True)
+                 if mine[elements].any()]  # fmt: skip
+        return ("the part " if len(names) == 1 else "the parts ") + ", ".join(names)
 
     def _unbalanced(self) -> np.ndarray:
         """What's left unbalanced at each node, as rows: the load put on it less what the
@@ -781,6 +815,10 @@ class _Model:
         forces = element_forces(
             self.points[wired], self.moved[wired], material.modulus_mpa, material.poisson
         )
+        return self._left(wired, forces)
+
+    def _left(self, wired: np.ndarray, forces: np.ndarray) -> np.ndarray:
+        """What's left unbalanced at each node, as rows, of the elements' `forces`."""
         left = np.zeros((len(self.points), 3))
         np.add.at(left, wired, -forces)
         for node, push in self.pushed.items():
@@ -788,6 +826,46 @@ class _Model:
         for node, axes in self.constrained.items():
             left[self.row[node], sorted(axes)] = 0.0
         return left
+
+    def _imbalance(self, wired: np.ndarray, forces: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+        """What's left unbalanced at each node on each axis not held, in N, and the most the
+        solve's own figures can leave there: each element's stiffness (`element_stiffness`),
+        each term taken as its size, times how far each of its nodes' movements can be from
+        what CalculiX solved (`figures`), summed over the elements at the node; and `LOADS` of
+        the whole load. Element by element, in groups of `GROUP`, so it fits the memory."""
+        material = self.assembly.parts[0].material
+        apart = figures(self.moved)
+        allowed = np.zeros((len(self.points), 3))
+        for start in range(0, len(wired), GROUP):
+            rows = wired[start : start + GROUP]
+            stiff = element_stiffness(self.points[rows], material.modulus_mpa, material.poisson)
+            np.add.at(allowed, rows, np.einsum("naibk,nbk->nai", np.abs(stiff), apart[rows]))
+        allowed += LOADS * sum(float(np.linalg.norm(p)) for p in self.pushed.values())
+        return np.abs(self._left(wired, forces)), allowed
+
+    def _balanced(self, wired: np.ndarray, forces: np.ndarray, owned: np.ndarray) -> None:
+        """The one pass's elements balance as CalculiX solved them (mqucifer/print-shop#320): at
+        every node not held, what they carry is the load put on it, within what the solve's
+        own figures can leave (`_imbalance`). An element whose nodes aren't in the order
+        CalculiX took them carries other forces, and leaves the rest at its nodes: wherever
+        that's more than the figures account for, nothing is read, and the parts are named."""
+        left, allowed = self._imbalance(wired, forces)
+        over = np.flatnonzero((left > allowed).any(axis=1))
+        if not over.size:
+            return
+        elements = np.flatnonzero(np.isin(wired, over).any(axis=1))
+        names = [p.name for p, mine in zip(self.assembly.parts, owned, strict=True)
+                 if mine[elements].any()]  # fmt: skip
+        worst = float((left[over] / allowed[over]).max())
+        raise NoAnswer(
+            "the mesh's elements don't balance as CalculiX solved them: at "
+            f"{over.size} node(s) of {'the part ' if len(names) == 1 else 'the parts '}"
+            f"{', '.join(names)}, what they carry is further from the load than the six "
+            f"figures CalculiX gives each movement can make it, up to {worst:.3g} times as far, "
+            f"at a mesh of at most {self.size:g} mm{STRAIGHT if self.straight else ''}: an "
+            "element's nodes there aren't in the order CalculiX solved them, so no force on a "
+            "joint is read from them, and nothing is read"
+        )
 
     def _prerequisites(self, wrong: str) -> str:
         """What FreeCAD says is missing before it solves."""
@@ -840,6 +918,8 @@ class _Model:
             self.points[wired], self.moved[wired], material.modulus_mpa, material.poisson
         )
         owned = self._owned(wired, self.row, self.points)
+        if not self.two_pass:
+            self._balanced(wired, forces, owned)
         self.part_rows = {name: np.unique(wired[owned[k]]) for k, name in enumerate(names)}
         self.within = {}
         for k, name in enumerate(names):
