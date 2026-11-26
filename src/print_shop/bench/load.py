@@ -1044,11 +1044,18 @@ class _Model:
             # reached from another's, across faces where they meet that weren't found on the
             # mesh (mqucifer/print-shop#319).
             meets = sorted({n for pair in self.met if pair & set(empty) for n in pair} - set(empty))
+            # And how each is placed, where it's turned (mqucifer/print-shop#334).
+            turned = "".join(
+                f"; {p.name} is placed by "
+                + ", then ".join(f"{degrees:g}° about {axis}" for axis, degrees in p.turn)
+                for p in parts
+                if p.name in empty and p.turn
+            )
             raise NoAnswer(
                 f"the mesh gives {', '.join(empty)} no element of its own, at a mesh of at most "
                 f"{self.size:g} mm{STRAIGHT if self.straight else ''}: the mesh's triangles on "
                 f"the faces where it meets {', '.join(meets) or 'the other parts'} weren't "
-                "found, so it isn't parted from them, and nothing of it is read"
+                f"found, so it isn't parted from them, and nothing of it is read{turned}"
             )
         return owned
 
@@ -1074,7 +1081,11 @@ class _Model:
         a triangle is one whose corners are, and that lies on it (`lies_on`): not one of the
         face beside it whose corners are all on the edge they share. So too on a flat face along
         a curved edge, where a mid-side node is on the edge's chord, just past the face. A mesh
-        whose sides are curved is read as it was."""
+        whose sides are curved is read as it was.
+
+        Either way a node is on the face within the tolerance the joined parts hold it to
+        (`as_joined`, mqucifer/print-shop#334), not the face's own alone."""
+        face = as_joined(face)
         if not self.straight:
             return [self.fem.getElementNodes(e) for e in self.fem.getFacesByFace(face)]
         import FreeCAD as App
@@ -1102,8 +1113,9 @@ class _Model:
     def _face_nodes(self, face: Any) -> list[int]:
         """The mesh's nodes on a face where two parts meet: on a straight-sided mesh, with its
         triangles' mid-side nodes, which are off a curved face, or past a curved edge of a flat
-        one (`_on_face`). A held face's are FreeCAD's own, as its constraint holds those."""
-        found = self.fem.getNodesByFace(face)
+        one (`_on_face`); within the tolerance the joined parts hold it to (`as_joined`). A held
+        face's are FreeCAD's own, as its constraint holds those."""
+        found = self.fem.getNodesByFace(as_joined(face))
         if not self.straight:
             return list(found)
         return sorted({*found, *(n for nodes in self._on_face(face) for n in nodes)})
@@ -1554,6 +1566,26 @@ def _quiet() -> Iterator[None]:
 #: A straight-sided triangle lies on a face where its middle is within this, in mm, beyond its
 #: longest side's sag, and its normal within 60° of the face's (`lies_on`).
 ON_SAG, ON_NORMAL = 1e-4, 0.5
+
+
+def as_joined(face: Any) -> Any:
+    """A face where two parts meet, as the joined parts hold it (mqucifer/print-shop#334): within
+    the greatest tolerance of the face, its edges and its corners. FreeCAD finds a node on a face
+    within the face's own tolerance only, but where two parts' faces meet a little more than
+    OCC's 1e-7 mm apart, as a part's do when its turns place it a hair off its neighbours', the
+    fuse shares them and holds their edges to more than that: gmsh's nodes along those edges
+    then lie off the face by more than its own tolerance, the mesh's triangles there weren't
+    found, and the part was taken for one with its neighbours. A face its edges and corners hold
+    no looser is itself."""
+    import Part
+
+    held = max([face.Tolerance, *(e.Tolerance for e in face.Edges),
+                *(v.Tolerance for v in face.Vertexes)])  # fmt: skip
+    if held <= face.Tolerance:
+        return face
+    found = face.copy()
+    found.fixTolerance(held, Part.Face)
+    return found
 
 
 def lies_on(corners: np.ndarray, nearest: np.ndarray, normal: np.ndarray, bend: float) -> bool:

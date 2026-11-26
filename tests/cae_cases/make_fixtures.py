@@ -58,6 +58,12 @@ axis and 80 tall, with a 2° seam between them, and a rib across the seam: a cap
 round the slices' outsides, and a fin under it that fills the seam, touching both. Each is drawn
 in place, and again in its print pose and placed by its turns: about x, y or z, and two combined.
 And a peg 6 across standing in a blind hole 10 deep in a cube of 20, touching its wall and floor.
+
+`seam/` (mqucifer/print-shop#334): a strip 1.5 thick, 30 long and 40 tall, bonded in a seam
+between two blocks and standing 10 proud of their tops, the seam turned 30° about z. The strip
+is drawn flat, as printed, and placed by a turn about x and then about z, its `at` written to six
+decimals, as an assembly's file gives it, so it sits a hair, 0.26 µm, off the blocks; and drawn
+standing and placed by the one turn about z, exactly where it is, and by its `at` to six decimals.
 """
 
 from __future__ import annotations
@@ -1024,6 +1030,48 @@ def turns() -> None:
     assembly(out / "peg.json", pegged, [{"between": ["peg", "socket"], "kind": "touching"}], floor)
 
 
+#: The strip in its seam (mqucifer/print-shop#334): its thickness, length and height, how far it
+#: stands off the floor, and the seam's turn about z.
+SEAM_T, SEAM_L, SEAM_H, SEAM_LOW, SEAM_TURN = 1.5, 30.0, 40.0, 10.0, 30.0
+#: Where it's placed in its seam's own axes before that turn, as a design run's ribs are.
+SEAM_AT = (0.0, -2.35, 0.0)
+
+
+def seam() -> None:
+    """A strip in a seam between two blocks, the seam off the axes: placed by two turns, with
+    its `at` to six decimals, and by one, exactly."""
+    out = Path("seam")
+    round_z = [["z", SEAM_TURN]]
+    both = [["x", -90], ["z", SEAM_TURN]]
+
+    def in_seam(low: tuple[float, float, float], high: tuple[float, float, float]) -> Any:
+        made = box(low, high)
+        made.transformShape(_turned(round_z), True)
+        return made
+
+    t, long, h = SEAM_T, SEAM_L, SEAM_H
+    # The blocks' tops below the strip's: it stands proud of them, so the faces it meets them
+    # by are bounded by their edges as well as its own.
+    save(in_seam((-10, -20, 0), (long + 10, 0, h)), out / "block1.step")
+    save(in_seam((-10, t, 0), (long + 10, t + 20, h)), out / "block2.step")
+    at = _turned(round_z).multVec(App.Vector(*SEAM_AT))
+    strip = box((0, 0, SEAM_LOW), (long, t, SEAM_LOW + h))
+    strip.transformShape(App.Matrix(1, 0, 0, -SEAM_AT[0], 0, 1, 0, -SEAM_AT[1], 0, 0, 1,
+                                    -SEAM_AT[2], 0, 0, 0, 1), True)  # fmt: skip
+    strip.transformShape(_turned(round_z), True)
+    save(print_pose(strip, both), out / "strip-flat.step")
+    save(print_pose(strip, round_z), out / "strip-standing.step")
+    blocks: Rows = [{"name": f"block{k}", "file": f"block{k}.step", "layers": "z"} for k in (1, 2)]
+    joints: Rows = [{"between": ["strip", f"block{k}"], "kind": "bonded"} for k in (1, 2)]
+    held = [{"plane": "z=0", "how": "fixed"}]
+    flat = {"name": "strip", "file": "strip-flat.step", "turn": both, "layers": "z"}
+    standing = {"name": "strip", "file": "strip-standing.step", "turn": round_z, "layers": "y"}
+    exact, written = [at.x, at.y, at.z], [round(v, 6) for v in (at.x, at.y, at.z)]
+    assembly(out / "two-turns.json", [*blocks, {**flat, "at": written}], joints, held)
+    assembly(out / "one-turn.json", [*blocks, {**standing, "at": exact}], joints, held)
+    assembly(out / "one-turn-written.json", [*blocks, {**standing, "at": written}], joints, held)
+
+
 def main() -> None:
     loads()
     throughs()
@@ -1034,6 +1082,7 @@ def main() -> None:
     plays()
     turned()
     turns()
+    seam()
     large()
     stool()
     sleeved()
