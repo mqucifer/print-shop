@@ -1707,6 +1707,29 @@ def test_what_load_cant_read_is_no_answer_naming_the_part_and_the_step(cae: Any)
         assert "Traceback" not in answer.text
 
 
+def test_an_element_whose_nodes_aren_t_in_freecad_s_order_is_no_answer_naming_its_part(
+    cae: Any,
+) -> None:
+    """mqucifer/print-shop#320: the one pass takes each element's nodes in FreeCAD's own order,
+    checked. With two of one element's mid-side nodes given the other way round, as they'd be
+    were that order wrong, nothing is read from it: the reply is `NO ANSWER`, naming the part
+    the element is in and why, and no figure of a joint is given. The elements beside it that
+    share those sides are named too: their sides' nodes now differ from its."""
+    args = ("load", "load/two.json", "--weight", "1", *TIP)
+    assert cae(*args).verdict == "OK"
+    wrong = forced(cae, "misordered", *args)
+    assert wrong.verdict == "NO ANSWER" and wrong.code == 2, wrong.text
+    why = wrong.record["why"]
+    assert re.search(
+        r"the mesh's elements can't be read in FreeCAD's order: \d+ element\(s\) of the part tip "
+        r"haven't six mid-side nodes of their own, each on its own side, at a mesh of at most "
+        r"[\d.]+ mm, so no force on a joint is read from them, and nothing is read",
+        why,
+    ), why
+    assert "joints" not in wrong.numbers
+    assert "Traceback" not in wrong.text
+
+
 # A whole furniture assembly (mqucifer/print-shop#295): a turned latch, a large assembly and a
 # glass frame. Marked `assembly`, so CI runs them in a job of their own beside the rest of `cae`:
 # together they take about 23 minutes of solves, and the cae job has 30.
@@ -1961,6 +1984,34 @@ def test_a_bolt_left_out_gives_first_and_two_passes_read_no_lower_than_one(
     assert "second check: pass 2, top on its own: its three pins carry 0.0000 N" in two.text
     first = two.numbers["two_passes"]["first"]
     assert first["squared_bores"] == 8 and first["memory_peak"] > 0
+
+
+#: The figures of a joint `load`'s one pass reads from its nodes' balance, and so from how each
+#: element's nodes are wired (mqucifer/print-shop#320).
+BALANCED = ("force_n", "moment_nmm", "pull_n", "shear_n", "bending_nmm", "twist_nmm",
+            "coarse_force_n", "coarse_moment_nmm", "bolt_pull_n", "bolt_pull_mesh_n")  # fmt: skip
+
+
+@pytest.mark.assembly
+def test_the_stool_reads_the_same_in_freecad_s_order_as_by_the_old_guess(
+    cae: Any, stool: dict[str, Answer]
+) -> None:
+    """mqucifer/print-shop#320: the one pass took each element's mid-side nodes by where they
+    lie, and on the stool that wired 5 of its elements otherwise than FreeCAD, small ones on
+    the legs' bores, none with a node on a joint's faces. In FreeCAD's order, as now, it reads
+    bit-identical to the old guess: each part's strains, each joint's force and moment, on
+    both meshes, and its bolts' pulls, and how far it moves."""
+    now, old = stool["one"], forced(cae, "guess", "load", "large/stool.json", *PUSH)
+    assert now.verdict == old.verdict == "OK", old.text
+    assert now.numbers["parts"] == old.numbers["parts"]
+    assert now.numbers["loads"] == old.numbers["loads"]
+    for key in ("moves_mm", "most_moves_mm", "reaction_n"):
+        assert now.numbers[key] == old.numbers[key], key
+    for name, joint in now.numbers["joints"].items():
+        before = old.numbers["joints"][name]
+        for key in BALANCED:
+            assert joint[key] == before[key], (name, key)
+        assert [b["pull_n"] for b in joint["bolts"]] == [b["pull_n"] for b in before["bolts"]]
 
 
 #: How the made-up glass panel (`cae_cases/glass_panel.py`) is built: a frame 6 mm thick round
