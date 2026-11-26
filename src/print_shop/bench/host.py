@@ -16,6 +16,8 @@ from __future__ import annotations
 
 import os
 import subprocess
+import threading
+import time
 import uuid
 from pathlib import Path
 
@@ -55,6 +57,16 @@ TIMEOUT = 600
 #: Longer for a command that solves the part tens of times over: `optimise`, whose BESO
 #: iterations each solve the whole part (mqucifer/print-shop#286).
 TIMEOUTS = {"optimise": 3600}
+#: And for `load` where it reads in two passes (mqucifer/print-shop#325): the whole, then each
+#: part on its own and every bolt round its hole. A made-up table of 24 parts and 56 bolts takes
+#: about 1,750 s, 1,047 s of it the bolts' own readings, as in one pass. With `--parts` it's
+#: asked for, so given from the start. Otherwise `load` tries one pass first, under `TIMEOUT`,
+#: and is offered this (`OFFER`); it takes it up as it starts two passes, where the whole met
+#: the container's memory, by one line on its stderr (`TAKEN`), and only then does the host
+#: wait for it. Any other `load` stops at `TIMEOUT`, as before.
+TWO_PASSES = 3600
+OFFER = "BENCH_TIMEOUT_TWO_PASSES"
+TAKEN = "bench: two passes take the longer limit"
 HERE = Path(__file__).resolve().parent
 REPOSITORY = HERE.parent.parent.parent
 #: The container's own mount of this package: read-only, so nothing in it can change the bench.
@@ -219,8 +231,25 @@ def helper(module: str, args: list[str]) -> list[str]:
 
 
 def timeout_for(args: list[str]) -> int:
-    """How long a bench command may run: `TIMEOUT`, or its own in `TIMEOUTS`."""
+    """How long a bench command may run: `TIMEOUT`, or its own in `TIMEOUTS`, or `TWO_PASSES`
+    for a `load` that asks for two passes with `--parts`."""
+    if asks_two_passes(args):
+        return TWO_PASSES
     return TIMEOUTS.get(command_word(args) or "", TIMEOUT)
+
+
+def asks_two_passes(args: list[str]) -> bool:
+    """Whether a bench command is a `load` that asks for two passes with `--parts`."""
+    word = command_word(args)
+    return word == "load" and "--parts" in args[args.index(word) + 1 :]
+
+
+def offered(args: list[str]) -> int | None:
+    """The longer limit a bench command may take up as it runs, or None: `TWO_PASSES` for a
+    `load` that may come to two passes, where it isn't already given it."""
+    if command_word(args) == "load" and timeout_for(args) < TWO_PASSES:
+        return TWO_PASSES
+    return None
 
 
 def run(
@@ -232,10 +261,14 @@ def run(
 ) -> subprocess.CompletedProcess[str]:
     """Run a bench command, or a script with `python=True`, in a container over `work`. A command
     runs in its own image; a script in the first, or in `image`, where `CAE_IMAGE`'s Python has
-    FreeCAD's modules on its path."""
+    FreeCAD's modules on its path. A `timeout` given is the limit, and nothing is offered past
+    it; otherwise a command has its own (`timeout_for`), and `load` may take up a longer one
+    (`offered`)."""
     name = f"print-bench-{uuid.uuid4().hex[:12]}"
+    longer = None
     if timeout is None:
         timeout = TIMEOUT if python else timeout_for(args)
+        longer = None if python else offered(args)
     if python and image == CAE_IMAGE:
         start = "import sys, runpy; sys.path.append('/opt/conda/lib'); del sys.argv[0]; "
         start += "runpy.run_path(sys.argv[0], run_name='__main__')"
@@ -243,25 +276,89 @@ def run(
     else:
         command = ["python", *args] if python else bench_command(args)
     # The command's own limit, so a command that can see it coming stops before it and says
-    # where it got to (`load` in two passes, mqucifer/print-shop#301).
+    # where it got to (`load` in two passes, mqucifer/print-shop#301); and the longer one it may
+    # take up (mqucifer/print-shop#325).
+    env = {"BENCH_TIMEOUT": str(timeout)}
+    if longer is not None:
+        env[OFFER] = str(longer)
     argv = container(
         work,
         command,
         name,
         image=image or (IMAGE if python else image_for(args)),
-        env={"BENCH_TIMEOUT": str(timeout)},
+        env=env,
     )
-    try:
-        done = subprocess.run(argv, capture_output=True, text=True, timeout=timeout, check=False)
-    except subprocess.TimeoutExpired:
+    done, limit = _waited(argv, timeout, longer)
+    if done is None:
         subprocess.run(["docker", "kill", name], capture_output=True, check=False)
-        message = f"verdict: NO ANSWER: it ran past the {timeout} s limit and was stopped\n"
+        message = f"verdict: NO ANSWER: it ran past the {limit} s limit and was stopped\n"
         return subprocess.CompletedProcess(argv, 2, message, "")
     if done.returncode == KILLED:
         # A process that's killed takes its buffered output with it, so this may be all there is.
         message = f"verdict: NO ANSWER: it was killed, most likely at the {MEMORY} memory limit\n"
         return subprocess.CompletedProcess(argv, 2, done.stdout + message, done.stderr)
     return done
+
+
+#: How often the host looks whether a command has ended, or taken up its longer limit, in s.
+POLL = 0.5
+
+
+def _waited(
+    argv: list[str], timeout: int, longer: int | None
+) -> tuple[subprocess.CompletedProcess[str] | None, int]:
+    """Run `argv` to its end, or None where it ran past its limit; and the limit it ran under:
+    `timeout`, or `longer` from when the command's stderr says it took it up (`TAKEN`). That
+    line is the host's, and isn't passed on."""
+    if longer is None:
+        try:
+            done = subprocess.run(
+                argv, capture_output=True, text=True, timeout=timeout, check=False
+            )
+        except subprocess.TimeoutExpired:
+            return None, timeout
+        return done, timeout
+    began = time.monotonic()
+    process = subprocess.Popen(argv, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    out: list[str] = []
+    err: list[str] = []
+    taken = threading.Event()
+
+    def read_out() -> None:
+        assert process.stdout is not None
+        out.extend(process.stdout)
+
+    def read_err() -> None:
+        assert process.stderr is not None
+        for line in process.stderr:
+            if line.rstrip("\n") == TAKEN:
+                taken.set()
+            else:
+                err.append(line)
+
+    readers = [threading.Thread(target=f, daemon=True) for f in (read_out, read_err)]
+    for reader in readers:
+        reader.start()
+    code: int | None = None
+    while code is None:
+        limit = longer if taken.is_set() else timeout
+        left = limit - (time.monotonic() - began)
+        if left <= 0:
+            process.kill()
+            process.wait()
+            break
+        try:
+            code = process.wait(timeout=min(left, POLL))
+        except subprocess.TimeoutExpired:
+            continue
+    for reader in readers:
+        reader.join(timeout=30)
+    for pipe in (process.stdout, process.stderr):
+        if pipe is not None:
+            pipe.close()
+    if code is None:
+        return None, limit
+    return subprocess.CompletedProcess(argv, code, "".join(out), "".join(err)), limit
 
 
 def others(image: str) -> list[str]:

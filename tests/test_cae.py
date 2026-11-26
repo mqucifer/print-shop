@@ -67,8 +67,8 @@ def cae(tmp_path_factory: pytest.TempPathFactory) -> Any:
     made = host.run(["make_fixtures.py"], work, python=True, image=host.CAE_IMAGE)
     assert made.returncode == 0, made.stdout + made.stderr
 
-    def ask(*args: str) -> Answer:
-        done = host.run([str(a) for a in args], work)
+    def ask(*args: str, timeout: int | None = None) -> Answer:
+        done = host.run([str(a) for a in args], work, timeout=timeout)
         found = re.search(r"saved: (\S+)\.txt and \.json", done.stdout)
         assert found, f"nothing saved: {done.stdout}{done.stderr}"
         record = json.loads((work / f"{found.group(1)}.json").read_text())
@@ -475,6 +475,8 @@ def beam_strain(kg: float, at: float = 0.0) -> float:
 def test_load_runs_sealed_in_the_second_image(cae: Any) -> None:
     ran = cae("load", "load/one.json", "--weight", "1", *TIP).record["ran"]
     assert ran["network_up"] == ["lo"] and ran["network_routes"] == 0
+    # A single part is read in one pass, under the bench's 600 s (mqucifer/print-shop#325).
+    assert ran["limit_s"] == host.TIMEOUT
     assert ran["image"] == host.CAE_IMAGE and ran["user"] != 0
 
 
@@ -1774,6 +1776,13 @@ def test_four_posts_turned_round_a_table_s_middle_each_have_their_latch_named(
     assert "in upper0's own file's axes" not in answer.record["why"]
 
 
+#: The made-up table's load case: 20 kg on four places of its top.
+TABLE = (
+    "load", "large/table.json", "--weight", "20",
+    "--at", "100,100,310", "--at", "300,100,310", "--at", "100,300,310", "--at", "300,300,310",
+)  # fmt: skip
+
+
 @pytest.mark.assembly
 def test_a_table_of_24_parts_and_56_bolts_is_read_in_two_passes_until_the_container_s_time(
     cae: Any,
@@ -1781,15 +1790,13 @@ def test_a_table_of_24_parts_and_56_bolts_is_read_in_two_passes_until_the_contai
     """mqucifer/print-shop#295's table, 24 parts held by 56 M5 through-bolts, round figures only,
     under 20 kg. Whole, gmsh sizes each bore by its curvature, 12 elements a turn, past what
     CalculiX solves in the container's 3 GiB. So it's read in two passes (mqucifer/print-shop#301),
-    inside the 3 GiB: the whole with each bore squared, then each part on its own. That's past
-    the container's 600 s with every bolt read round its hole as well, so the two passes stop
-    themselves before the limit and say which pass they were in and what was read, never
-    killed and never silent. Read with the limit lifted, in `~/print-shop/proofs/ux-301/`, it's
-    read to the end."""
-    answer = cae(
-        "load", "large/table.json", "--weight", "20",
-        "--at", "100,100,310", "--at", "300,100,310", "--at", "100,300,310", "--at", "300,300,310",
-    )  # fmt: skip
+    inside the 3 GiB: the whole with each bore squared, then each part on its own. Given a
+    limit it can't be read in, here the bench's 600 s, so nothing longer is offered, the two
+    passes stop themselves before it and say which pass they were in and what was read, never
+    killed and never silent. Under the hour two passes are given (mqucifer/print-shop#325) it's
+    read to the end: `test_the_table_is_read_to_the_end_under_the_hour`, a proof too long for
+    CI's job."""
+    answer = cae(*TABLE, timeout=host.TIMEOUT)
     assert answer.verdict == "NO ANSWER", answer.text
     why = answer.record["why"]
     assert why.startswith(f"two passes met the container's time, {host.TIMEOUT} s, after "), why
@@ -1797,7 +1804,33 @@ def test_a_table_of_24_parts_and_56_bolts_is_read_in_two_passes_until_the_contai
     assert "Nothing is judged on part of an assembly" in why
     assert answer.record["seconds"] < host.TIMEOUT
     ran = answer.record["ran"]
+    assert ran["limit_s"] == host.TIMEOUT
     assert int(ran["memory_peak"]) <= int(ran["memory_max"]) == 3 * 1024**3
+
+
+@pytest.mark.assembly
+@pytest.mark.proof
+def test_the_table_is_read_to_the_end_under_the_hour(cae: Any) -> None:
+    """mqucifer/print-shop#325, the Sponsor's "Yes an hour": the same table, as `load` reads it
+    from the bench. Its one pass meets the 3 GiB under the bench's 600 s; two passes take up
+    the hour the host offered, and read it to the end, inside the hour and the 3 GiB, with an
+    answer: no NO ANSWER, and nothing stopped for time. About 1,750 s on the Mac, so a proof
+    run by hand (`-m proof`), not on every PR."""
+    answer = cae(*TABLE)
+    assert answer.verdict in ("OK", "FAIL"), answer.text
+    assert "two_passes" in answer.numbers
+    assert "whole_met" in answer.numbers["two_passes"], "the one pass met the memory first"
+    assert "met the container's time" not in answer.text
+    ran = answer.record["ran"]
+    assert ran["limit_s"] == host.TWO_PASSES
+    assert answer.record["seconds"] < host.TWO_PASSES
+    assert int(ran["memory_peak"]) <= int(ran["memory_max"]) == 3 * 1024**3
+    warnings.warn(
+        f"the table read to the end in {answer.record['seconds']} s of {ran['limit_s']} s, "
+        f"{answer.verdict}, its peak {int(ran['memory_peak']) / 2**30:.2f} GiB of "
+        f"{int(ran['memory_max']) / 2**30:.2f}",
+        stacklevel=1,
+    )
 
 
 def test_two_passes_stand_in_only_a_bolt_s_bore_by_a_square_no_narrower_than_it(cae: Any) -> None:
@@ -1837,9 +1870,11 @@ def test_two_passes_that_can_t_end_in_time_leave_a_glass_band_its_lower_bound(
     The band's read is in time, its `why` says the two passes ran out, and it reads as the
     lower bound always has."""
     shutil.copy(CASES / "reserve_forced.py", cae.work / "reserve_forced.py")
+    # Offered the hour, as the host offers a plain `load` (mqucifer/print-shop#325): two passes
+    # take it up, and what's kept for the band comes out of it.
     done = host.run(
-        ["reserve_forced.py", "load", f"{glass.name}/joined.json", "--weight", "1",
-         "--at", "-6,50,6"],
+        ["reserve_forced.py", "--offered", str(host.TWO_PASSES), "load",
+         f"{glass.name}/joined.json", "--weight", "1", "--at", "-6,50,6"],
         cae.work, python=True, image=host.CAE_IMAGE,
     )  # fmt: skip
     found = re.search(r"saved: (\S+)\.txt and \.json", done.stdout)
@@ -1848,10 +1883,12 @@ def test_two_passes_that_can_t_end_in_time_leave_a_glass_band_its_lower_bound(
     assert record["verdict"] == "OK", done.stdout
     lower = record["numbers"]["lower_bound"]
     assert lower["parts"] == ["frame"]
-    assert "; and in two passes, two passes met the container's time, 600 s, less the " in (
+    assert "; and in two passes, two passes met the container's time, 3600 s, less the " in (
         lower["why"]
     ), lower["why"]
     assert "kept for a glass band's lower bound" in lower["why"]
+    assert record["ran"]["limit_s"] == host.TWO_PASSES
+    assert host.TAKEN in done.stderr, "said to the host, which watches for it from a command"
     assert record["seconds"] < host.TIMEOUT
 
 
@@ -1899,6 +1936,10 @@ def test_a_bolt_left_out_gives_first_and_two_passes_read_no_lower_than_one(
         moved = pytest.approx(bolted.numbers["moves_mm"], rel=alike)
         assert one_out.numbers["moves_mm"] == moved
     assert "two_passes" in stool["out/2"].numbers
+    # Read in one pass, under the bench's 600 s; asked for two, under the hour
+    # (mqucifer/print-shop#325).
+    for name, limit in (("one", host.TIMEOUT), ("one/2", host.TWO_PASSES)):
+        assert stool[name].record["ran"]["limit_s"] == limit, name
 
     # The same stool both ways: two passes read each part no lower, and it moves no less.
     one, two = stool["one"], stool["one/2"]
@@ -2035,7 +2076,13 @@ def test_a_glass_frame_bolted_to_a_block_reads_as_a_lower_bound_with_its_band_le
     force is the load beyond it, by statics. Two passes are tried first
     (mqucifer/print-shop#301): with its band in, gmsh gives the block no element of its own, so
     they can't read it, and the reply says that too."""
-    answer = cae("load", f"{glass.name}/joined.json", "--weight", "1", "--at", "-6,50,6")
+    # Under the bench's 600 s, as #318 read it on both machines: given it, nothing longer is
+    # offered. On CI's runner the one pass's try takes 263 s, so under the hour two passes would
+    # run on into it, past the job's 30 minutes (mqucifer/print-shop#325).
+    answer = cae(
+        "load", f"{glass.name}/joined.json", "--weight", "1", "--at", "-6,50,6",
+        timeout=host.TIMEOUT,
+    )  # fmt: skip
     assert answer.verdict == "OK", answer.text
     assert answer.record["why"].startswith("read as a lower bound, frame with its glass band left")
     lower = answer.numbers["lower_bound"]

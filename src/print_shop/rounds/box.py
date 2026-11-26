@@ -20,6 +20,13 @@ can be long writes it to a file in the folder it runs in, and its line says wher
 `bench/answers.py`): on a traced suncatcher, the `mesh` answer was one line of 1,459,288 bytes, its
 mark dropped with its start, and each file read "can't tell" though the bench had meshed every one
 (mqucifer/print-shop#181).
+
+Each container is told its limit (`BENCH_TIMEOUT`), as `host.run` tells it. A `load` that reads in
+two passes runs under an hour, as from `host.run` (mqucifer/print-shop#325): with `--parts` from
+the start; otherwise it's offered the hour, and the harness waits for it only once its output
+says it took it up, as two passes start (`host.TAKEN`). So a design round's `load` of a large
+assembly may take up to an hour, and every other command, and a script, keeps the run's own
+`command_seconds`.
 """
 
 from __future__ import annotations
@@ -43,6 +50,10 @@ from print_shop.rounds import paths
 
 #: A run's or a bench command's output kept, in bytes: the end of it.
 KEEP = 256_000
+#: The line, on a line of its own, that says a command took up the longer limit it was
+#: offered, and how often its container is looked at, in s.
+TAKEN_LINE = f"\n{host.TAKEN}\n".encode()
+POLL = 0.5
 #: The exit code docker itself gives when it couldn't start the container.
 DOCKER_FAILED = 125
 #: The bench commands of one script that are recorded, at most, and the most one's saved answer
@@ -106,7 +117,11 @@ class Box:
                 # the first image's commands.
                 return Ran(3, f"usage error: {host.missing(image)}, on the machine\n", 0.0)
             self.built.add(image)
-        return self._run(host.bench_command(args), where, timeout, image)
+        longer = None
+        if timeout is None:
+            timeout = host.TWO_PASSES if host.asks_two_passes(args) else None
+            longer = host.offered(args)
+        return self._run(host.bench_command(args), where, timeout, image, longer=longer)
 
     def helper(
         self, module: str, args: list[str], timeout: int = 120, where: Path | None = None
@@ -128,23 +143,37 @@ class Box:
         timeout: int | None,
         image: str = host.IMAGE,
         env: dict[str, str] | None = None,
+        longer: int | None = None,
     ) -> Ran:
+        """`command` in a container, waited for `timeout`, or the run's own limit; or `longer`
+        from when its output says it took that up (`host.TAKEN`)."""
         limit = self.timeout if timeout is None else timeout
         name = f"print-rounds-{uuid.uuid4().hex[:12]}"
         self.ran += 1
         began = time.monotonic()
+        told = {**(env or {}), "BENCH_TIMEOUT": str(limit)}
+        if longer is not None:
+            told[host.OFFER] = str(longer)
         try:
-            argv = host.container(where or self.work, command, name, image=image, env=env)
+            argv = host.container(where or self.work, command, name, image=image, env=told)
             process = subprocess.Popen(argv, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
         except OSError as exc:
             raise Gone(f"docker couldn't be started: {type(exc).__name__}") from exc
         kept: deque[bytes] = deque()
         size = [0, 0]
+        taken = threading.Event()
+        line = TAKEN_LINE
 
         def drain() -> None:
             assert process.stdout is not None
             descriptor = process.stdout.fileno()
+            carry = b"\n"
             for chunk in iter(lambda: os.read(descriptor, 65536), b""):
+                if longer is not None:
+                    window = carry + chunk
+                    if line in window:
+                        taken.set()
+                    carry = window[-len(line) :]
                 kept.append(chunk)
                 size[0] += len(chunk)
                 while size[0] - len(kept[0]) >= KEEP:
@@ -154,10 +183,20 @@ class Box:
         reader = threading.Thread(target=drain, daemon=True)
         reader.start()
         timed_out = False
-        try:
-            code = process.wait(timeout=limit)
-        except subprocess.TimeoutExpired:
-            timed_out = True
+        code: int | None = None
+        while True:
+            if longer is not None and taken.is_set():
+                limit = longer
+            left = limit - (time.monotonic() - began)
+            if left <= 0:
+                timed_out = True
+                break
+            try:
+                code = process.wait(timeout=min(left, POLL))
+                break
+            except subprocess.TimeoutExpired:
+                continue
+        if timed_out:
             subprocess.run(["docker", "kill", name], capture_output=True, check=False, timeout=60)
             try:
                 code = process.wait(timeout=60)
@@ -165,7 +204,12 @@ class Box:
                 process.kill()
                 raise Gone(f"a container past its {limit} s limit wouldn't stop") from exc
         reader.join(timeout=30)
+        assert code is not None, "waited for to its end, or stopped and waited for"
         text = b"".join(kept).decode("utf-8", errors="replace")
+        if longer is not None:
+            # The line that took the longer limit up is the harness's, not the answer's.
+            lines = text.splitlines(keepends=True)
+            text = "".join(one for one in lines if one.rstrip("\n") != host.TAKEN)
         seconds = round(time.monotonic() - began, 1)
         if code == DOCKER_FAILED and not timed_out:
             raise Gone(f"docker couldn't run the container: {text[-400:]}")
