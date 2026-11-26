@@ -39,7 +39,6 @@ from __future__ import annotations
 import dataclasses
 import math
 import os
-import signal
 import time
 from typing import Any
 
@@ -546,9 +545,11 @@ def peak() -> int | None:
 
 class Clock:
     """The container's time, as the host gives it: each kind of step's longest so far, and
-    whether the next would end inside the limit. Started, it also rings at the limit less
-    `MARGIN`, in whatever step it's in, so even a first step longer than any yet stops in time
-    to say where it was."""
+    whether the next would end inside the limit. It doesn't ring: a signal while FreeCAD meshes
+    ends the process with nothing said (tried on the Mac), so it's asked before each step, and a
+    kind of step not yet timed is given an estimate where there is one (a part on its own, the
+    whole's first pass). Past what it can foresee, the host stops the command at its limit and
+    says so."""
 
     def __init__(self, started: float, reserve: float = 0.0, label: str = "two passes") -> None:
         given = os.environ.get(TIMEOUT, "")
@@ -560,20 +561,6 @@ class Clock:
         self.label = label
         self.longest: dict[str, float] = {}
         self.done: list[str] = []
-        self.now = "the first pass"
-
-    def start(self) -> None:
-        left = self.left()
-        if left is not None:
-            signal.signal(signal.SIGALRM, self._ring)
-            signal.alarm(max(1, int(left)))
-
-    def stop(self) -> None:
-        if self.limit is not None:
-            signal.alarm(0)
-
-    def _ring(self, *_: Any) -> None:
-        raise OutOfTime(self._said(f"during {self.now}"))
 
     def time(self, kind: str, seconds: float) -> None:
         self.longest[kind] = max(self.longest.get(kind, 0.0), seconds)
@@ -586,7 +573,6 @@ class Clock:
     def check(self, kind: str, what: str) -> None:
         """Stop before `what`, a step of `kind`, where the longest of its kind so far
         wouldn't end inside the container's limit."""
-        self.now = what
         left = self.left()
         if left is not None and left < self.longest.get(kind, 0.0):
             raise OutOfTime(self._said(f"before {what}, which would end past it"))
@@ -620,10 +606,9 @@ def first(
     """The whole, its bolts' bores squared, at the mesh and the coarser one: each solve as
     `load._solved` reads it, and what's said of the pass."""
     began = time.time()
-    clock.now = "the first pass, the whole's bores squared"
     with load._quiet():
         square, count, kept = squared(assembly, placed)
-    clock.now = f"the first pass, the whole at {size:g} mm"
+    clock.check("whole", f"the first pass's whole at {size:g} mm")
     fine = load._solved(
         assembly, square, args, size, two_pass=True, weighed=placed, spread=False
     )
@@ -666,7 +651,6 @@ def second(
     import FreeCAD as App
 
     began = time.time()
-    clock.now = "the second pass, the parts joined to find the faces each meets another by"
     # The parts as they are, joined so the faces each meets another by are faces of its own.
     doc = App.newDocument("Joined")
     try:
@@ -703,6 +687,9 @@ def second(
             (round(size * load.COARSER, 3), rough, coarse),
         ):
             kind = f"part {mesh}"
+            # A part on its own is taken to take as long as the whole's first pass did, at the
+            # most, until one has been timed.
+            clock.longest.setdefault(kind, clock.longest.get("whole", 0.0))
             clock.check(kind, f"the second pass's part {part.name} at {mesh:g} mm")
             started = time.time()
 

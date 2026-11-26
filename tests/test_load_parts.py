@@ -181,24 +181,29 @@ def test_the_container_is_told_its_own_time_limit(
     assert "BENCH_TIMEOUT=3600" in docker[1]
 
 
-def test_a_step_longer_than_any_yet_is_stopped_at_the_limit_saying_where(
+def test_time_kept_for_a_glass_band_is_left_out_of_two_passes_and_its_read_says_so(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The first of a kind has no longest to go by: the clock rings at the limit less its
-    margin, in whatever step it's in, and the reply says which."""
+    """Where a part names its band, two passes are given the container's time less what's kept
+    for the band's read, and stop where a step would run into it; the band's read has its own
+    clock, and says it's the band's where that runs out (the operator's ruling)."""
     import time
 
     monkeypatch.setenv(load_parts.TIMEOUT, "600")
-    clock = load_parts.Clock(time.time() - (600 - load_parts.MARGIN - 1))
-    clock.now = "the second pass's part tile0 at 10.459 mm"
-    clock.start()
-    try:
-        with pytest.raises(load_parts.OutOfTime) as stopped:
-            time.sleep(5)
-    finally:
-        clock.stop()
-    assert "during the second pass's part tile0 at 10.459 mm" in str(stopped.value)
-
+    now = time.time()
+    plain, kept = load_parts.Clock(now - 300), load_parts.Clock(now - 300, reserve=200.0)
+    whole, less = plain.left(), kept.left()
+    assert whole is not None and less is not None
+    assert whole - less == pytest.approx(200.0, abs=1.0)
+    kept.time("whole", 90.0)
+    with pytest.raises(load_parts.OutOfTime) as stopped:
+        kept.check("whole", "the first pass's coarser mesh")
+    assert "600 s, less the 200 s kept for a glass band's lower bound" in str(stopped.value)
+    band = load_parts.Clock(now - 500, label="the glass band's lower bound")
+    band.time("band", 170.0)
+    with pytest.raises(load_parts.OutOfTime) as late:
+        band.check("band", "its read")
+    assert str(late.value).startswith("the glass band's lower bound met the container's time")
 
 def test_a_reading_exactly_the_band_below_its_limit_is_near_it() -> None:
     """Read `band` low, a figure would be at its limit: so it's near it, and one a hair further

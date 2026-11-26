@@ -33,11 +33,11 @@ FORCED = "forced by the test: the one pass met the container's memory"
 
 def met_memory_first(
     args: object, report: object, without_bands: bool = False, two_pass: object = None,
-    reserve: float = 0.0,
+    reserve: float = 0.0, tried: float = 0.0,
 ) -> None:  # fmt: skip
     if two_pass is None and not without_bands:
         raise load._Unread(FORCED, FORCED, memory=True)
-    READ(args, report, without_bands, two_pass, reserve)
+    READ(args, report, without_bands, two_pass, reserve, tried)
 
 
 class Late(CLOCK):  # type: ignore[misc, valid-type]
@@ -47,6 +47,11 @@ class Late(CLOCK):  # type: ignore[misc, valid-type]
         super().__init__(started, reserve, label)
         if label == "two passes" and self.limit is not None:
             self.reserve = self.limit - load_parts.MARGIN - (time.time() - started) - 2
+
+    def time(self, kind: str, seconds: float) -> None:
+        # As if the one pass's try had taken longer than the two seconds left: so the first
+        # pass isn't begun.
+        super().time(kind, max(seconds, 10.0) if kind == "whole" else seconds)
 
 
 load._run = met_memory_first

@@ -1407,10 +1407,6 @@ def run(args: Any, report: Report) -> None:
     try:
         _read(args, report)
     finally:
-        # Two passes' clock rings no more once there's an answer.
-        clock = _clock["now"]
-        if clock is not None:
-            clock.stop()
         _clock["now"] = None
 
 
@@ -1444,6 +1440,7 @@ def _read(args: Any, report: Report) -> None:
                 report,
                 two_pass="the whole, read at once, met the container's memory",
                 reserve=load_parts.RESERVE * tried if banded else 0.0,
+                tried=tried,
             )
             report.numbers["two_passes"]["whole_met"] = unread.evidence
             return
@@ -1462,14 +1459,15 @@ def _read(args: Any, report: Report) -> None:
     report.again()
     from . import load_parts
 
-    # The band's read has the container's time left, and says so where that runs out.
+    # The band's read has the container's time left: where that's less than the one pass's try
+    # took, or runs out before a bolt's reading, it says so.
     clock = load_parts.Clock(report.started, label="the glass band's lower bound")
     clock.done.append("its whole met the container's memory, and two passes were tried first")
+    clock.time("band", tried)
+    clock.check("band", "its read, which a mesh no larger than the one pass's try takes")
     _clock["now"] = clock
-    clock.start()
     band_began = time.time()
     _run(args, report, without_bands=True)
-    clock.stop()
     names = ", ".join(banded)
     report.facts.insert(
         0,
@@ -1519,6 +1517,7 @@ def _run(
     without_bands: bool = False,
     two_pass: str | None = None,
     reserve: float = 0.0,
+    tried: float = 0.0,
 ) -> None:
     freecad("load")
     args.lift = getattr(args, "lift", None)
@@ -1613,16 +1612,14 @@ def _run(
         from . import load_parts
 
         clock = load_parts.Clock(report.started, reserve)
+        # The one pass's try, where there was one, is what a whole takes at the most: its mesh
+        # had every bore round.
+        clock.time("whole", tried)
         _clock["now"] = clock
-        clock.start()
-        try:
-            fine, coarse, firsts = load_parts.first(assembly, placed, args, size, clock)
-            reads, rough, seconds = load_parts.second(
-                assembly, placed, args, size, fine, coarse, clock
-            )
-        except BaseException:
-            clock.stop()
-            raise
+        fine, coarse, firsts = load_parts.first(assembly, placed, args, size, clock)
+        reads, rough, seconds = load_parts.second(
+            assembly, placed, args, size, fine, coarse, clock
+        )
         fine = {
             **fine,
             "whole_parts": fine["parts"],
@@ -1753,7 +1750,6 @@ def _run(
         f"{force:.4g} N put on --toward {args.toward}, {off:.4f} N apart"
     )
     if two_pass is not None:
-        clock.stop()
         _tag(
             report, lines, seconds_said, "pass 1, the whole: ",
             ("the joint ", "its ", "the place at ", "the part ", "the most any point",
