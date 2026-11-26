@@ -22,9 +22,11 @@ Orca's own modifiers (`slicer.regions`). In an assembly file each part may carry
   (`slicer.regions.settings_of`) before the part goes to `load`, which runs with no profile and
   takes a part only with every one given.
 - **A region** has one shape and only the settings that differ from the part's. Whatever of the
-  part lies inside the shape takes them. Where two overlap, the later one wins, as Orca applies
-  its modifiers in order. Each shape but `layers` is in the part's own file's axes, so it turns
-  with the part:
+  part lies inside the shape takes them. Where two of the volume shapes (box, cylinder, mesh)
+  overlap, the later one wins, as Orca applies its modifiers in order; any of them wins over a
+  `layers` region, whatever the order, as Orca applies a height range to the object and its
+  modifiers over it; and two `layers` regions don't overlap, as Orca's height ranges can't.
+  Each shape but `layers` is in the part's own file's axes, so it turns with the part:
   - `box`: two corners, the least first;
   - `cylinder`: `at`, the centre of one end, `axis`, the way it runs from there (a letter with an
     optional sign, `"z"`, `"-x"`, or a vector), its `radius` and `length`;
@@ -34,9 +36,13 @@ Orca's own modifiers (`slicer.regions`). In an assembly file each part may carry
   - `layers`: `[low, high]`, heights in mm above the bed as the part prints: along its up way
     (the assembly's `layers` axis), from its lowest point that way. Orca's height range modifier,
     which holds whole layers. It alone may set `layer_height`.
-- **The infill's direction** (`infill_angle`) is Orca's `infill_direction`: degrees on the
-  plate from its +x, as the part is posed to print. A pattern strengthens a part most along its
-  lines, so a region can turn it as well as thicken it.
+- **The infill's direction** (`infill_angle`) is in the part's own axes, so `load` needs
+  nothing of the pose: degrees in the plane of its layers, with its layers along its own axis
+  `a`, from its own axis `a+1` toward `a+2`, cyclic (`own_way`). Layers along z: from +x toward
+  +y; along x: from +y toward +z; along y: from +z toward +x. The slice turns it into Orca's
+  `infill_direction`, degrees on the plate from its +x, by the pose it slices with, and the
+  reader confirms from the layers that the sparse lines run that way. A pattern strengthens a
+  part most along its lines, so a region can turn it as well as thicken it.
 - **Line width is the whole part's**: the walls' line width, Orca's `outer_wall_line_width` and
   `inner_wall_line_width`, so a wall count is a thickness both readers can check.
 - **Shells are layers, exactly**: a `top` or `bottom` given is written with Orca's shell
@@ -77,6 +83,7 @@ __all__ = [
     "Region",
     "Settings",
     "as_json",
+    "own_way",
     "read",
 ]
 
@@ -138,8 +145,9 @@ class Settings:
     infill: float | None = None
     #: Orca's own name for the infill pattern: gyroid, grid, rectilinear, cubic, ...
     pattern: str | None = None
-    #: The way the sparse infill's lines run, in degrees on the plate from its +x, as the part
-    #: is posed to print (Orca's `infill_direction`): the way a pattern strengthens it most.
+    #: The way the sparse infill's lines run, in degrees in the plane of the layers, in the
+    #: part's own axes (`own_way`): the way a pattern strengthens it most. Orca's
+    #: `infill_direction` is this turned onto the plate by the pose, so `orca()` leaves it out.
     infill_angle: float | None = None
     #: The layer height, in mm.
     layer_height: float | None = None
@@ -159,9 +167,12 @@ class Settings:
 
     def orca(self) -> dict[str, str]:
         """The settings given, as Orca's keys and values, with what's written with each
-        (`ALSO`): a density as Orca writes it, `15%`."""
+        (`ALSO`): a density as Orca writes it, `15%`. Not `infill_angle`: it's the part's own,
+        and only the pose turns it into Orca's plate angle (`slicer.regions`)."""
         out: dict[str, str] = {}
         for name, value in self.given().items():
+            if name == "infill_angle":
+                continue
             if name == "infill":
                 said = f"{value:g}%"
             else:
@@ -233,6 +244,16 @@ class Layers:
 
 
 Shape = Box | Cylinder | Mesh | Layers
+
+
+def own_way(angle: float, layers: str) -> Point:
+    """`infill_angle` as a unit vector in the part's own axes, with its layers along own axis
+    `layers` (x, y or z): from own axis a+1 toward a+2, cyclic."""
+    a = "xyz".index(layers)
+    way = [0.0, 0.0, 0.0]
+    way[(a + 1) % 3] = math.cos(math.radians(angle))
+    way[(a + 2) % 3] = math.sin(math.radians(angle))
+    return way[0], way[1], way[2]
 
 
 def _points(values: Point) -> str:
@@ -494,6 +515,12 @@ def read(raw: Any, where: str = "print") -> Printed:
         if not own.given():
             raise ValueError(f"{here} sets nothing of its own")
         found.append(Region(name.strip(), shape, own, why))
+    ranges = sorted((r.shape.low, r.shape.high, r.name) for r in found
+                    if isinstance(r.shape, Layers))
+    for (_, high, first), (low, _, second) in zip(ranges, ranges[1:], strict=False):
+        if low < high:
+            raise ValueError(f"{where}'s layers regions {first} and {second} overlap: Orca's "
+                             "height ranges can't, so each holds layers of its own")
     names = [r.name for r in found]
     if twice := sorted({n for n in names if names.count(n) > 1}):
         raise ValueError(f"{where}'s regions each have a name of their own: {', '.join(twice)}")

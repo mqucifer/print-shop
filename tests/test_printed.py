@@ -18,6 +18,7 @@ from print_shop.bench.printed import (
     Region,
     Settings,
     as_json,
+    own_way,
     read,
 )
 
@@ -96,9 +97,10 @@ def test_a_part_given_whole_misses_nothing() -> None:
 
 
 def test_settings_are_said_in_orcas_own_keys() -> None:
+    # The angle is the part's own: only the pose turns it onto the plate.
     assert Settings(walls=6, infill=60.0, pattern="gyroid", infill_angle=0.0, top=8).orca() == {
         "wall_loops": "6", "sparse_infill_density": "60%", "sparse_infill_pattern": "gyroid",
-        "infill_direction": "0", "top_shell_layers": "8", "top_shell_thickness": "0",
+        "top_shell_layers": "8", "top_shell_thickness": "0",
     }
     # One line width is both walls'; shells are layers, exactly.
     assert Settings(line_width=0.45, bottom=4).orca() == {
@@ -106,6 +108,25 @@ def test_settings_are_said_in_orcas_own_keys() -> None:
         "bottom_shell_layers": "4", "bottom_shell_thickness": "0",
     }
     assert set(ORCA) == {f for f in Settings.__dataclass_fields__}
+
+
+@pytest.mark.parametrize("layers,angle,way", [
+    ("z", 0, (1, 0, 0)), ("z", 90, (0, 1, 0)),
+    ("x", 0, (0, 1, 0)), ("x", 90, (0, 0, 1)),
+    ("y", 0, (0, 0, 1)), ("y", 90, (1, 0, 0)),
+])
+def test_the_infill_angle_is_in_the_parts_own_axes_cyclic_from_its_layers(
+    layers: str, angle: float, way: tuple[float, float, float]
+) -> None:
+    assert own_way(angle, layers) == pytest.approx(way, abs=1e-12)
+
+
+def test_two_layers_regions_cant_overlap() -> None:
+    with pytest.raises(ValueError, match="layers regions a and b overlap"):
+        read({"regions": [{"name": "a", "layers": [0, 4], "infill": 30},
+                          {"name": "b", "layers": [3, 6], "infill": 60}]})
+    read({"regions": [{"name": "a", "layers": [0, 4], "infill": 30},
+                      {"name": "b", "layers": [4, 6], "infill": 60}]})
 
 
 def test_a_region_says_where_it_is_and_what_it_sets() -> None:
