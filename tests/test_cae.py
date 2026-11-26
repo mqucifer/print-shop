@@ -1568,6 +1568,8 @@ def test_the_snap_on_check_and_bend_read_a_latch_on_a_dovetail(cae: Any) -> None
 #: and the rib's cap, pushed along x at its far end, 60 mm out at 50°, half way up its 10.
 SHELF_AT = ("--weight", "1", "--at", "28,5,25", "--mesh", "1")
 RIB_AT = ("--weight", "0.5", "--at", "38.5673,45.9627,35", "--toward", "+x")
+#: The peg in its hole, as `make_fixtures.turns` draws it.
+PEG_R, PEG_DEEP = 3.0, 10.0
 #: main's own run-to-run spread in `load`'s figures, relative (mqucifer/print-shop#302).
 RUN_TO_RUN = 2e-4
 
@@ -1656,6 +1658,28 @@ def test_a_rib_touching_curved_slices_reads_turned_on_a_curved_or_a_straight_mes
         assert set(straight.numbers["parts"]) == {"slice1", "slice2", "rib"}
         assert all(p["nodes"] > 0 for p in straight.numbers["parts"].values())
         reads_as(forced(cae, "straight", "load", f"turns/{turned_file}.json", *RIB_AT), straight)
+
+
+def test_a_peg_in_a_hole_on_a_straight_mesh_reads_each_face_it_meets_once(cae: Any) -> None:
+    """mqucifer/print-shop#319: on a straight-sided mesh a triangle is on a face where its
+    corners are and it lies on it, so a triangle of the hole's floor with its corners all on
+    the round edge it shares with the wall is never the wall's too. A peg 6 across standing in a
+    blind hole 10 deep, touching its wall and floor, pressed down, on a coarse mesh: the faces
+    they meet by are read over no more than their own area, the chords' less, as on the curved
+    mesh, and the joint carries the weight."""
+    true = math.pi * PEG_R**2 + 2 * math.pi * PEG_R * PEG_DEEP
+    args = ("load", "turns/peg.json", "--weight", "1", "--at", "10,10,30", "--mesh", "6")
+    curved = cae(*args)
+    straight = forced(cae, "straight", *args)
+    for answer in (curved, straight):
+        assert answer.verdict == "OK", answer.text
+        joint = answer.numbers["joints"]["peg+socket"]
+        assert 0.95 * true < joint["area_mm2"] <= true, joint["area_mm2"]
+        assert joint["force_n"] == pytest.approx([0, 0, G], abs=0.01)
+    assert "its elements second-order with straight sides" in straight.text
+    assert straight.numbers["joints"]["peg+socket"]["area_mm2"] == pytest.approx(
+        curved.numbers["joints"]["peg+socket"]["area_mm2"], rel=0.01
+    )
 
 
 def test_what_load_cant_read_is_no_answer_naming_the_part_and_the_step(cae: Any) -> None:

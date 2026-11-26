@@ -23,6 +23,7 @@ from print_shop.bench.load import (
     beyond,
     bolt_pulls,
     element_forces,
+    lies_on,
     memory_met,
     oom_kills,
     step,
@@ -1497,3 +1498,34 @@ def test_what_stops_a_step_of_load_is_said_with_the_step_never_as_an_error_alone
     assert str(given.value) == "joined, the part rib isn't the solid it was"
     with step("reading the loaded places"):
         pass
+
+
+def test_a_triangle_taken_by_its_corners_lies_on_the_face_or_is_left_out() -> None:
+    """mqucifer/print-shop#319: on a straight-sided mesh a triangle is on a face where its
+    corners are, and lies on it. On a peg 3 mm round, a triangle of its side lies on the side;
+    one of its end whose corners are all on the round edge, whose middle is nearer the side than
+    its longest side's sag, lies square to the side and isn't on it; a flat triangle lies on its
+    plane, and not 0.01 mm off it."""
+    radius, bend = 3.0, 1 / 3.0
+
+    def rim(degrees: float, z: float = 0.0) -> np.ndarray:
+        angle = math.radians(degrees)
+        return np.array([radius * math.cos(angle), radius * math.sin(angle), z])
+
+    def on_side(corners: np.ndarray) -> bool:
+        middle = corners.mean(axis=0)
+        out = np.array([middle[0], middle[1], 0.0]) / math.hypot(middle[0], middle[1])
+        return lies_on(corners, out * radius + [0, 0, middle[2]], out, bend)
+
+    assert on_side(np.array([rim(0), rim(30), rim(0, 5)]))
+    assert on_side(np.array([rim(0), rim(90), rim(45, 4)])), "a coarse one too"
+    end = np.array([rim(-30), rim(0), rim(30)])
+    middle = end.mean(axis=0)
+    longest = float(np.linalg.norm(end[2] - end[0]))
+    assert radius - math.hypot(middle[0], middle[1]) < longest**2 * bend / 8
+    assert not on_side(end)
+    assert not on_side(np.array([rim(0), rim(120), rim(240)]))
+    flat = np.array([[0, 0, 2.0], [4, 0, 2], [0, 3, 2]])
+    up = np.array([0, 0, 1.0])
+    assert lies_on(flat, flat.mean(axis=0), up, 0.0)
+    assert not lies_on(flat + [0, 0, 0.01], flat.mean(axis=0), up, 0.0)

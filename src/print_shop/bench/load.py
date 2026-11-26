@@ -892,13 +892,27 @@ class _Model:
         crossed as if it weren't there, the parts it parts were taken for one, and the part
         left with no element of its own stopped the reading with "attempt to get argmax of an
         empty sequence" (mqucifer/print-shop#319). Its corners are on the face still, so there
-        a triangle is one whose corners are. So too on a flat face along a curved edge, where a
-        mid-side node is on the edge's chord, just past the face. A mesh whose sides are curved
-        is read as it was."""
+        a triangle is one whose corners are, and that lies on it (`lies_on`): not one of the
+        face beside it whose corners are all on the edge they share. So too on a flat face along
+        a curved edge, where a mid-side node is on the edge's chord, just past the face. A mesh
+        whose sides are curved is read as it was."""
         if not self.straight:
             return [self.fem.getElementNodes(e) for e in self.fem.getFacesByFace(face)]
+        import FreeCAD as App
+
         on = set(self.fem.getNodesByFace(face))
-        return [nodes for nodes in self._surface() if on.issuperset(nodes[:3])]
+        surface = face.Surface
+        found = []
+        for nodes in self._surface():
+            if not on.issuperset(nodes[:3]):
+                continue
+            corners = np.array([self.nodes[n] for n in nodes[:3]])
+            u, v = surface.parameter(App.Vector(*corners.mean(axis=0)))
+            bend = max(abs(surface.curvature(u, v, kind)) for kind in ("Max", "Min"))
+            nearest, normal = np.array(surface.value(u, v)), np.array(surface.normal(u, v))
+            if lies_on(corners, nearest, normal, bend):
+                found.append(nodes)
+        return found
 
     def _surface(self) -> list[tuple[int, ...]]:
         """Every triangle of the mesh's surface, as its nodes, read from the mesh once."""
@@ -1333,6 +1347,29 @@ def _quiet() -> Iterator[None]:
         sys.stdout.flush()
         os.dup2(said_before, 1)
         os.close(said_before)
+
+
+#: A straight-sided triangle lies on a face where its middle is within this, in mm, beyond its
+#: longest side's sag, and its normal within 60° of the face's (`lies_on`).
+ON_SAG, ON_NORMAL = 1e-4, 0.5
+
+
+def lies_on(corners: np.ndarray, nearest: np.ndarray, normal: np.ndarray, bend: float) -> bool:
+    """Whether a straight-sided triangle whose corners are all on a face lies on it
+    (mqucifer/print-shop#319): its middle is within its longest side's sag of the face's surface,
+    `nearest` the point of it nearest the middle, and its normal within 60° of the surface's
+    there, `normal`, `bend` its greatest curvature there. A triangle across the face beside it,
+    as on a peg's end whose corners are all on the round edge it shares with its side, lies
+    square to that side however near its middle is."""
+    a, b, c = (np.asarray(p, dtype=float) for p in corners)
+    across = np.cross(b - a, c - a)
+    size, way = float(np.linalg.norm(across)), float(np.linalg.norm(normal))
+    if size <= 1e-12 or way <= 1e-12:
+        return False
+    longest = max(float(np.linalg.norm(q - p)) for p, q in ((a, b), (b, c), (c, a)))
+    sag = longest**2 * abs(bend) / 8
+    off = float(np.linalg.norm((a + b + c) / 3 - np.asarray(nearest, dtype=float)))
+    return off <= sag + ON_SAG and abs(float(across @ normal)) >= ON_NORMAL * size * way
 
 
 @contextlib.contextmanager

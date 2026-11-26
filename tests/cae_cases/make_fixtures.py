@@ -57,6 +57,7 @@ corner rounded 3 mm, printed on its side; and two wall slices of a ring, 50 to 5
 axis and 80 tall, with a 2° seam between them, and a rib across the seam: a cap 4 thick curved
 round the slices' outsides, and a fin under it that fills the seam, touching both. Each is drawn
 in place, and again in its print pose and placed by its turns: about x, y or z, and two combined.
+And a peg 6 across standing in a blind hole 10 deep in a cube of 20, touching its wall and floor.
 """
 
 from __future__ import annotations
@@ -877,6 +878,9 @@ SHELF_T, SHELF_W, SHELF_H, SHELF_L, SHELF_WALL, SHELF_ROUND = 5.0, 10.0, 25.0, 3
 RIB_IN, RIB_OUT, RIB_CAP, RIB_TALL, RIB_LOW, RIB_HIGH = 50.0, 56.0, 4.0, 80.0, 30.0, 40.0
 #: Each slice's angles, the seam's between them, and the cap's.
 RIB_SLICES, RIB_SEAM, RIB_SPAN = ((0.0, 29.0), (31.0, 60.0)), (29.0, 31.0), (10.0, 50.0)
+#: The peg in its hole: the socket a cube `PEG_SIDE` with a hole `PEG_DEEP` deep, the peg as
+#: wide and `PEG_LONG` long, standing on the hole's floor.
+PEG_R, PEG_DEEP, PEG_SIDE, PEG_LONG = 3.0, 10.0, 20.0, 20.0
 #: Each way the print pose is placed: its name in the files and its turns, in order.
 PLACINGS = {
     "x": [["x", -90]], "y": [["y", 90]], "z": [["z", 90]], "xz": [["x", -90], ["z", 90]],
@@ -980,6 +984,17 @@ def turns() -> None:
     save(print_pose(rib, both), out / "rib-xz30.step")
     row = {"file": "rib-xz30.step", "turn": both, "layers": layers_drawn("y", on_side)}
     assembly(out / "ribbed-xz30.json", ribbed(row), touching, floor)
+    # A peg in a blind hole, touching its wall and its floor, which meet along a round edge: on
+    # a coarse straight-sided mesh the floor's triangles have all their corners on that edge.
+    hole = Part.makeCylinder(PEG_R, PEG_DEEP, App.Vector(PEG_SIDE / 2, PEG_SIDE / 2,
+                                                         PEG_SIDE - PEG_DEEP))  # fmt: skip
+    save(box((0, 0, 0), (PEG_SIDE, PEG_SIDE, PEG_SIDE)).cut(hole), out / "socket.step")
+    peg = Part.makeCylinder(PEG_R, PEG_LONG, App.Vector(PEG_SIDE / 2, PEG_SIDE / 2,
+                                                        PEG_SIDE - PEG_DEEP))  # fmt: skip
+    save(peg, out / "peg.step")
+    pegged: Rows = [{"name": "socket", "file": "socket.step", "layers": "z"},
+                    {"name": "peg", "file": "peg.step", "layers": "z"}]  # fmt: skip
+    assembly(out / "peg.json", pegged, [{"between": ["peg", "socket"], "kind": "touching"}], floor)
 
 
 def main() -> None:
