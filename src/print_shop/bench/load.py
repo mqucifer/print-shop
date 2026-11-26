@@ -130,6 +130,8 @@ OVERLAP = 1e-4
 NOTHING = 1e-3
 #: A push's point is on the faces that meet within this, in mm.
 ON_FACE = 0.01
+#: How a mesh whose elements' sides are straight is said where a step names it.
+STRAIGHT = ", its elements straight-sided"
 #: The held faces' reaction is the weight within this share, or nothing is said: CalculiX's own
 #: sum of the forces it solved for.
 REACTION = 0.01
@@ -256,34 +258,11 @@ def beyond(
 def _placed(assembly: Assembly, without_bands: bool = False) -> list[Any]:
     """Each part's one solid, where the assembly puts it: with `without_bands`, less its glass
     band where it names one (mqucifer/print-shop#295)."""
-    import FreeCAD as App
-    import Part
-
     folder = Path(assembly.path).parent
     found = []
     for part in assembly.parts:
-        solids = [s for s in Part.read(str(folder / part.file)).Solids if s.Volume > 1e-6]
-        if len(solids) != 1:
-            raise NoAnswer(
-                f"the part {part.name}'s file, {part.file}, holds {len(solids)} solids: a part is "
-                "one solid, and each other piece is a part of its own"
-            )
-        solid = solids[0].copy()
-        if without_bands and part.band is not None:
-            band = [s for s in Part.read(str(folder / part.band)).Solids if s.Volume > 1e-6]
-            left = [s for s in solid.cut(Part.makeCompound(band)).Solids if s.Volume > 1e-6]
-            if len(left) != 1:
-                raise NoAnswer(
-                    f"the part {part.name} with its band, {part.band}, left out is "
-                    f"{len(left)} solids: a part read without its band is one solid still"
-                )
-            solid = left[0]
-        for axis, degrees in part.turn:
-            way = [0.0, 0.0, 0.0]
-            way[AXES.index(axis)] = 1.0
-            solid.rotate(App.Vector(0, 0, 0), App.Vector(*way), degrees)
-        solid.translate(App.Vector(*part.at))
-        found.append(solid)
+        with step(f"placing the part {part.name} by its turn and its at"):
+            found.append(_one_placed(part, folder, without_bands))
     for i, first in enumerate(found):
         for j in range(i + 1, len(found)):
             if not first.BoundBox.intersect(found[j].BoundBox):
@@ -299,6 +278,35 @@ def _placed(assembly: Assembly, without_bands: bool = False) -> list[Any]:
                     "or cut it back, and `clearance` reads the pair"
                 )
     return found
+
+
+def _one_placed(part: PartAt, folder: Path, without_bands: bool) -> Any:
+    """One part's one solid, turned by its `turn` and moved by its `at`."""
+    import FreeCAD as App
+    import Part
+
+    solids = [s for s in Part.read(str(folder / part.file)).Solids if s.Volume > 1e-6]
+    if len(solids) != 1:
+        raise NoAnswer(
+            f"the part {part.name}'s file, {part.file}, holds {len(solids)} solids: a part is "
+            "one solid, and each other piece is a part of its own"
+        )
+    solid = solids[0].copy()
+    if without_bands and part.band is not None:
+        band = [s for s in Part.read(str(folder / part.band)).Solids if s.Volume > 1e-6]
+        left = [s for s in solid.cut(Part.makeCompound(band)).Solids if s.Volume > 1e-6]
+        if len(left) != 1:
+            raise NoAnswer(
+                f"the part {part.name} with its band, {part.band}, left out is "
+                f"{len(left)} solids: a part read without its band is one solid still"
+            )
+        solid = left[0]
+    for axis, degrees in part.turn:
+        way = [0.0, 0.0, 0.0]
+        way[AXES.index(axis)] = 1.0
+        solid.rotate(App.Vector(0, 0, 0), App.Vector(*way), degrees)
+    solid.translate(App.Vector(*part.at))
+    return solid
 
 
 def _span(box: Any, axis: int) -> tuple[float, float]:
@@ -319,6 +327,7 @@ class _Model:
         self.assembly, self.placed, self.args, self.size = assembly, placed, args, size
         #: Whether its second-order elements are straight-sided (mqucifer/print-shop#295).
         self.straight = straight
+        self._surface_nodes: list[tuple[int, ...]] | None = None
         self.toward = np.zeros(3)
         self.toward[AXES.index(args.toward[1])] = 1.0 if args.toward[0] == "+" else -1.0
 
@@ -630,7 +639,7 @@ class _Model:
         for name, solid in zip(names, self.solids, strict=True):
             mine = [f for f in [*self.fixed, *sum(self.standing.values(), [])]
                     if any(f.isSame(g) for g in solid.Faces)]  # fmt: skip
-            for node in {n for f in mine for n in self.fem.getNodesByFace(f)}:
+            for node in {n for f in mine for n in self._face_nodes(f)}:
                 if node in self.held_force:
                     self.outside[name][self.row[node]] += self.held_force.pop(node)
         # A pin's reaction, on no held face of its own: it's nothing where the load is square.
@@ -679,18 +688,60 @@ class _Model:
             if part is None:
                 raise NoAnswer("an element of the mesh is in none of the parts")
             owned[part, reached] = True
+        names = [p.name for p in self.assembly.parts]
+        for k, name in enumerate(names):
+            if not owned[k].any():
+                # Each part is reached whole from any of its elements, so a part with none was
+                # reached from another's, across faces where they meet that weren't found on
+                # the mesh (mqucifer/print-shop#319).
+                meets = sorted(n for pair in self.met if name in pair for n in pair if n != name)
+                raise NoAnswer(
+                    f"the part {name} has no element of the mesh of its own, at a mesh of at "
+                    f"most {self.size:g} mm{STRAIGHT if self.straight else ''}: the mesh's "
+                    "triangles on the faces where it meets "
+                    f"{', '.join(meets) or 'the other parts'} weren't found, so it can't be told "
+                    "from them, and nothing of it is read"
+                )
         return owned
 
     def _triangles(self, face: Any) -> list[tuple[tuple[int, ...], float, np.ndarray]]:
         """The mesh's triangles on a face: each one's nodes, corners first, its area and its
         centre."""
         found = []
-        for element in self.fem.getFacesByFace(face):
-            nodes = self.fem.getElementNodes(element)
+        for nodes in self._on_face(face):
             a, b, c = (self.nodes[n] for n in nodes[:3])
             area = 0.5 * float(np.linalg.norm(np.cross(b - a, c - a)))
             found.append((nodes, area, (a + b + c) / 3))
         return found
+
+    def _on_face(self, face: Any) -> list[tuple[int, ...]]:
+        """The nodes of each of the mesh's triangles on a face, corners first.
+
+        FreeCAD's own `getFacesByFace` takes a triangle whose every node is on the face. With
+        its elements' sides straight, a triangle's mid-side nodes are halfway along its chords,
+        off a curved face, so on one it finds none: a curved face where two parts meet was
+        crossed as if it weren't there, the parts it parts were taken for one, and the part
+        left with no element of its own stopped the reading with "attempt to get argmax of an
+        empty sequence" (mqucifer/print-shop#319). Its corners are on the face still, so there
+        a triangle is one whose corners are. A mesh whose sides are curved is read as it was."""
+        if not self.straight:
+            return [self.fem.getElementNodes(e) for e in self.fem.getFacesByFace(face)]
+        on = set(self.fem.getNodesByFace(face))
+        return [nodes for nodes in self._surface() if on.issuperset(nodes[:3])]
+
+    def _surface(self) -> list[tuple[int, ...]]:
+        """Every triangle of the mesh's surface, as its nodes, read from the mesh once."""
+        if self._surface_nodes is None:
+            self._surface_nodes = [self.fem.getElementNodes(e) for e in self.fem.Faces]
+        return self._surface_nodes
+
+    def _face_nodes(self, face: Any) -> list[int]:
+        """The mesh's nodes on a face: on a straight-sided mesh, with its triangles' mid-side
+        nodes on it, which are off a curved face (`_on_face`)."""
+        found = self.fem.getNodesByFace(face)
+        if not self.straight:
+            return list(found)
+        return sorted({*found, *(n for nodes in self._on_face(face) for n in nodes)})
 
     def _patches(self) -> None:
         """Each place `--at` names as the triangles of the surface within `--over` of it, and
@@ -717,6 +768,11 @@ class _Model:
                 )
             faces = [f for d, f in near if d <= ON_SURFACE]
             triangles = [t for f in faces for t in self._triangles(f)]
+            if not triangles:
+                raise NoAnswer(
+                    f"--at {_xyz(point)}: the mesh, at most {self.size:g} mm, has no triangle on "
+                    "the faces it's on, so no weight can be put there"
+                )
             within = [t for t in triangles if np.linalg.norm(t[2] - point) <= self.args.over]
             if not within:
                 within = [min(triangles, key=lambda t: float(np.linalg.norm(t[2] - point)))]
@@ -805,7 +861,7 @@ class _Model:
             {
                 n
                 for f in [*self.fixed, *sum(self.standing.values(), [])]
-                for n in self.fem.getNodesByFace(f)
+                for n in self._face_nodes(f)
             }
         )
         step = "*CLOAD\n" + "".join(
@@ -839,34 +895,39 @@ class _Model:
 
     # The readings
 
-    def parts_read(self) -> dict[str, Any]:
+    def parts_read(self, mesh: str) -> dict[str, Any]:
         found = {}
         for part in self.assembly.parts:
-            rows = self.part_rows[part.name]
-            way = part.layers_way()
-            strain = self.strain[rows]
-            across = np.einsum("i,nij,j->n", way, strain, way)
-            values, vectors = np.linalg.eigh(strain)
-            pick = np.abs(values).argmax(axis=1)
-            stretch = np.abs(values).max(axis=1)
-            worst, most = int(across.argmax()), int(stretch.argmax())
-            along = vectors[most][:, pick[most]]
-            found[part.name] = {
-                "material": part.material.name,
-                "layers": _list(way),
-                "across_layers_pct": 100 * max(float(across[worst]), 0.0),
-                "across_at": _list(self.points[rows[worst]], 3),
-                "across_limit_pct": part.material.across_pct,
-                "stretch_pct": 100 * float(stretch[most]),
-                "stretch_is": "pull" if values[most][pick[most]] > 0 else "push",
-                "stretch_at": _list(self.points[rows[most]], 3),
-                "stretch_from_layers_deg": math.degrees(
-                    math.asin(min(1.0, abs(float(along @ way))))
-                ),
-                "stretch_limit_pct": part.material.along_pct,
-                "nodes": len(rows),
-            }
+            with step(f"reading the part {part.name}, at {mesh}"):
+                found[part.name] = self._part_read(part)
         return found
+
+    def _part_read(self, part: PartAt) -> dict[str, Any]:
+        """One part's worst pull across its layers and largest stretch any way."""
+        rows = self.part_rows[part.name]
+        way = part.layers_way()
+        strain = self.strain[rows]
+        across = np.einsum("i,nij,j->n", way, strain, way)
+        values, vectors = np.linalg.eigh(strain)
+        pick = np.abs(values).argmax(axis=1)
+        stretch = np.abs(values).max(axis=1)
+        worst, most = int(across.argmax()), int(stretch.argmax())
+        along = vectors[most][:, pick[most]]
+        return {
+            "material": part.material.name,
+            "layers": _list(way),
+            "across_layers_pct": 100 * max(float(across[worst]), 0.0),
+            "across_at": _list(self.points[rows[worst]], 3),
+            "across_limit_pct": part.material.across_pct,
+            "stretch_pct": 100 * float(stretch[most]),
+            "stretch_is": "pull" if values[most][pick[most]] > 0 else "push",
+            "stretch_at": _list(self.points[rows[most]], 3),
+            "stretch_from_layers_deg": math.degrees(
+                math.asin(min(1.0, abs(float(along @ way))))
+            ),
+            "stretch_limit_pct": part.material.along_pct,
+            "nodes": len(rows),
+        }
 
     def joint_read(self, joint: Joint) -> dict[str, Any]:
         """What a joint carries, as the force and the moment the second part puts on the first:
@@ -909,7 +970,7 @@ class _Model:
         # What the second part puts on the first: at each node of the faces that meet, the
         # force the first part's own elements carry, less what's put on it there from outside.
         rows = sorted(
-            {self.row[n] for f in self.joint_faces[joint.name] for n in self.fem.getNodesByFace(f)}
+            {self.row[n] for f in self.joint_faces[joint.name] for n in self._face_nodes(f)}
         )
         name = joint.between[0]
         carried = self.within[name][rows] - self.outside[name][rows]
@@ -919,7 +980,7 @@ class _Model:
             [
                 self.nodes[n]
                 for f in self.joint_faces[joint.name]
-                for n in self.fem.getNodesByFace(f)
+                for n in self._face_nodes(f)
             ]
         )
         return {
@@ -1038,6 +1099,19 @@ def _quiet() -> Iterator[None]:
         os.close(said_before)
 
 
+@contextlib.contextmanager
+def step(what: str) -> Iterator[None]:
+    """What `load` was doing, said with anything it couldn't do there (mqucifer/print-shop#319):
+    a reason it gives itself is said as it is, and anything else as `NoAnswer` naming the step,
+    and the part or the joint, where it stopped. Never a traceback's last line alone."""
+    try:
+        yield
+    except NoAnswer:
+        raise
+    except Exception as exc:  # noqa: BLE001 - whatever stops a step is said with the step
+        raise NoAnswer(f"load stopped {what}: {type(exc).__name__}: {exc}"[:500]) from exc
+
+
 #: gmsh's lines that only sum up its errors.
 _SUMMED = re.compile(
     r"^(-+|Mesh generation error summary|\d+ (warning|error)s?|Check the full log.*)$"
@@ -1095,17 +1169,27 @@ def _solved(assembly: Assembly, placed: list[Any], args: Any, size: float) -> di
 def _read_solved(assembly: Assembly, model: _Model, doc: Any, size: float) -> dict[str, Any]:
     import FreeCAD as App
 
+    mesh = f"a mesh of at most {size:g} mm" + (STRAIGHT if model.straight else "")
     try:
-        model.join(doc)
-        model.hold()
-        model.solve(doc)
-        joints = {j.name: model.joint_read(j) for j in assembly.joints}
+        with step("joining the parts"):
+            model.join(doc)
+        with step("finding the faces the assembly is held by"):
+            model.hold()
+        with step(f"meshing and solving the joined parts, at {mesh}"):
+            model.solve(doc)
+        joints = {}
+        for joint in assembly.joints:
+            with step(f"reading the joint {joint.name}, at {mesh}"):
+                joints[joint.name] = model.joint_read(joint)
+        with step(f"reading the loaded places, at {mesh}"):
+            loads = model.loads_read()
+        parts = model.parts_read(mesh)
         far = int(np.linalg.norm(model.moved, axis=1).argmax())
         return {
             "mesh_mm": size,
-            "parts": model.parts_read(),
+            "parts": parts,
             "joints": joints,
-            "loads": model.loads_read(),
+            "loads": loads,
             "raw_loads": model.loads,
             "held_parts": model.held_parts,
             "held": model.held_said,
@@ -1225,20 +1309,17 @@ def _run(args: Any, report: Report, without_bands: bool = False) -> None:
         raise NoAnswer("parts of different stiffness aren't solved together yet: one material")
     placed = _placed(assembly, without_bands)
     # Each through-bolt's way through both parts, before anything is solved.
-    ways = load_through.ways(assembly, placed)
-    # And each dovetail's latch as what it catches on.
-    catches = {
-        j.name: load_dovetail.catch(assembly, j, placed)
-        for j in assembly.joints
-        if j.kind == "dovetail"
-    }
-    # And the faces of each that don't touch, and would close on each other across their play
-    # as the tail shifts and turns (mqucifer/print-shop#188).
-    plays = {
-        j.name: load_dovetail.play(assembly, j, placed)
-        for j in assembly.joints
-        if j.kind == "dovetail"
-    }
+    with step("finding each through joint's bolts' way through its parts"):
+        ways = load_through.ways(assembly, placed)
+    # And each dovetail's latch as what it catches on, and the faces of each that don't touch,
+    # and would close on each other across their play as the tail shifts and turns
+    # (mqucifer/print-shop#188).
+    catches, plays = {}, {}
+    for j in assembly.joints:
+        if j.kind == "dovetail":
+            with step(f"reading the dovetail joint {j.name}'s latch and its play"):
+                catches[j.name] = load_dovetail.catch(assembly, j, placed)
+                plays[j.name] = load_dovetail.play(assembly, j, placed)
     # And each dovetail taken apart the way it went together: its tail out of its socket past
     # nothing but its latch, and its latch's tab bent as far as it has to be to let it in
     # (mqucifer/print-shop#184 and mqucifer/print-shop#185). A joint that can't be put together
@@ -1250,15 +1331,15 @@ def _run(args: Any, report: Report, without_bands: bool = False) -> None:
 
         doc = App.newDocument("Joined")
         try:
-            with _quiet():
+            with _quiet(), step("joining the parts"):
                 _Model(assembly, placed, args, 1.0).join(doc)
         finally:
             App.closeDocument(doc.Name)
-    ways_in = {
-        j.name: way_in.read(assembly, j, placed)
-        for j in assembly.joints
-        if j.kind == "dovetail"
-    }
+    ways_in = {}
+    for j in assembly.joints:
+        if j.kind == "dovetail":
+            with step(f"taking the dovetail joint {j.name} apart the way it went together"):
+                ways_in[j.name] = way_in.read(assembly, j, placed)
     if ways_in:
         report.numbers["ways_in"] = {
             name: {k: v for k, v in found.items() if k not in ("fails", "apart")}
@@ -1512,92 +1593,113 @@ def _joints(
     ],
 ) -> None:
     """Each joint's force, and whether what holds it can."""
-    force = report.numbers["force_n"]
     saved: dict[str, Any] = {}
     for joint in assembly.joints:
-        read, other = fine["joints"][joint.name], coarse["joints"][joint.name]
-        normal = read["normal"]
-        along = float(read["force"] @ normal)
-        shear = float(np.linalg.norm(read["force"] - along * normal))
-        bending = read["moment"] - (read["moment"] @ normal) * normal
-        one: dict[str, Any] = {
-            "kind": joint.kind,
-            "at": _list(read["at"], 3),
-            "area_mm2": read["area_mm2"],
-            "force_n": _list(read["force"]),
-            "moment_nmm": _list(read["moment"]),
-            "pull_n": along,
-            "shear_n": shear,
-            "bending_nmm": float(np.linalg.norm(bending)),
-            "twist_nmm": float(read["moment"] @ normal),
-            "pulled_part_n": read["pulled_n"],
-            "pushed_part_n": read["pushed_n"],
-            "coarse_force_n": _list(other["force"]),
-            "coarse_moment_nmm": _list(other["moment"]),
-        }
-        saved[joint.name] = one
-        report.line(
-            f"the joint {joint.name}, {joint.kind}, over {read['area_mm2']:.1f} mm² round "
-            f"{_xyz(read['at'])}: it carries {np.linalg.norm(read['force']):.2f} N, "
-            f"{abs(along):.2f} N of it a {'pull' if along > 0 else 'push'} square to the faces "
-            f"and {shear:.2f} N along them, with a bending moment of "
-            f"{one['bending_nmm']:.1f} N·mm and a twist of {abs(one['twist_nmm']):.1f} N·mm, as "
-            f"joints.{joint.name}"
-        )
-        statics = beyond(assembly, joint, fine["raw_loads"], fine["held_parts"], read["at"])
-        if statics is not None:
-            one["statics_force_n"], one["statics_moment_nmm"] = _list(statics[0]), _list(statics[1])
-            gap = float(np.linalg.norm(read["force"] - statics[0]))
-            turn = float(np.linalg.norm(read["moment"] - statics[1]))
-            report.second(
-                f"the joint {joint.name} by statics, the load beyond it: "
-                f"{np.linalg.norm(statics[0]):.2f} N and {np.linalg.norm(statics[1]):.1f} N·mm, "
-                f"{gap:.2f} N and {turn:.1f} N·mm from the solve's; on the coarser mesh the "
-                f"solve gives {np.linalg.norm(other['force']):.2f} N and "
-                f"{np.linalg.norm(other['moment']):.1f} N·mm"
-            )
-        else:
-            report.second(
-                f"the joint {joint.name} on the coarser mesh: "
-                f"{np.linalg.norm(other['force']):.2f} N and "
-                f"{np.linalg.norm(other['moment']):.1f} N·mm (statics alone doesn't give it: the "
-                "parts are held, or joined, on both sides of it)"
-            )
-        if joint.kind == "bolted":
-            _bolted(joint, report, one, read, other, statics, fails, apart)
-        elif joint.kind in ("through", "dovetail"):
-            ways, placed, catches, plays = through
-            solids = [placed[[p.name for p in assembly.parts].index(n)] for n in joint.between]
-            if joint.kind == "dovetail":
-                _dovetail(
-                    assembly, joint, report, one, read, other, statics, fails, apart,
-                    catches[joint.name], solids, plays[joint.name],
-                )  # fmt: skip
-                continue
-            _through(
-                assembly, joint, report, one, read, other, statics, fails, apart,
-                ways[joint.name], solids,
-            )  # fmt: skip
-        elif joint.kind == "touching":
-            _touching(joint, args, report, one, read, force, fails)
-        elif joint.kind == "bonded":
-            # Glue is a second hold only, and no glue line in printed plastic has a sourced
-            # figure: a glued joint that carries anything isn't read (the operator's ruling on
-            # mqucifer/print-shop#171), as an insert with no figure isn't.
-            size = float(np.ptp(read["outline"], axis=0).max()) or 1.0
-            carries = max(np.linalg.norm(read["force"]), np.linalg.norm(read["moment"]) / size)
-            one["glue_unread"] = bool(carries > NOTHING * force)
-            report.line(
-                "  it's bonded, and nothing here says what a glue line in printed plastic "
-                "holds: "
-                + (
-                    "what it carries isn't read against anything, as joints."
-                    f"{joint.name}.glue_unread"
-                    if one["glue_unread"]
-                    else "it carries nothing to speak of under this load"
-                )
-            )
+        with step(
+            f"judging the joint {joint.name}, {joint.kind}, between {' and '.join(joint.between)}"
+        ):
+            saved[joint.name] = _joint(assembly, joint, args, report, fine, coarse, fails, apart,
+                                       through)  # fmt: skip
     report.numbers["joints"] = saved
+
+
+def _joint(
+    assembly: Assembly,
+    joint: Joint,
+    args: Any,
+    report: Report,
+    fine: dict[str, Any],
+    coarse: dict[str, Any],
+    fails: list[str],
+    apart: list[str],
+    through: tuple[
+        dict[str, list[dict[str, Any]]], list[Any], dict[str, Any], dict[str, list[dict[str, Any]]]
+    ],
+) -> dict[str, Any]:
+    """One joint's force, and whether what holds it can: its saved figures."""
+    force = report.numbers["force_n"]
+    read, other = fine["joints"][joint.name], coarse["joints"][joint.name]
+    normal = read["normal"]
+    along = float(read["force"] @ normal)
+    shear = float(np.linalg.norm(read["force"] - along * normal))
+    bending = read["moment"] - (read["moment"] @ normal) * normal
+    one: dict[str, Any] = {
+        "kind": joint.kind,
+        "at": _list(read["at"], 3),
+        "area_mm2": read["area_mm2"],
+        "force_n": _list(read["force"]),
+        "moment_nmm": _list(read["moment"]),
+        "pull_n": along,
+        "shear_n": shear,
+        "bending_nmm": float(np.linalg.norm(bending)),
+        "twist_nmm": float(read["moment"] @ normal),
+        "pulled_part_n": read["pulled_n"],
+        "pushed_part_n": read["pushed_n"],
+        "coarse_force_n": _list(other["force"]),
+        "coarse_moment_nmm": _list(other["moment"]),
+    }
+    report.line(
+        f"the joint {joint.name}, {joint.kind}, over {read['area_mm2']:.1f} mm² round "
+        f"{_xyz(read['at'])}: it carries {np.linalg.norm(read['force']):.2f} N, "
+        f"{abs(along):.2f} N of it a {'pull' if along > 0 else 'push'} square to the faces "
+        f"and {shear:.2f} N along them, with a bending moment of "
+        f"{one['bending_nmm']:.1f} N·mm and a twist of {abs(one['twist_nmm']):.1f} N·mm, as "
+        f"joints.{joint.name}"
+    )
+    statics = beyond(assembly, joint, fine["raw_loads"], fine["held_parts"], read["at"])
+    if statics is not None:
+        one["statics_force_n"], one["statics_moment_nmm"] = _list(statics[0]), _list(statics[1])
+        gap = float(np.linalg.norm(read["force"] - statics[0]))
+        turn = float(np.linalg.norm(read["moment"] - statics[1]))
+        report.second(
+            f"the joint {joint.name} by statics, the load beyond it: "
+            f"{np.linalg.norm(statics[0]):.2f} N and {np.linalg.norm(statics[1]):.1f} N·mm, "
+            f"{gap:.2f} N and {turn:.1f} N·mm from the solve's; on the coarser mesh the "
+            f"solve gives {np.linalg.norm(other['force']):.2f} N and "
+            f"{np.linalg.norm(other['moment']):.1f} N·mm"
+        )
+    else:
+        report.second(
+            f"the joint {joint.name} on the coarser mesh: "
+            f"{np.linalg.norm(other['force']):.2f} N and "
+            f"{np.linalg.norm(other['moment']):.1f} N·mm (statics alone doesn't give it: the "
+            "parts are held, or joined, on both sides of it)"
+        )
+    if joint.kind == "bolted":
+        _bolted(joint, report, one, read, other, statics, fails, apart)
+    elif joint.kind in ("through", "dovetail"):
+        ways, placed, catches, plays = through
+        solids = [placed[[p.name for p in assembly.parts].index(n)] for n in joint.between]
+        if joint.kind == "dovetail":
+            _dovetail(
+                assembly, joint, report, one, read, other, statics, fails, apart,
+                catches[joint.name], solids, plays[joint.name],
+            )  # fmt: skip
+            return one
+        _through(
+            assembly, joint, report, one, read, other, statics, fails, apart,
+            ways[joint.name], solids,
+        )  # fmt: skip
+    elif joint.kind == "touching":
+        _touching(joint, args, report, one, read, force, fails)
+    elif joint.kind == "bonded":
+        # Glue is a second hold only, and no glue line in printed plastic has a sourced
+        # figure: a glued joint that carries anything isn't read (the operator's ruling on
+        # mqucifer/print-shop#171), as an insert with no figure isn't.
+        size = float(np.ptp(read["outline"], axis=0).max()) or 1.0
+        carries = max(np.linalg.norm(read["force"]), np.linalg.norm(read["moment"]) / size)
+        one["glue_unread"] = bool(carries > NOTHING * force)
+        report.line(
+            "  it's bonded, and nothing here says what a glue line in printed plastic "
+            "holds: "
+            + (
+                "what it carries isn't read against anything, as joints."
+                f"{joint.name}.glue_unread"
+                if one["glue_unread"]
+                else "it carries nothing to speak of under this load"
+            )
+        )
+    return one
 
 
 def _bolted(

@@ -25,6 +25,7 @@ from print_shop.bench.load import (
     element_forces,
     memory_met,
     oom_kills,
+    step,
 )
 from print_shop.bench.report import NoAnswer
 from print_shop.rounds import needs, reports, skills, toolsets
@@ -1478,3 +1479,21 @@ def test_the_skill_says_how_to_split_and_gives_each_check_its_command() -> None:
             assert f"| `{measure.name}` | `{measure.commands[0]} " in body, measure.name
     for term in ("load path", "layers", "split", "joint", "seat", "tail", "latch", "assembly file"):
         assert f"- **{term}**:" in body, term
+
+
+def test_what_stops_a_step_of_load_is_said_with_the_step_never_as_an_error_alone() -> None:
+    """mqucifer/print-shop#319: a lamp's rib read `NO ANSWER: ValueError: attempt to get argmax
+    of an empty sequence`, with nothing of which part or what step. Whatever stops a step is said
+    with it; a reason `load` gives itself is said as it is."""
+    with pytest.raises(NoAnswer) as raised, step("reading the part rib, at a mesh of at most 5 mm"):
+        np.array([]).argmax()
+    assert str(raised.value) == (
+        "load stopped reading the part rib, at a mesh of at most 5 mm: ValueError: attempt to "
+        "get argmax of an empty sequence"
+    )
+    assert isinstance(raised.value.__cause__, ValueError)
+    with pytest.raises(NoAnswer) as given, step("joining the parts"):
+        raise NoAnswer("joined, the part rib isn't the solid it was")
+    assert str(given.value) == "joined, the part rib isn't the solid it was"
+    with step("reading the loaded places"):
+        pass
