@@ -70,10 +70,14 @@ held to `--friction` where that's given.
 axes and turns and moves with the part, and a part turned off the assembly's axes is cut round
 its dovetail in its own. Where gmsh can't curve every element onto the parts' faces without
 turning one inside out, as on a traced glass frame, the mesh is made again with straight sides,
-and the reply says why. CalculiX runs on one thread, as gmsh does, and each mesh's and solve's
-files are deleted from the container's /tmp, which is memory, once read. Where the solve still
-meets the container's memory, the reply says so from the container's own count, and what of the
-mesh is finer than --mesh asks.
+and the reply says why. On that mesh a triangle is on a face where its corners are, as its
+mid-side nodes are on its chords, off a curved face, so a part drawn in its print pose and placed
+by its turns, as a design run places it, is told from the curved parts it meets
+(mqucifer/print-shop#319). Anything `load` can't read is `NO ANSWER`, naming the step, and the
+part or the joint, where it stopped. CalculiX runs on one thread, as gmsh does, and each mesh's
+and solve's files are deleted from the container's /tmp, which is memory, once read. Where the
+solve still meets the container's memory, the reply says so from the container's own count, and
+what of the mesh is finer than --mesh asks.
 
 **Second methods.** The whole solve again on a mesh half as coarse again: each figure that's
 judged, on both. The held faces' reaction, which CalculiX prints, against the weight put on. And
