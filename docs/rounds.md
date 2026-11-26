@@ -38,7 +38,7 @@ It needs the bench's image (`scripts/bench.py build`), and LiteLLM on :4000 with
 **The breakdown comes first** (mqucifer/print-shop#36). In all three stained-glass runs the model read the reference for what's in it, not how it's built: on `suncatcher-2` it drew each ring as one loop where short bars cut them, and the frame came apart into three bodies. So `needs` is refused until `breakdown` has named the parts, what holds or connects each to the rest, and what the look rests on. It's held to its shape, not its words: each part named once, each join naming parts that are there, and with more than one part, every part in a join, since a part nothing holds is the one that comes apart. It's general to any part: a bracket's plate, arm and brace, or a lamp's shade and socket ring. It's kept in `breakdowns/n.json`, `breakdown.md` and `work/record/breakdown.md`, and the ledger's `breakdowns`. The model can send it again whenever it finds it wrong, and the plan stop shows the latest.
 
 **Rounds.** The model makes and changes the part, and calls `done` when it believes the needs are met. The harness then runs the script again and each need's check itself, so the model's word and a tool's success don't count:
-- The clean run has a fresh container, over a plain copy of `work/` with no links, nothing a run left, and all geometry outside `references/` taken away.
+- The clean run has a fresh container, over a plain copy of `work/` with no links, nothing a run left, nothing in `scratch/` (below), and all geometry outside `references/` taken away.
 - Each bench need then runs in another fresh container, where no model code has run. `params` runs the script by its nature, on a scratch copy, so its reading is as good as its own second check.
 - `DISAGREE` and `NO ANSWER` never pass, whatever a need says.
 - An eye need passes on a pick, and on nothing else. A stand-in's passes it too, so a run can be proved with no Sponsor there, and the reading says who it was.
@@ -769,12 +769,26 @@ The Sponsor, 2026-11-05: "It should use orca's cli to add pauses not raw gcode. 
 
 **Not here yet:** supports, and choosing an orientation (mqucifer/print-shop#9), the model proposing settings (mqucifer/print-shop#13), and the model at all: its place comes once there are findings to learn from. A proposal approved isn't applied by code: it goes to the design, as a new run or a send-back.
 
+### A run's `scratch/` is never its part (mqucifer/print-shop#315)
+
+A design run often needs files that aren't its part: a placed or exploded compound to render, a turned copy to draw a cut through, a gauge it builds for itself. Every geometry file in `work/` counted as the run's work, so on an assembly run turned copies of the given parts were read as prints and `thin` failed on the upright ones, 11 derived STEP files piled up in a render folder, every description at one stop was marked stale because those files changed, and the stand-in had to fault the copies and ask for them to be deleted before `done`. `paths.SCRATCH` holds the rule.
+
+- **`scratch/` at the top of `work/`** is the run's own folder for what isn't its part. Only that one: a folder named `scratch` deeper in, `parts/scratch/`, is the run's work as before, and so is `scratchpad.step`.
+- **Never read as the part.** What the harness walks as the run's files leaves it out (`paths.walk_plain` with `skip_made`): it isn't described, so nothing there makes a description stale; a `thin` on one, the model's own or the harness's, is never said as a part file's; and before `done` names a part, the run's own geometry doesn't include it. `paths.geometry_hashes` leaves it out too, so a copy of a picked part kept there can't hold a pick for a part that changed since. And a compound placed or exploded there, even one a `--placed` reading named, is never the run's assembly file (`print_sides.assemblies`), so the harness places nothing by it.
+- **Drawn at a stop.** An `ask`'s variants may name scratch files, and `render` and `--cut` draw them as any file. The harness's own readings at the ask, `thin`, the glass checks, the curves and the downward faces, and what `done` would refuse in the needs, read only the files outside `scratch/`. **Each picture says it shows scratch files:** `render` stamps "shows scratch/ files: not the part" along its foot, on every view, close-up, section and cut of a file, or of a variant's row, that has one, and says which in a line the sheet's words carry to the person (`scratch/ files drawn, not the part: …`). The ask's reply says so too. An eye need is never asked on one: its pick passes on the part's own files, so an `ask` naming a `need` with a scratch file on its sheet is refused (`eye_on_scratch`).
+- **A part can't be made from scratch.** `done` refuses a `part` file, a file of a row, an assembly file, or a `script` under `scratch/`, naming it (`scratch`), by any spelling that leads there (`./scratch/`, `/work/scratch/`, `Scratch/`). The clean run doesn't copy the folder, so nothing in it is printed or made from a clean start, and an assembly placing a scratch copy of a given part is refused as not given, as any file the run made is.
+- **Its size counts** toward the working directory's limit, as every file does.
+- **A run with no `scratch/` reads as on main:** nothing walks, reads or refuses differently.
+- **Where the model learns it:** each design skill says what `scratch/` is for, and that nothing in it is the part.
+
+*Made up (`tests/test_scratch.py`, and `test_bench.py` in the image):* an exploded compound in `scratch/` is drawn on an ask's sheet, with a cut, and `thin` reads only the part's file beside it; nothing in it is described. A failing `thin` on a scratch copy isn't said as the part's. An eye need asked on a scratch file is refused, and a compound placed in `scratch/` isn't the run's assembly. A `part` file, a row's file, an assembly file and a script under `scratch/` are each refused at `done`, and an assembly placing a scratch copy is refused as not given. A clean run doesn't copy `scratch/`, and its size still counts. A folder named `scratch` deeper in and a run with none read as on main. In the image, a render of a scratch file says so on each picture, and one with none doesn't.
+
 ## A run's folder
 
 | Path | Holds |
 |---|---|
 | `request.md` | As it came |
-| `work/` | `/work` in each container, and the only thing model-written code can touch. `references/` is what was given, `record/` what the harness keeps for the model to read (`ROUNDS.md`, `CHECKS.md`, `FACTS.md` and each round's diff), and nothing is ever read back from it |
+| `work/` | `/work` in each container, and the only thing model-written code can touch. `references/` is what was given, `record/` what the harness keeps for the model to read (`ROUNDS.md`, `CHECKS.md`, `FACTS.md` and each round's diff), and nothing is ever read back from it. `scratch/` is the run's own, for what isn't its part, never read as it |
 | `events.jsonl` | Every call, with its reasoning, and every tool call. `transcript.rebuild(events, n)` gives call `n`'s exact request, across stops and compaction. It's what could later train an adapter (M14) |
 | `views/` | Each picture the model was shown |
 | `state.json`, `needs.json`, `needs/` | Where it stands, and the needs |

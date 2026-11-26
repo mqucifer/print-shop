@@ -1694,6 +1694,27 @@ def test_a_sheet_of_variants_marks_a_test_piece_on_every_row(bench: Any) -> None
     assert answer.numbers["test_pieces"] == ["cube.step"]
 
 
+def test_a_picture_of_scratch_files_says_so_and_one_without_doesnt(bench: Any) -> None:
+    """A run's `scratch/` isn't its part (mqucifer/print-shop#315): each picture of it says so."""
+    (bench.work / "scratch").mkdir(exist_ok=True)
+    shutil.copy(bench.work / "block.step", bench.work / "scratch" / "turned.step")
+    answer = bench(
+        "render", "block.step", "scratch/turned.step", "--views", "top", "--cut", "x=30",
+        "--size", "256", "--renders-out", "scratch-drawn",
+    )  # fmt: skip
+    assert answer.verdict == "OK", answer.text
+    assert answer.numbers["scratch"] == ["scratch/turned.step"]
+    assert "scratch/ files drawn, not the part: scratch/turned.step" in answer.text
+    sheet = bench(
+        "render", "--variant", "A=block.step", "--variant", "B=block.step,scratch/turned.step",
+        "--views", "top", "--cut", "x=30", "--size", "256",
+    )  # fmt: skip
+    assert sheet.verdict == "OK", sheet.text
+    assert sheet.numbers["scratch"] == ["scratch/turned.step"]
+    plain = bench("render", "block.step", "--views", "top", "--size", "256")
+    assert "scratch" not in plain.numbers and "scratch/" not in plain.text
+
+
 # The parameter check: a Fusion design reported healthy with its parameter driving part of it
 
 

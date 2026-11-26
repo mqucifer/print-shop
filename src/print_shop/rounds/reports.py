@@ -147,6 +147,7 @@ REPORTS: dict[str, tuple[str, ...]] = {
         "cuts",
         "files",
         "placed",
+        "scratch",
         "sections",
         "seen_px",
         "test_pieces",

@@ -275,6 +275,13 @@ closing words as `pause` reads it, the layer and its z, never as the pocket's fl
 the closing words put the pause at the pocket's floor, neither ran `pause`, and both were wrong. Where it fails, raise the pocket's ceiling to the first
 layer line over the pane, or set the pane lower.
 
+### Step 7: what isn't the part goes in `scratch/` (mqucifer/print-shop#315)
+
+A placed or exploded compound to draw, a turned copy to cut, a gauge: write it under `scratch/`
+in your working directory. It's drawn when an `ask` names it, and each picture says it shows
+scratch files, but nothing reads it as the part: no `thin`, no glass check, no description, no
+clean run. `done` refuses a `part` or a `script` there, so write the frame and panes outside it.
+
 ## From a picture: the piece map (mqucifer/print-shop#152, mqucifer/print-shop#153)
 
 Where the request gives a stained-glass picture, flat colours between dark lines, its pieces

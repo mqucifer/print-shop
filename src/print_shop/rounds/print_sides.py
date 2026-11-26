@@ -92,8 +92,11 @@ def parts_of(work: Path, assembly: str) -> list[Layered]:
 
 def assemblies(work: Path, named: list[str]) -> list[str]:
     """The run's assembly files, those its bench calls named first, latest first, then any other
-    JSON file in its working directory that names parts with `layers`."""
-    found = list(dict.fromkeys(_plain(n) for n in reversed(named)))
+    JSON file in its working directory that names parts with `layers`. One in `scratch/`, such as
+    a compound placed or exploded to draw, isn't the run's (mqucifer/print-shop#315)."""
+    found = list(
+        dict.fromkeys(_plain(n) for n in reversed(named) if not paths.in_scratch(_plain(n)))
+    )
     for path in paths.walk_plain(work, skip_made=True):
         plain = _plain(path.as_posix())
         if path.suffix.lower() != ".json" or plain.startswith(("record/", "bench-out/")):

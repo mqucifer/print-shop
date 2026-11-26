@@ -117,3 +117,5 @@ A change for one check can break another, as a thicker wall changes the inside. 
 ### 7. Asking and done
 
 `ask` draws a sheet: give each part its colour, the references grey, and add a cut through the boards and one through the lid's lip (`cuts`). Say what each picture shows as drawn. Say each part's print orientation and where its bed edges are (`softening-edges`). `done` names every printed part in `part`: the base, the lid, and any other printed part.
+
+**What isn't the part goes in `scratch/`.** A placed or exploded compound to draw, a turned copy to cut, a gauge: write it under `scratch/` in your working directory. It's drawn when an `ask` names it, and each picture says it shows scratch files, but nothing reads it as the part: no `thin`, no description, no clean run. `done` refuses a `part` or a `script` there, so write the part itself outside it.
