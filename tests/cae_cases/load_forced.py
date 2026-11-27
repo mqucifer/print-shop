@@ -24,12 +24,25 @@ Nothing here changes how the bench reads anything else.
   the second pass, and nowhere else;
 - `search-fails`: the search for faces closer than the mesh's sag failing;
 - `unsized`: the faces found close where gmsh's triangles cross given no local size, so gmsh
-  refuses them as it did (mqucifer/print-shop#346).
+  refuses them as it did (mqucifer/print-shop#346);
+- `plain`: nothing forced, `load` as the bench runs it.
+
+And either of these may follow MODE, for two runs read on the same meshes
+(mqucifer/print-shop#348): gmsh's high-order optimisation numbers each patch of elements it
+straightens by where they lie in memory, so a process laid out otherwise, as any can be, moves
+a few hundred of the curved mesh's nodes by up to 2e-3 mm, and every figure after it:
+
+- `--keep-meshes DIR`: each mesh gmsh makes, in turn, kept in DIR (in /work), with the input
+  FreeCAD gave it;
+- `--meshes DIR`: each mesh, in turn, the one kept in DIR in place of what gmsh makes now, and
+  refused unless FreeCAD gave gmsh the same input for it.
 """
 
 from __future__ import annotations
 
 import importlib
+import os
+import shutil
 import sys
 from typing import Any
 
@@ -44,7 +57,36 @@ main = importlib.import_module("bench.cli").main
 FORCED = "forced by the test, which reads the curved mesh beside this"
 
 mode, given = sys.argv[1], sys.argv[2:]
-if mode == "straight":
+if given[:1] in (["--keep-meshes"], ["--meshes"]):
+    from femmesh.gmshtools import GmshTools
+
+    keeping, folder, given = given[0] == "--keep-meshes", os.path.join("/work", given[1]), given[2:]
+    if keeping:
+        os.makedirs(folder, exist_ok=False)
+    read = GmshTools.update_properties
+    meshed = [0]
+
+    def gmsh_input(path: str) -> str:
+        """FreeCAD's input to gmsh but for its comments, which name the run's own folder."""
+        with open(path) as given_to_gmsh:
+            return "".join(line for line in given_to_gmsh if not line.startswith("//"))
+
+    def same_meshes(self: Any) -> None:
+        meshed[0] += 1
+        kept = os.path.join(folder, f"{meshed[0]:02d}")
+        if keeping:
+            shutil.copy(self.temp_file_mesh, kept + ".unv")
+            shutil.copy(self.temp_file_geo, kept + ".geo")
+        else:
+            if gmsh_input(self.temp_file_geo) != gmsh_input(kept + ".geo"):
+                raise SystemExit(f"mesh {meshed[0]}'s gmsh input isn't the one kept in {folder}")
+            shutil.copy(kept + ".unv", self.temp_file_mesh)
+        read(self)
+
+    GmshTools.update_properties = same_meshes
+if mode == "plain":
+    pass
+elif mode == "straight":
     solve = load._Model.solve
 
     def straight_only(self: Any, doc: Any) -> None:
