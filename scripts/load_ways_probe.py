@@ -33,7 +33,15 @@ def inner(assembly_file: str) -> None:  # pragma: no cover - runs in the image
 
     sys.path.insert(0, "/opt/bench")
     sys.path.append("/opt/conda/lib")
-    from bench import assembly, cae, load, load_through, progress, through
+    # The image's own mount of the bench, not this package: mypy can't see it.
+    from bench import (  # type: ignore[attr-defined]
+        assembly,
+        cae,
+        load,
+        load_through,
+        progress,
+        through,
+    )
 
     began = time.time()
 

@@ -204,7 +204,10 @@ def test_what_the_process_freed_is_given_back_before_gmsh_and_calculix_and_after
     order: list[str] = []
     monkeypatch.setattr(cae, "give_back", lambda: order.append("given back"))
     monkeypatch.setattr(load, "give_back", lambda: order.append("given back"))
-    tools = SimpleNamespace(create_mesh=lambda: order.append("gmsh") or None)
+    def meshed() -> None:
+        order.append("gmsh")
+
+    tools = SimpleNamespace(create_mesh=meshed)
     cae.gmsh(tools)
     with load.step("reading"):
         order.append("read")
