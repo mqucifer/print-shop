@@ -71,6 +71,8 @@ def test_each_face_has_its_least_size_graded_to_the_mesh_s_and_nothing_where_non
     assert "Field[4] = Constant;\nField[4].SurfacesList = {11};" in text
     assert text.count("= Constant;") == 2 and text.count("= Threshold;") == 2
     assert "Field[7] = Min;\nField[7].FieldsList = {1, 3, 4, 6};\nBackground Field = 7;" in text
+    # And no element anywhere finer than LEAST, once meshed again.
+    assert f"Mesh.MeshSizeMin = {close_faces.LEAST:g};" in text
     # A size the mesh already meets isn't given, and none is finer than LEAST.
     assert fields([Close(1, 2, 1.0, faces={1: 5.0})], 3.0) == ""
     assert f"VIn = {close_faces.LEAST:.6g};" in fields([Close(1, 2, 0.0, faces={1: 0.0})], 3.0)

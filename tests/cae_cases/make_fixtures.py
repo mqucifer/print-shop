@@ -68,7 +68,8 @@ standing and placed by the one turn about z, exactly where it is, and by its `at
 `capped/` (mqucifer/print-shop#346): a top 40 x 40 and 6 thick with a counterbore 10 across and
 2 deep at its middle, and a cap 2 tall standing on the counterbore's floor with play round it,
 turned 15° about its axis so its seam isn't the counterbore's: 0.15 mm of play, a fit's, and
-0.2 µm, a hair, which no mesh parts.
+0.2 µm, a hair, which no mesh parts; and with the top's corner at the origin rounded 0.03 mm, a
+micro-arc no print has.
 """
 
 from __future__ import annotations
@@ -1142,7 +1143,7 @@ def printed() -> None:
 #: The capped top (mqucifer/print-shop#346): its side and thickness, the counterbore's radius
 #: and depth, and the cap's play round it, a fit's and a hair's, and its turn, in mm and degrees.
 CAPPED_SIDE, CAPPED_T, CAPPED_BORE_R, CAPPED_DEEP = 40.0, 6.0, 5.0, 2.0
-CAPPED_PLAY, CAPPED_HAIR, CAPPED_TURN = 0.15, 2e-4, 15.0
+CAPPED_PLAY, CAPPED_HAIR, CAPPED_TURN, CAPPED_ROUND = 0.15, 2e-4, 15.0, 0.03
 
 
 def capped() -> None:
@@ -1154,6 +1155,9 @@ def capped() -> None:
         Part.makeCylinder(CAPPED_BORE_R, CAPPED_DEEP + 1, middle)
     )
     save(top, out / "top.step")
+    # The same top with one upright corner rounded 0.03 mm, as a traced frame's micro-arc is.
+    corner = next(e for e in top.Edges if e.BoundBox.XMax < 1e-6 and e.BoundBox.YMax < 1e-6)
+    save(top.makeFillet(CAPPED_ROUND, [corner]), out / "top-micro.step")
     parts: Rows = [{"name": "top", "file": "top.step", "layers": "z"}]
     for name, play in (("capped", CAPPED_PLAY), ("capped-hair", CAPPED_HAIR)):
         cap = Part.makeCylinder(CAPPED_BORE_R - play, CAPPED_DEEP, middle)
@@ -1162,6 +1166,10 @@ def capped() -> None:
         rows = [*parts, {"name": "cap", "file": f"{name}.step", "layers": "z"}]
         assembly(out / f"{name}.json", rows, [{"between": ["top", "cap"], "kind": "touching"}],
                  [{"plane": "z=0", "how": "fixed"}])  # fmt: skip
+    micro = [{"name": "top", "file": "top-micro.step", "layers": "z"},
+             {"name": "cap", "file": "capped.step", "layers": "z"}]  # fmt: skip
+    assembly(out / "capped-micro.json", micro, [{"between": ["top", "cap"], "kind": "touching"}],
+             [{"plane": "z=0", "how": "fixed"}])  # fmt: skip
 
 
 def main() -> None:

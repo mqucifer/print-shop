@@ -591,8 +591,10 @@ class _Model:
         self.spread = spread
         self.iterated: str | None = None
         #: The pairs of faces closer than the mesh's sag, meshed finer there
-        #: (`close_faces`, mqucifer/print-shop#346): filled by `solve`.
+        #: (`close_faces`, mqucifer/print-shop#346): filled by `solve`. And how many faces curve
+        #: tighter than gmsh's sizing would mesh at `close_faces.LEAST`, the least element then.
         self.closes: list[close_faces.Close] = []
+        self.tight = 0
         #: Each node's axes held, as CalculiX is told them, by `_add_to`.
         self.constrained: dict[int, set[int]] = {}
         #: The solids each part's own weight is taken from, where they aren't `placed`: in
@@ -887,7 +889,9 @@ class _Model:
             # own words are in what it printed.
             if not self.straight:
                 raise _Curved(
-                    f"gmsh made no curved mesh of the joined parts: {words[:900]}", self.closes
+                    f"gmsh made no curved mesh of the joined parts: {words[:900]}",
+                    self.closes,
+                    self.tight,
                 )
             raise _Unread(
                 "gmsh made no mesh of the joined parts, with its elements' sides curved onto "
@@ -915,8 +919,9 @@ class _Model:
             self._stiffnesses(fea.inp_file_name)
         self._add_to(fea.inp_file_name)
         kills = oom_kills()
-        _ccx(fea, self.size)
-        fea.load_results()
+        with step("CalculiX's solve of the joined parts"):
+            _ccx(fea, self.size)
+            fea.load_results()
         self.solve_s = round(time.time() - began, 2)
         results = [o for o in analysis.Group if o.isDerivedFrom("Fem::FemResultObject")]
         if "nonpositive jacobian" in str(getattr(fea, "ccx_stdout", "")):
@@ -927,6 +932,7 @@ class _Model:
                     "CalculiX found an element of the curved mesh, at most "
                     f"{self.size:g} mm, turned inside out{where}",
                     self.closes,
+                    self.tight,
                 )
             raise NoAnswer(
                 f"CalculiX solved nothing: an element of the mesh, at most {self.size:g} mm, is "
@@ -995,9 +1001,12 @@ class _Model:
         said, with its parts, its faces and how far apart they are, and nothing is meshed;
         elsewhere, it's left as gmsh meshed it."""
         point = _crossed_at(words)
+        tight: list[int] = []
         found = close_faces.found(
-            self.whole, self.size, per_turn, _measured(self.whole), self._face_owners(), point
-        )
+            self.whole, self.size, per_turn, _measured(self.whole), self._face_owners(), point,
+            tight,
+        )  # fmt: skip
+        self.tight = len(tight)
         refused = close_faces.too_close(found)
         faces = self.whole.Faces
         here = [
@@ -1112,6 +1121,8 @@ class _Model:
             "pairs": len(self.closes),
             "faces": len(faces),
             "closest_mm": round(min(c.apart for c in self.closes), 4),
+            "tight_faces": self.tight,
+            "least_mm": close_faces.LEAST,
             "finest_mm": round(close_faces.stepped(min(c.finest for c in self.closes)), 4),
         }
 
@@ -2465,9 +2476,12 @@ class _Curved(NoAnswer):
     the curved try found close (mqucifer/print-shop#346), so the straight one starts from them:
     the same parts at the same mesh, and gmsh's triangles cross the same way."""
 
-    def __init__(self, said: str, closes: list[close_faces.Close] | None = None) -> None:
+    def __init__(
+        self, said: str, closes: list[close_faces.Close] | None = None, tight: int = 0
+    ) -> None:
         super().__init__(said)
         self.closes = list(closes or [])
+        self.tight = tight
 
 
 def curved_said(why: str) -> str:
@@ -2512,7 +2526,7 @@ def _solved(
         with _quiet():
             return _read_solved(assembly, model(False), doc, size)
     except _Curved as curved:
-        why, closes = str(curved), curved.closes
+        why, closes, tight = str(curved), curved.closes, curved.tight
     # Meshed again outside the `except`, so what the curved try held, its model and its mesh,
     # which its traceback keeps, is let go first (mqucifer/print-shop#336): held through the
     # straight try, a design run's whole table had 0.8 GiB more in use there.
@@ -2521,7 +2535,7 @@ def _solved(
         pass
     doc = App.newDocument("Load")
     straight = model(True)
-    straight.closes = closes
+    straight.closes, straight.tight = closes, tight
     try:
         with _quiet():
             found = _read_solved(assembly, straight, doc, size)
@@ -2591,7 +2605,14 @@ def _finer_said(solved: dict[str, Any]) -> str:
     return (
         f", finer, to at most {finer['finest_mm']:g} mm, on {finer['faces']} face(s) where "
         f"{finer['pairs']} pair(s) of faces that meet nowhere lie closer than its triangles' "
-        f"sag, the closest {finer['closest_mm']:g} mm apart"
+        f"sag, the closest {finer['closest_mm']:g} mm apart, and nowhere finer than "
+        f"{finer['least_mm']:g} mm"
+        + (
+            f": {finer['tight_faces']} face(s) curve tighter than a print's round, and are "
+            "meshed at that"
+            if finer.get("tight_faces")
+            else ""
+        )
     )
 
 

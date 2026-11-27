@@ -1711,6 +1711,23 @@ def test_a_cap_in_its_counterbore_with_play_round_it_meshes_curved_and_straight(
         assert "DISAGREE" not in answer.text
 
 
+def test_meshed_again_no_element_is_finer_than_a_quarter_of_a_nozzle_s_line(cae: Any) -> None:
+    """mqucifer/print-shop#346: on a design run's table, meshed again finer where faces were
+    close, a traced glass frame's micro-arcs, under a tenth of a nozzle round, were meshed by
+    their own curvature in elements a fiftieth of a mm across: gmsh couldn't curve them, and
+    straight, CalculiX found hundreds turned inside out. Meshed again, no element is finer than
+    `close_faces.LEAST`, and the reply counts the faces curved tighter: the cap's top with a
+    corner rounded 0.03 mm reads, curved, and says so."""
+    answer = cae("load", "capped/capped-micro.json", *CAPPED)
+    assert answer.verdict == "OK", answer.text
+    # The round alone: the counterbore's and the cap's cylinders are meshed by their curvature.
+    tight = (", and nowhere finer than 0.1 mm: 1 face(s) curve tighter than a print's round, "
+             "and are meshed at that")  # fmt: skip
+    assert tight in answer.text, answer.text
+    assert "its elements second-order with straight sides" not in answer.text
+    assert "DISAGREE" not in answer.text
+
+
 def test_a_cap_a_hair_from_its_counterbore_names_both_faces_and_how_far_apart(cae: Any) -> None:
     """mqucifer/print-shop#346: where gmsh's triangles cross where two faces that meet nowhere
     are so close no mesh parts them, the parts are at fault: the reply names both parts and

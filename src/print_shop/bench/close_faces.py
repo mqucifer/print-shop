@@ -37,6 +37,10 @@ so nothing is changed where gmsh meshes the parts. A pair that would need elemen
 faces, how far apart they are and how far apart they'd mesh: that's the parts, to be drawn
 meeting or further apart. One elsewhere is left as gmsh meshed it. Where gmsh still refuses
 them, the faces nearest where it says they cross are named.
+
+Meshed again, no element anywhere is finer than `LEAST`, a quarter of a nozzle's line, and the
+reply counts the faces curved tighter than gmsh's own sizing would mesh at it: a curve no print
+has, such as a traced frame's micro-arc, is read as the corner it prints as.
 """
 
 from __future__ import annotations
@@ -64,8 +68,14 @@ SHARE = 0.5
 #: once. And the faces it grows from are sampled at this many points along each parameter.
 GRADE = 2.0
 SAMPLING = 40
-#: The finest local size given, in mm: two faces that would need finer are the parts' to fix.
-LEAST = 0.05
+#: The finest element anywhere once the parts are meshed again, in mm: a quarter of a 0.4 mm
+#: nozzle's line, and half the round `pieces build` gives a corner. gmsh sizes a curve by its
+#: own curvature, 12 elements a turn, so a traced glass frame's micro-arc, under a tenth of the
+#: nozzle round, which no print has, was meshed in elements a fiftieth of a mm across beside
+#: ones of several mm: gmsh couldn't curve them, and straight, CalculiX found hundreds of them
+#: turned inside out. Meshed no finer than this, the arc is a corner of the mesh, as it is of
+#: the print. Two faces that would need finer are the parts' to fix.
+LEAST = 0.1
 #: Two faces closer than this, in mm, are taken as meeting where they share no corner: OCC's
 #: fuse would have shared them.
 TOUCH = 1e-6
@@ -240,6 +250,7 @@ def found(
     known: dict[tuple[int, int], float] | None = None,
     owners: list[frozenset[int]] | None = None,
     near: Any = None,
+    tight: list[int] | None = None,
 ) -> list[Close]:
     """The pairs of `shape`'s faces that share no corner and lie closer than their sags at a
     mesh of `size`, with the local sizes that mesh them (`close_faces` above).
@@ -253,7 +264,8 @@ def found(
     Only each face's box and its surface's curvature are read of every face, and what FreeCAD
     caches of each face is let go once it's measured. A pair whose boxes, or surfaces, are
     further apart than their sags is left unmeasured; each measured is put in `known`, by the
-    pair's numbers from 0, and taken from it where it's there."""
+    pair's numbers from 0, and taken from it where it's there. With `tight`, the faces curved
+    tighter than gmsh's own sizing meshes finer than `LEAST` are put in it, by number from 1."""
     known = {} if known is None else known
     faces = shape.Faces
     count = len(faces)
@@ -264,6 +276,10 @@ def found(
         bends[k] = surface_bend(face)
         _let_go(face)
     _let_go(shape)
+    if tight is not None:
+        # Each face curved tighter than gmsh's elements a turn of it at `LEAST` (`fields`).
+        # gmsh's own size there, 2πr over `per_turn`, finer than `LEAST`.
+        tight.extend(int(k) + 1 for k in np.nonzero(bends > 2 * math.pi / (per_turn * LEAST))[0])
     reach = np.array([sag(b, size, per_turn) for b in bends])
     here: set[int] = set()
     if near is not None:
@@ -329,7 +345,8 @@ def apart_for(face: Any, least: float = LEAST, per_turn: int = PER_TURN) -> floa
 def fields(closes: list[Close], size: float) -> str:
     """gmsh's input for the local sizes: for each step of size, a constant field on its faces
     and their edges, and a threshold that grows it away from them by one mm in `GRADE` to the
-    mesh's own; the least of them all as the background field. Nothing where nothing is close."""
+    mesh's own; the least of them all as the background field; and no element anywhere finer
+    than `LEAST`. Nothing where nothing is close."""
     faces: dict[int, float] = {}
     for close in closes:
         for n, h in close.faces.items():
@@ -365,7 +382,7 @@ def fields(closes: list[Close], size: float) -> str:
     least = k + 1
     lines += [f"Field[{least}] = Min;",
               f"Field[{least}].FieldsList = {{{', '.join(map(str, numbers))}}};",
-              f"Background Field = {least};", ""]  # fmt: skip
+              f"Background Field = {least};", f"Mesh.MeshSizeMin = {LEAST:g};", ""]  # fmt: skip
     return "\n".join(lines)
 
 

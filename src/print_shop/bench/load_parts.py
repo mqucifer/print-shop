@@ -501,7 +501,7 @@ def _alone_solved(make: Any) -> dict[str, Any]:
         with load._quiet():
             return _alone_read(make(False), doc)
     except load._Curved as curved:
-        why, closes = str(curved), curved.closes
+        why, closes, tight = str(curved), curved.closes, curved.tight
     # Outside the `except`, so the curved try's mesh is let go first, as the whole's is.
     give_back()
     with load.step(
@@ -510,7 +510,7 @@ def _alone_solved(make: Any) -> dict[str, Any]:
         pass
     doc = App.newDocument("Alone")
     straight = make(True)
-    straight.closes = closes
+    straight.closes, straight.tight = closes, tight
     with load._quiet():
         found = _alone_read(straight, doc)
     found["straight"] = why
