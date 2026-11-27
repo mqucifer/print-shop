@@ -16,13 +16,21 @@ from __future__ import annotations
 
 import re
 import subprocess
+import threading
+import uuid
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 
 from . import host
 
-__all__ = ["BenchJob", "JobResult", "Runner", "run_here", "saved_files"]
+__all__ = ["BenchJob", "JobResult", "Runner", "run_here", "running_here", "saved_files",
+           "stop_here"]
+
+#: The containers this process's jobs are running in, by name: its own, which the host's budget
+#: doesn't count twice (`budget.others`), and which `stop_here` stops.
+_RUNNING: set[str] = set()
+_LOCK = threading.Lock()
 
 #: How a bench command says what it saved, as its reply's last lines do: "saved:
 #: bench-out/load-1.txt and .json", the same file by each of its endings.
@@ -48,7 +56,10 @@ class BenchJob:
     #: runner on another host ships.
     folder: Path
     files: tuple[str, ...]
-    #: Its limits, as its container runs it (`host.memory_for`, `host.timeout_for`), and a core.
+    #: Its limits, as its container runs it (`host.memory_for`, `host.timeout_for`): the time
+    #: is the command's own, and nothing longer is offered, so a `load` reads in the passes its
+    #: words ask for (one, or two with `--parts`), never as its clock decides
+    #: (mqucifer/print-shop#331), and what it reads doesn't hang on how busy the host is.
     memory: str = field(default="")
     timeout: int = 0
 
@@ -77,9 +88,31 @@ Runner = Callable[[BenchJob], JobResult]
 
 def run_here(job: BenchJob) -> JobResult:
     """Run a job on this host, in a container over its folder, as the bench runs any command
-    (`host.run`): its files are where they are, and what it saves lands beside them."""
+    (`host.run`) but within its own limit: its files are where they are, and what it saves lands
+    beside them."""
     missing = [f for f in job.files if not (job.folder / f).exists()]
     if missing:
         raise FileNotFoundError(f"the job's files aren't in {job.folder}: {', '.join(missing)}")
-    done: subprocess.CompletedProcess[str] = host.run(list(job.args), job.folder)
+    name = f"print-bench-{uuid.uuid4().hex[:12]}"
+    with _LOCK:
+        _RUNNING.add(name)
+    try:
+        done: subprocess.CompletedProcess[str] = host.run(
+            list(job.args), job.folder, timeout=job.timeout or None, name=name)
+    finally:
+        with _LOCK:
+            _RUNNING.discard(name)
     return JobResult(done.returncode, done.stdout, done.stderr, saved_files(done.stdout))
+
+
+def running_here() -> set[str]:
+    """The containers this process's jobs are running in."""
+    with _LOCK:
+        return set(_RUNNING)
+
+
+def stop_here() -> None:
+    """Stop every container this process's jobs are running in: a study that's interrupted
+    doesn't leave its reads running for hours."""
+    for name in running_here():
+        subprocess.run(["docker", "kill", name], capture_output=True, check=False, timeout=60)

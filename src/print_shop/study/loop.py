@@ -34,6 +34,7 @@ no recommendation, saying so. Every tool call is kept with its arguments, result
 
 from __future__ import annotations
 
+import contextlib
 import json
 import queue
 import threading
@@ -47,7 +48,7 @@ from typing import Any
 from print_shop.bench import host
 from print_shop.bench.as_printed import wall_thickness
 from print_shop.bench.assembly import Material
-from print_shop.bench.budget import Budget, Slots, megabytes
+from print_shop.bench.budget import LOAD_CORES, SLICE_CORES, Budget, Slots, megabytes
 from print_shop.bench.printed import Settings
 from print_shop.core.state import Orientation
 from print_shop.expert.client import CutOff, LLMConfig, Stopped, TimedOut, chat_with_tools
@@ -97,6 +98,8 @@ MAX_CANDIDATES = 10
 LEAST_OWN = 2
 #: The most characters of one answer (`chat_with_tools`).
 ANSWER_CHARS = 16_000
+#: What a candidate the study's end cut off says: it wasn't read, which isn't failing.
+CUT_OFF = "not read: the study ended before it was"
 
 Chat = Callable[[list[dict[str, Any]], list[dict[str, Any]]], dict[str, Any]]
 
@@ -280,13 +283,13 @@ def read_candidate(part: StudyPart, candidate: Candidate,
     out = part.workdir / candidate.name
     reading = Reading(candidate)
     if cancel is not None and cancel.is_set():
-        reading.error = "not read: the study ended before it was"
+        reading.error = CUT_OFF
         return reading
     try:
-        with part.slots.take():
+        with part.slots.take(cpus=SLICE_CORES):
             # Queued, it may have waited for its slot past the study's end.
             if cancel is not None and cancel.is_set():
-                reading.error = "not read: the study ended before it was"
+                reading.error = CUT_OFF
                 return reading
             reading.sliced = part.slicing(candidate, out)
     except Exception as exc:  # noqa: BLE001 - Orca failing is the candidate's answer, said
@@ -301,11 +304,11 @@ def read_candidate(part: StudyPart, candidate: Candidate,
         return reading
     sliced = reading.sliced
 
-    def one(case: Case) -> CaseRead:
+    def one(case: Case) -> CaseRead | None:
         try:
-            with part.slots.take(_load_memory(case)):
+            with part.slots.take(_load_memory(case), LOAD_CORES):
                 if cancel is not None and cancel.is_set():
-                    raise RuntimeError("the study ended before it was read")
+                    return None
                 record = part.loading(candidate, sliced, case, out / case.name)
         except Exception as exc:  # noqa: BLE001 - load failing is the case's answer, said
             record = {"verdict": "NO ANSWER", "why": f"{type(exc).__name__}: {exc}"[:400]}
@@ -313,7 +316,12 @@ def read_candidate(part: StudyPart, candidate: Candidate,
 
     with ThreadPoolExecutor(max_workers=max(1, len(part.cases)),
                             thread_name_prefix=f"study-{candidate.name}") as cases:
-        reading.cases = list(cases.map(one, part.cases))
+        found = list(cases.map(one, part.cases))
+    if any(c is None for c in found):
+        # Cut off by the study's end under some of its cases: not a failure, not read.
+        reading.error = CUT_OFF
+        return reading
+    reading.cases = [c for c in found if c is not None]
     return reading
 
 
@@ -486,8 +494,8 @@ def run(loop: StudyLoop, part: StudyPart, stop: threading.Event | None = None,
         if state.reads is not None:
             state.reads.shutdown(wait=True, cancel_futures=True)
         for reading in state.readings:
-            if reading.sliced is None and not reading.error:
-                reading.error = "not read: the study ended before it was"
+            if not reading.cases and not reading.error:
+                reading.error = CUT_OFF
         return StudyResult(why, state.readings, state.calls, model_calls,
                            round(time.monotonic() - started, 1), loop.model, **done,
                            budget=part.slots.budget.said(), most_at_once=part.slots.most)
@@ -497,59 +505,82 @@ def run(loop: StudyLoop, part: StudyPart, stop: threading.Event | None = None,
         # plate that won't take the filament, refuses them all.
         return ended(f"the profile's own settings couldn't be sliced, so nothing was studied: "
                      f"{base.error}"[:600])
-    while True:
-        if stop is not None and stop.is_set():
-            return ended("stopped")
-        if model_calls >= loop.max_calls:
-            return ended(f"past its limit of {loop.max_calls} calls, with no recommendation")
-        if time.monotonic() - started > loop.max_seconds:
-            return ended(f"past its limit of {loop.max_seconds:g} s, with no recommendation")
-        try:
-            message = loop.chat(messages, TOOLS)
-        except CutOff as exc:
-            model_calls += 1
-            state.calls.append(LoopCall(tool="(model)", arguments={}, result=f"cut off: {exc}",
-                                        seconds=exc.info.seconds))
-            messages.append({"role": "user", "content": (
-                f"Your last answer was cut off at its output limit ({exc}). Answer with one "
-                "tool call, and keep your reasoning short.")})
-            continue
-        except Stopped:
-            return ended("stopped")
-        except TimedOut as exc:
-            return ended(f"the model {exc}")
-        except Exception as exc:  # noqa: BLE001 - the model failing is an ending, said
-            return ended(f"the model couldn't be reached: {type(exc).__name__}: {exc}"[:300])
-        model_calls += 1
-        calls = list(message.get("tool_calls") or [])
-        messages.append({"role": "assistant", "content": message.get("content") or "",
-                         **({"tool_calls": calls} if calls else {})})
-        if not calls:
-            messages.append({"role": "user", "content": "Call a tool. End with `recommend`."})
-            continue
-        for call in calls:
+    try:
+        while True:
             if stop is not None and stop.is_set():
                 return ended("stopped")
-            name = str(call["function"]["name"])
-            began = time.monotonic()
-            done: dict[str, Any] | None = None
+            if model_calls >= loop.max_calls:
+                return ended(f"past its limit of {loop.max_calls} calls, with no recommendation")
+            if time.monotonic() - started > loop.max_seconds:
+                return ended(f"past its limit of {loop.max_seconds:g} s, with no recommendation")
             try:
-                args = json.loads(call["function"].get("arguments") or "{}")
-                if not isinstance(args, dict):
-                    raise ValueError("the arguments are an object")
-                result, done = _tool(loop, part, state, name, args, started, stop)
-            except (json.JSONDecodeError, TypeError, KeyError, ValueError,
-                    AttributeError) as exc:
-                # Arguments that aren't of the tools' shape are refused to the model, never a
-                # crash: the first real run's lessons came as words alone.
-                said = str(exc) if isinstance(exc, ValueError) else f"{type(exc).__name__}: {exc}"
-                args, result = {}, f"refused: {said}"
-            state.calls.append(LoopCall(tool=name, arguments=args, result=result,
-                                        seconds=round(time.monotonic() - began, 2)))
-            messages.append({"role": "tool", "tool_call_id": call.get("id", name),
-                             "content": result})
-            if done is not None:
-                return ended("recommended", **done)
+                message = loop.chat(messages, TOOLS)
+            except CutOff as exc:
+                model_calls += 1
+                state.calls.append(LoopCall(tool="(model)", arguments={}, result=f"cut off: {exc}",
+                                            seconds=exc.info.seconds))
+                messages.append({"role": "user", "content": (
+                    f"Your last answer was cut off at its output limit ({exc}). Answer with one "
+                    "tool call, and keep your reasoning short.")})
+                continue
+            except Stopped:
+                return ended("stopped")
+            except TimedOut as exc:
+                return ended(f"the model {exc}")
+            except Exception as exc:  # noqa: BLE001 - the model failing is an ending, said
+                return ended(f"the model couldn't be reached: {type(exc).__name__}: {exc}"[:300])
+            model_calls += 1
+            calls = list(message.get("tool_calls") or [])
+            messages.append({"role": "assistant", "content": message.get("content") or "",
+                             **({"tool_calls": calls} if calls else {})})
+            if not calls:
+                messages.append({"role": "user", "content": "Call a tool. End with `recommend`."})
+                continue
+            for call in calls:
+                if stop is not None and stop.is_set():
+                    return ended("stopped")
+                name = str(call["function"]["name"])
+                began = time.monotonic()
+                done: dict[str, Any] | None = None
+                try:
+                    args = json.loads(call["function"].get("arguments") or "{}")
+                    if not isinstance(args, dict):
+                        raise ValueError("the arguments are an object")
+                    result, done = _tool(loop, part, state, name, args, started, stop)
+                except (json.JSONDecodeError, TypeError, KeyError, ValueError,
+                        AttributeError) as exc:
+                    # Arguments that aren't of the tools' shape are refused to the model, never a
+                    # crash: the first real run's lessons came as words alone.
+                    said = (str(exc) if isinstance(exc, ValueError)
+                            else f"{type(exc).__name__}: {exc}")
+                    args, result = {}, f"refused: {said}"
+                state.calls.append(LoopCall(tool=name, arguments=args, result=result,
+                                            seconds=round(time.monotonic() - began, 2)))
+                messages.append({"role": "tool", "tool_call_id": call.get("id", name),
+                                 "content": result})
+                if done is not None:
+                    return ended("recommended", **done)
+    except BaseException as exc:
+        # An interrupt, or what no tool answers for (a mesh that won't write, a full disk):
+        # nothing is left running, and the table so far is written, before it's raised.
+        state.cancel.set()
+        for stopping in (getattr(part.slicing, "stop", None), getattr(part.loading, "stop", None)):
+            if callable(stopping):
+                with contextlib.suppress(Exception):
+                    stopping()
+        if state.reads is not None:
+            state.reads.shutdown(wait=True, cancel_futures=True)
+        for reading in state.readings:
+            if not reading.cases and not reading.error:
+                reading.error = CUT_OFF
+        if progress is not None:
+            with contextlib.suppress(Exception):
+                progress(StudyResult(f"stopped by {type(exc).__name__}: {exc}"[:300],
+                                     state.readings, state.calls, model_calls,
+                                     round(time.monotonic() - started, 1), loop.model,
+                                     budget=part.slots.budget.said(),
+                                     most_at_once=part.slots.most))
+        raise
 
 
 def _tool(loop: StudyLoop, part: StudyPart, state: _State, name: str, args: dict[str, Any],
@@ -576,6 +607,10 @@ def _tool(loop: StudyLoop, part: StudyPart, state: _State, name: str, args: dict
         if state.pending:
             return (f"refused: {', '.join(state.pending)} still reading: `wait` for "
                     f"{'them' if len(state.pending) > 1 else 'it'} first", None)
+        if state.unsaid:
+            # Landed, and never seen: each is given now, and the model recommends again.
+            return ("refused: these landed and you haven't read them yet; recommend again with "
+                    "them in hand:\n" + "\n".join(_landed_said(state)), None)
         return _recommend(loop, state, args)
     return f"no tool {name!r}: published, read, wait, past_studies or recommend", None
 

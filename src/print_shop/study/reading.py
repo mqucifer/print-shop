@@ -40,7 +40,7 @@ from typing import Any
 
 from print_shop.bench import infill
 from print_shop.bench.as_printed import wall_thickness
-from print_shop.bench.job import BenchJob, Runner, run_here
+from print_shop.bench.job import BenchJob, Runner, run_here, stop_here
 from print_shop.bench.printed import Printed, Settings, as_json
 from print_shop.rounds.needs import Need, _judge_number
 from print_shop.rounds.needs import Reading as NeedReading
@@ -51,6 +51,7 @@ from print_shop.slicer.regions import (
     settings_of,
     slice_project,
     slice_regions,
+    stop_slicing,
     wall_band,
     write_project,
 )
@@ -486,6 +487,10 @@ class OrcaSlicing:
     binary: Path | None = None
     timeout_s: float = 900.0
 
+    def stop(self) -> None:
+        """Stop every slice running: a study that's interrupted leaves none."""
+        stop_slicing()
+
     def __call__(self, candidate: Candidate, out: Path) -> Sliced:
         profiles = _sequenced(self.profiles, candidate.wall_sequence, out)
         printed = candidate.printed()
@@ -589,6 +594,12 @@ class BenchLoad:
         name = "study-assembly.json"
         (work / name).write_text(json.dumps(raw, indent=1))
         return BenchJob.of(["load", name, *case.args], work, [name, *files])
+
+    def stop(self) -> None:
+        """Stop every read this host is running for it: a study that's interrupted leaves none.
+        A runner for another host stops its own."""
+        if self.runner is run_here:
+            stop_here()
 
     def __call__(self, candidate: Candidate, sliced: Sliced, case: Case,
                  out: Path) -> dict[str, Any]:

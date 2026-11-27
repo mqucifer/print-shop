@@ -49,8 +49,9 @@ from pathlib import Path
 import trimesh
 
 from print_shop.bench.assembly import read as read_assembly
-from print_shop.bench.budget import Budget, Slots, megabytes, reserved
+from print_shop.bench.budget import Budget, Slots, megabytes, others_mb, reserved
 from print_shop.bench.host import memory_for
+from print_shop.bench.job import running_here
 from print_shop.bench.report import NoAnswer
 from print_shop.env import SETTINGS_PATH, load_env
 from print_shop.expert.client import LLMConfig
@@ -194,7 +195,8 @@ def study(args: argparse.Namespace) -> int:
         poses=poses,
         lessons=tuple(kept_lessons), earlier=tuple(studied_before),
         wall_sequence=str(process.get("wall_sequence", "")), filament=args.filament,
-        slots=Slots(budget),
+        # Other processes' bench and rounds containers are counted as each read takes its slot.
+        slots=Slots(budget, None if args.serial else (lambda: others_mb(running_here()))),
     )
     print(f"studying {args.part} turned {degrees_said(turn)} under {len(cases)} load cases, "
           f"in {out}, within {budget.said()}", flush=True)
