@@ -143,6 +143,48 @@ def test_a_need_on_a_pair_read_by_its_boxes_says_so_and_to_read_it_exactly() -> 
     assert "add `--exact`" in found.why
 
 
+def test_a_command_stopped_at_its_limit_says_where_it_was() -> None:
+    """A whole assembly's `clearance` stopped at 600 s said only that: now the host says the last
+    step it said, how many pairs it reads exactly and how many it had read."""
+    said = [
+        "bench: step 3.0 clearance: loading 90 part(s)",
+        "bench: memory 3.1 current=1 peak=2",
+        "bench: step 40.2 clearance: 4005 pairs: 3000 by their boxes, 500 by their hulls, "
+        "200 by their meshes, 305 to read exactly; reading the 305 exactly: 120 read",
+    ]
+    assert host.past(600, False, said) == (
+        "verdict: NO ANSWER: it ran past the 600 s limit and was stopped. Where it was: "
+        "clearance: 4005 pairs: 3000 by their boxes, 500 by their hulls, 200 by their meshes, "
+        "305 to read exactly; reading the 305 exactly: 120 read, from 40.2 s in\n"
+    )
+    assert host.past(600, False) == host.past(600, False, []), "as before, where it said nothing"
+    loading = "Where it was: clearance: loading 90 part(s), from 3.0 s in\n"
+    assert host.past(600, False, said[:2]).endswith(loading)
+
+
+def test_the_host_keeps_what_a_command_stopped_at_its_limit_said() -> None:
+    """Both ways the host waits: to its limit, or able to take up a longer one."""
+    import sys
+
+    step = "bench: step 0.1 clearance: 10 pairs: reading the 4 exactly: 1 read"
+    child = f"import sys, time; print({step!r}, file=sys.stderr, flush=True); time.sleep(30)"
+    for longer in (None, 30):
+        stopped, limit, _ = host._waited([sys.executable, "-c", child], 1, longer)
+        assert stopped is None and limit == 1
+        assert list(host.STOPPED_SAID) == [step], (longer, host.STOPPED_SAID)
+
+
+def test_a_step_said_again_says_how_far_it_has_got(capsys: pytest.CaptureFixture[str]) -> None:
+    from print_shop.bench import progress
+
+    with progress.step("clearance: reading 3 exactly"):
+        progress.again("clearance: reading 3 exactly: 2 read")
+    lines = [ln for ln in capsys.readouterr().err.splitlines() if ln.startswith(progress.STEP_LINE)]
+    assert lines[0].endswith("clearance: reading 3 exactly")
+    assert lines[1].endswith("clearance: reading 3 exactly: 2 read")
+    assert lines[2].endswith("between steps, after clearance: reading 3 exactly: 2 read")
+
+
 # The bench, in its image.
 
 
@@ -287,3 +329,86 @@ def test_a_need_on_a_pair_s_figure_reads_every_pair_exactly() -> None:
     assert needs.read_argv(verdict) == verdict.argv()
     other = Need("wall", "x", "chosen", "bench", command="wall a.step", number="pairs.0.gap_mm")
     assert needs.read_argv(other) == other.argv()
+
+
+
+# Where boxes and hulls can't tell a pair apart and the meshes can (mqucifer/print-shop#354): a
+# rod through a ring's hole with 1.5 mm of play all round, as a pin goes through a slice's hole;
+# a pin wholly inside a block, an overlap with no surfaces meeting; and a plate far from both.
+
+THREADED = """
+import cadquery as cq
+
+cq.exporters.export(cq.Workplane("XY").circle(6).circle(3).extrude(2), "ring.step")
+cq.exporters.export(cq.Workplane("XY").circle(1.5).extrude(20).translate((0, 0, -9)), "rod.step")
+cq.exporters.export(cq.Workplane("XY").box(10, 10, 10).translate((40, 0, 0)), "block.step")
+cq.exporters.export(cq.Workplane("XY").box(1, 1, 1).translate((40, 0, 0)), "pin.step")
+cq.exporters.export(cq.Workplane("XY").box(10, 10, 2).translate((0, 60, 0)), "plate.step")
+"""
+THREADED_FILES = ("ring.step", "rod.step", "block.step", "pin.step", "plate.step")
+
+
+@pytest.fixture(scope="module")
+def threaded(tmp_path_factory: pytest.TempPathFactory) -> Path:
+    if host.image_id() is None:
+        pytest.fail(f"no image {host.IMAGE}: run `scripts/bench.py build` first")
+    found = tmp_path_factory.mktemp("threaded")
+    (found / "parts.py").write_text(THREADED, encoding="utf-8")
+    made = host.run(["parts.py"], found, python=True)
+    assert made.returncode == 0, made.stdout + made.stderr
+    return found
+
+
+def read(work: Path, *args: str) -> tuple[str, dict[str, Any]]:
+    done = host.run(["clearance", *THREADED_FILES, *args], work)
+    saved = re.search(r"saved: (\S+)\.txt and \.json", done.stdout)
+    assert saved, f"nothing saved: {done.stdout}{done.stderr}"
+    return done.stdout, json.loads((work / f"{saved.group(1)}.json").read_text())
+
+
+def pair_of(record: dict[str, Any], one: str, two: str) -> dict[str, Any]:
+    found: list[dict[str, Any]] = [
+        p for p in record["numbers"]["pairs"] if {p["a"], p["b"]} == {one, two}
+    ]
+    assert len(found) == 1, found
+    return found[0]
+
+
+@pytest.mark.bench
+def test_a_rod_through_a_ring_is_read_by_their_meshes_and_a_buried_pin_exactly(
+    threaded: Path,
+) -> None:
+    text, record = read(threaded)
+    _, exact = read(threaded, "--exact")
+    far_off = same_as_exact(record, exact)
+    assert record["verdict"] == "INTERFERE", text
+    # The rod's box and hull lie through the ring's; its mesh is 1.5 mm from the ring's.
+    threaded_pair = pair_of(record, "ring.step", "rod.step")
+    assert threaded_pair["read_by"] == "boxes" and threaded_pair["box_by"] == "mesh"
+    # Searched for only 0.5 mm past the gap judged, touching, so a bound of half a millimetre.
+    assert threaded_pair["box_gap_mm"] == pytest.approx(0.5, abs=1e-3)
+    assert pair_of(exact, "ring.step", "rod.step")["gap_mm"] == pytest.approx(1.5, abs=1e-4)
+    # The pin's surface is nowhere near the block's, and it's wholly inside it: read exactly.
+    buried = pair_of(record, "block.step", "pin.step")
+    assert "read_by" not in buried and buried["verdict"] == "INTERFERE"
+    assert buried["overlap_mesh_mm3"] == pytest.approx(1.0, abs=0.01)
+    assert len(far_off) == 9 and record["numbers"]["by_boxes"]["by_mesh"] == 1
+    assert "1 by meshes" in text, text
+
+
+@pytest.mark.bench
+def test_a_plan_says_how_the_pairs_would_be_read_and_judges_nothing(threaded: Path) -> None:
+    text, record = read(threaded, "--plan")
+    _, read_all = read(threaded)
+    assert record["verdict"] == "NO ANSWER", text
+    assert "a plan, which judges nothing: 10 pairs: " in record["why"], record["why"]
+    plan = record["numbers"]["plan"]
+    by = read_all["numbers"]["by_boxes"]
+    assert plan["pairs"] == 10 and plan["exact"] == 1
+    assert [plan[f"by_{w}"] for w in ("box", "hull", "mesh")] == [
+        by[f"by_{w}"] for w in ("box", "hull", "mesh")
+    ]
+    assert plan["sampled"] == 1 and plan["sample_s"] > 0 and plan["exact_estimate_s"] >= 0
+    assert all(plan[k] >= 0 for k in ("load_s", "meshes_s", "bounds_s"))
+    assert "pairs" not in record["numbers"], "nothing judged"
+    assert reports.unlike("clearance", record["numbers"]) == []

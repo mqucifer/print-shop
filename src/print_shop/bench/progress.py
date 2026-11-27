@@ -120,6 +120,13 @@ def step(what: str) -> Iterator[None]:
         _say(STEP_LINE, _steps[-1] if _steps else f"between steps, after {done}")
 
 
+def again(what: str) -> None:
+    """The step going on said again, as `what`: how far it's got."""
+    if _steps:
+        _steps[-1] = " ".join(what.split())
+    _say(STEP_LINE, " ".join(what.split()))
+
+
 def watch(every: float = EVERY) -> None:
     """Say the memory every `every` s from here until `stop`, on a thread of its own."""
     stop()

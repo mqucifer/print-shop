@@ -307,7 +307,7 @@ class Box:
         if code == DOCKER_FAILED and not timed_out:
             raise Gone(f"docker couldn't run the container: {text[-400:]}")
         if timed_out:
-            text += "\n" + host.past(limit, could)
+            text += "\n" + host.past(limit, could, said)
             code = 2 if command[1:2] == ["-I"] else 124
         elif code == host.KILLED:
             text += "\n" + host.killed(said, memory)

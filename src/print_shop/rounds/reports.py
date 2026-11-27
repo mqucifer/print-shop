@@ -43,7 +43,17 @@ REPORTS: dict[str, tuple[str, ...]] = {
         "volume_mesh_mm3",
         "watertight",
     ),
-    "clearance": ("bodies", "by_boxes", "lift", "pairs", "pairs_s", "placed", "places", "slide"),
+    "clearance": (
+        "bodies",
+        "by_boxes",
+        "lift",
+        "pairs",
+        "pairs_s",
+        "placed",
+        "places",
+        "plan",
+        "slide",
+    ),
     "readback": (
         "after_mm3",
         "before_mm3",
@@ -787,7 +797,33 @@ SHAPES: dict[str, dict[str, Any]] = {
         # How many pairs were read by their bounds, past which gap, and the least of their bound
         # gaps, at which pair (mqucifer/print-shop#354).
         "by_boxes": Row(
-            {"pairs": NUMBER, "beyond_mm": NUMBER, "least_box_gap_mm": NUMBER, "least": NUMBER},
+            {
+                "pairs": NUMBER,
+                "by_box": NUMBER,
+                "by_hull": NUMBER,
+                "by_mesh": NUMBER,
+                "beyond_mm": NUMBER,
+                "least_box_gap_mm": NUMBER,
+                "least": NUMBER,
+            },
+            closed=True,
+        ),
+        # With `--plan`: how the pairs would be read, by which bound and how many exactly, and
+        # how long each part of the reading took, with a few read exactly to time them.
+        "plan": Row(
+            {
+                "pairs": NUMBER,
+                "by_box": NUMBER,
+                "by_hull": NUMBER,
+                "by_mesh": NUMBER,
+                "exact": NUMBER,
+                "load_s": NUMBER,
+                "meshes_s": NUMBER,
+                "bounds_s": NUMBER,
+                "sampled": NUMBER,
+                "sample_s": NUMBER,
+                "exact_estimate_s": NUMBER,
+            },
             closed=True,
         ),
         # How long reading the pairs took, in s.
