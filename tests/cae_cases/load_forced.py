@@ -17,8 +17,9 @@ Nothing here changes how the bench reads anything else.
   nodes and of where they lie turned off, as for a swap they can't tell;
 - `turned-away`: the curved mesh, finer where faces are close, turned away after its solve as
   if an element were inside out, so the straight one starts from the pairs it found;
-- `inverted`: CalculiX's words for the first element of its input turned inside out, so the
-  curved and the straight try both fail on it;
+- `inverted`: CalculiX's words for an element by the capped top's counterbore wall turned
+  inside out, so the curved try, the straight one and the straight one grown from the faces
+  nearest it all fail on it;
 - `unsized`: the faces found close where gmsh's triangles cross given no local size, so gmsh
   refuses them as it did (mqucifer/print-shop#346).
 """
@@ -151,8 +152,9 @@ elif mode == "turned-away":
 
     load._Model.solve = turned_away
 elif mode == "inverted":
-    # CalculiX's words for an element turned inside out, the first of its input, as on a
-    # design run's table, curved and straight (mqucifer/print-shop#346).
+    # CalculiX's words for an element turned inside out, the one with a corner nearest the
+    # capped top's counterbore wall, at (25, 20, 5), every try, as on a design run's table
+    # (mqucifer/print-shop#346).
     import re
 
     ccx = load._ccx
@@ -160,15 +162,26 @@ elif mode == "inverted":
     def inverted(fea: Any, size: float) -> None:
         ccx(fea, size)
         with open(fea.inp_file_name) as given:
-            first = re.search(r"^\*ELEMENT[^\n]*\n\s*(\d+),", given.read(), re.M | re.I)
+            text = given.read()
+        nodes = {int(m[0]): (float(m[1]), float(m[2]), float(m[3])) for m in re.findall(
+            r"^(\d+),\s*([-\d.eE+]+),\s*([-\d.eE+]+),\s*([-\d.eE+]+)\s*$", text, re.M)}
+        block = re.search(r"^\*ELEMENT[^\n]*\n((?:\d+,[^\n]*\n?)+)", text, re.M | re.I)
+        rows = [[int(v) for v in line.split(",") if v.strip()]
+                for line in (block.group(1).splitlines() if block else [])]
+
+        def away(row: list[int]) -> float:
+            x, y, z = nodes.get(row[1], (0.0, 0.0, 0.0))
+            return (x - 25) ** 2 + (y - 20) ** 2 + (z - 5) ** 2
+
+        first = min(rows, key=away)[0] if rows else 1
         fea.ccx_stdout += (" *ERROR in e_c3d: nonpositive jacobian\n        determinant in "
-                           f"element {first.group(1) if first else 1}\n")  # fmt: skip
+                           f"element {first}\n")  # fmt: skip
 
     load._ccx = inverted
 elif mode == "unsized":
     # Faces that meet nowhere found close where gmsh's triangles cross, but given no local size
     # (mqucifer/print-shop#346), as where the sizes don't part them.
-    load.close_faces.fields = lambda closes, size: ""
+    load.close_faces.fields = lambda closes, size, graded=None: ""
 else:
     raise SystemExit(f"no such mode: {mode}")
 sys.exit(main(given))

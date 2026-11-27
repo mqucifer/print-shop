@@ -78,6 +78,19 @@ def test_each_face_has_its_least_size_graded_to_the_mesh_s_and_nothing_where_non
     assert f"VIn = {close_faces.LEAST:.6g};" in fields([Close(1, 2, 0.0, faces={1: 0.0})], 3.0)
 
 
+def test_a_face_beside_elements_turned_inside_out_is_graded_from_its_own_size() -> None:
+    """mqucifer/print-shop#346: a face `graded` names has a threshold alone, from the size it
+    gives to the mesh's own, and no constant field: its own size is gmsh's already."""
+    text = fields([], 3.0, {9: 0.4})
+    assert "= Constant;" not in text
+    assert "Field[1] = Distance;\nField[1].SurfacesList = {9};" in text
+    assert f"Field[2].SizeMin = {stepped(0.4):.6g};" in text
+    assert "Background Field = 3;" in text
+    # A face meshed finer for a close pair keeps its constant field, and isn't graded twice.
+    both = fields([Close(9, 10, 0.1, faces={9: 0.5})], 3.0, {9: 0.4})
+    assert both.count("SurfacesList = {9};") == 2 and both.count("= Constant;") == 1
+
+
 def test_a_pair_that_would_need_elements_finer_than_the_least_is_the_parts_to_fix() -> None:
     fine = Close(1, 2, 0.15, faces={1: 0.7})
     hair = Close(3, 4, 2e-4, faces={3: 0.03})

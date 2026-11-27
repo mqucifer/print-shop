@@ -342,11 +342,14 @@ def apart_for(face: Any, least: float = LEAST, per_turn: int = PER_TURN) -> floa
     return sag(surface_bend(face), least, per_turn) / SHARE
 
 
-def fields(closes: list[Close], size: float) -> str:
+def fields(closes: list[Close], size: float, graded: dict[int, float] | None = None) -> str:
     """gmsh's input for the local sizes: for each step of size, a constant field on its faces
     and their edges, and a threshold that grows it away from them by one mm in `GRADE` to the
     mesh's own; the least of them all as the background field; and no element anywhere finer
-    than `LEAST`. Nothing where nothing is close."""
+    than `LEAST`. And for each face `graded` names, by number from 1, a threshold alone, from
+    the size it gives: where CalculiX found elements turned inside out beside it, the mesh
+    grows from it to the mesh's own instead of meeting it at once. Nothing where nothing is
+    close or graded."""
     faces: dict[int, float] = {}
     for close in closes:
         for n, h in close.faces.items():
@@ -355,21 +358,28 @@ def fields(closes: list[Close], size: float) -> str:
     for n, h in faces.items():
         if h < size:
             steps.setdefault(stepped(h), []).append(n)
-    if not steps:
+    grades: dict[float, list[int]] = {}
+    for n, h in (graded or {}).items():
+        if h < size and n not in faces:
+            grades.setdefault(stepped(h), []).append(n)
+    if not steps and not grades:
         return ""
     lines = ["// faces closer than the mesh's sag (mqucifer/print-shop#346)"]
     numbers: list[int] = []
     k = 0
-    for h, on in sorted(steps.items()):
+    for h, on, fixed in [*((h, on, True) for h, on in sorted(steps.items())),
+                         *((h, on, False) for h, on in sorted(grades.items()))]:
         listed = ", ".join(map(str, sorted(on)))
-        constant, distance, threshold = k + 1, k + 2, k + 3
-        k += 3
-        numbers += [constant, threshold]
-        lines += [f"Field[{constant}] = Constant;",
-                  f"Field[{constant}].SurfacesList = {{{listed}}};",
-                  f"Field[{constant}].VIn = {h:.6g};", f"Field[{constant}].VOut = 1e22;",
-                  f"Field[{constant}].IncludeBoundary = 1;",
-                  f"Field[{distance}] = Distance;",
+        if fixed:
+            k += 1
+            numbers.append(k)
+            lines += [f"Field[{k}] = Constant;", f"Field[{k}].SurfacesList = {{{listed}}};",
+                      f"Field[{k}].VIn = {h:.6g};", f"Field[{k}].VOut = 1e22;",
+                      f"Field[{k}].IncludeBoundary = 1;"]  # fmt: skip
+        distance, threshold = k + 1, k + 2
+        k += 2
+        numbers.append(threshold)
+        lines += [f"Field[{distance}] = Distance;",
                   f"Field[{distance}].SurfacesList = {{{listed}}};",
                   f"Field[{distance}].Sampling = {SAMPLING};",
                   f"Field[{threshold}] = Threshold;",
