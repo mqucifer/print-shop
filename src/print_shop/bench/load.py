@@ -3187,8 +3187,10 @@ def _as_printed(assembly: Assembly, report: Report, cores: dict[str, list[Any]])
                 "core_mm3": round(cell.core_mm3, 1),
                 "core_box": cell.core_box,
                 "cut": cell.cut,
-                "cut_checked_planes": cell.checked,
-                "cut_off_walls_pct": round(100 * cell.off, 2),
+                **({"cut_planes": cell.check.planes, "cut_planes_read": cell.check.read,
+                    "cut_short_walls_pct": round(100 * cell.check.short, 2),
+                    "cut_over_walls_pct": round(100 * cell.check.over, 2)}
+                   if cell.check is not None else {}),
                 **figures.said(),
             })
             report.line(
@@ -3199,9 +3201,11 @@ def _as_printed(assembly: Assembly, report: Report, cores: dict[str, list[Any]])
                 f"{cell.core_mm3:.0f} mm³ of its {cell.volume_mm3:.0f}"
                 + ("" if solids else ": its walls and shells fill it, so it's solid")
                 + (f"; its walls cut by {cell.cut}, and held to each layer's own outline "
-                   f"offset in by them, as Orca slices it, at {cell.checked} of its layers' "
-                   f"planes, {100 * cell.off:.1f}% of its walls off at most, within "
-                   f"{100 * as_printed.AGREE:.0f}%" if cell.cut else "")
+                   f"offset in by them, as Orca slices it, at {cell.check.read} of its layers' "
+                   f"planes: its core short of it by {100 * cell.check.short:.1f}% of its walls "
+                   f"at most, within {100 * as_printed.SHORT:.0f}%, and over it by "
+                   f"{100 * cell.check.over:.1f}%, within {100 * as_printed.AGREE:.0f}%"
+                   if cell.check is not None else "")
             )
         found[part.name] = cells
         joined = [j.name for j in assembly.joints

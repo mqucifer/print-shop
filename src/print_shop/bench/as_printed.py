@@ -15,25 +15,37 @@ too soft by its own arithmetic.
 the point its bottom shells below it, and every point its walls away round it in its layer's
 plane. The shells are the part's common with 2 copies of itself moved along its layers
 (`eroded_along`). The walls (mqucifer/print-shop#356, `cut_core`) are OCCT's offset of the part
-stretched ten times along its layers, the stretch undone (`offset_in_plane`): within 1.3% of
-the walls on any face they, not the shells, set, and round at a concave edge. Where OCCT can't
-offset a part, as on a real curved leg, they're its common with 16 copies of itself moved its
-walls round (`eroded_in_plane`), which reads a wall between two of the 16 at least
-cos(11.25°), 98%, as thick as it is; that common is stepped at each concave edge, a face of each
-copy a hundredth to three tenths of a millimetre across, and gmsh turned elements inside out
-by them, so where two flat faces meet there the steps are cut out to one mitred corner
-(`mitres`), the two moved faces' line. Each cut is held to the
-core each layer has as Orca slices it, the part's section offset in by its walls with OCCT's
-2D offset and cut by its sections its shells away, at 7 of its layers' planes, within 5% of
-its walls along the outline (`checked`), and may leave no face of the core narrower than a
-bead by a curved face (`slivers`), unless OCCT can merge it into the faces round it
-(`healed`). Where neither holds, each is tried on the part with its own faces under a bead
-merged first (`simplified`), and where none holds, `load` says so, NO ANSWER, and never shows
-CalculiX's inside-out elements for a geometry the bench made. Only each point's end is
-tested, so a slot narrower than the shells between a point and the one it tests is passed
-over, and Orca's own rules for small areas, such as filling one under
-`minimum_sparse_infill_area` solid, aren't read: each leaves the core a little larger, and the
-part a little softer and weaker than printed.
+stretched ten times along its layers, the stretch undone (`offset_in_plane`), round at a
+concave edge. Where OCCT can't offset a part, as on a real curved leg, they're its common with
+16 copies of itself moved its walls round (`eroded_in_plane`); that common is stepped at each
+concave edge, a face of each copy a hundredth to three tenths of a millimetre across, and gmsh
+turned elements inside out by them, so where two flat faces meet there the steps are cut out
+to one mitred corner (`mitres`), the two moved faces' line.
+
+Each errs a little, and which way matters: a core too small, its skin too thick, reads the
+part stronger and stiffer than printed, the unsafe side; one too big reads it weaker. The
+offset errs toward a smaller core, by at most about 1.4% of the walls on a face they set, where
+its shells are no thinner than a third of them; and so does the mitre, a square for a quarter
+disc at a concave corner, 21% of the walls' square at a right angle. The 16 copies err the
+other way, a wall between two of them read at least cos(11.25°), 98%, as thick as it is.
+
+Each cut is held to the core each layer has as Orca slices it (`checked`): the part's section,
+each face of it offset in by its walls with OCCT's 2D offset on its own, and cut by its
+sections its shells away, at 7 of its layers' planes spread over its height and at its own
+features' heights, just off each face in its layers' plane and at each concave edge's and
+cylinder's middle (`heights`). It's compared as shapes, so a miss isn't made up by an excess
+beside it: the core may be short of a layer's by no more than 2% of the walls along the
+outline (`SHORT`), and over it by no more than 5% (`AGREE`), with 80% of the planes, and at
+least 3, read. It may leave no face of the core narrower than a bead by a curved face
+(`slivers`), unless OCCT can merge it into the faces round it (`healed`), when it's held to the
+part's shells and checked again. Where neither way holds, each is tried on the part with its
+own faces under a bead merged first (`simplified`), its core kept within the part's own shells;
+and where none holds, `load` says so, NO ANSWER, and never shows CalculiX's inside-out elements
+for a geometry the bench made. Only each point's end is tested along the layers, so a slot
+narrower than the shells between a point and the one it tests is passed over, and Orca's own
+rules for small areas, such as filling one under `minimum_sparse_infill_area` solid, aren't
+read: each leaves the core a little larger, and the part a little softer and weaker than
+printed.
 
 **Regions** (`printed.Region`) cut the part into cells, each with the settings every region round
 it gives: a height range's first, then each volume's over it in order, the later over the
@@ -68,12 +80,23 @@ NOTHING = 1e-3
 STRETCH = 10.0
 #: How far the core may be from each layer's own, the part's section offset in by its walls
 #: and cut by its shells (`layer_core`), as a share of the walls' thickness along the outline
-#: (`checked`, mqucifer/print-shop#356). The offset is within 1.3% of the walls on a face they
-#: set, the 16 copies within 2%, and a mitred corner (`mitres`) a little more than the round
-#: one, its corner's 21% of the walls' square.
+#: (`checked`, mqucifer/print-shop#356): the area of the core that isn't the layer's, or of
+#: the layer's that isn't the core, over the outline's length and the walls. A core too small
+#: reads the part stronger than printed, the unsafe side, so `SHORT` is the tighter: the offset
+#: leaves at most 1.4% of the walls on a face they set, and a mitre a square for a quarter
+#: disc, 21% of the walls' square at a right angle. A core too big reads it weaker: the 16
+#: copies leave up to 2% of the walls more.
+SHORT = 0.02
 AGREE = 0.05
-#: How many of the part's layers' planes the cut is checked at, spread over its height.
+#: How many of the part's layers' planes the cut is checked at, spread over its height, as
+#: well as just off each of its own faces that lies in its layers' plane, at each concave
+#: edge's middle and each cylinder's (`heights`); at most `PLANES` in all.
 HEIGHTS = 7
+PLANES = 40
+#: How far off a face in the layers' plane its planes are, in mm.
+OFF_FACE = 0.05
+#: Of the planes where the part has a section, how many must be read, and at least how many.
+READ_SHARE, READ_LEAST = 0.8, 3
 #: A concave corner further from its edge than this many times its walls isn't mitred: a
 #: sharp one's mitre runs far into the part.
 MITRE_LIMIT = 3.0
@@ -95,11 +118,9 @@ class Cell:
     core_mm3: float
     #: The core's box in the part's own axes, its least and most corners, or None for none.
     core_box: tuple[tuple[float, ...], tuple[float, ...]] | None = None
-    #: How its walls were cut, in words, and the check's (`Cut`): how many of its layers'
-    #: planes were read, and the most any was off, as a share of its walls.
+    #: How its walls were cut, in words, and its check against each layer's own (`Check`).
     cut: str = ""
-    checked: int = 0
-    off: float = 0.0
+    check: Check | None = None
 
     @property
     def walls_mm(self) -> float:
@@ -177,8 +198,9 @@ def offset_in_plane(shape: Any, layers: int, by: float) -> Any | None:
     is an ellipsoid's of the shape, `by` across the layers' plane and `by / STRETCH` along it:
     a face whose normal is a share a of the plane is moved `by` × √(a² + (1 - a²) / STRETCH²),
     where the walls in that plane move it `by` × a. On a face its shells move further, top and
-    bottom, the difference is under theirs; on any other, under 1.3% of `by` where its shells
-    are no thinner than a third of its walls. Unlike the 16 copies, it leaves no step at a
+    bottom, the difference is under theirs; on any other, under 1.4% of `by` where its shells
+    are no thinner than a third of its walls: eroding, it errs toward a smaller core, a part
+    read a little stronger than printed (`SHORT`). Unlike the 16 copies, it leaves no step at a
     concave edge, and no strip where two copies of a curved face cross. Its flat faces, made
     B-spline by the stretch, are flat again. None where nothing's left; it raises where OCCT
     can't offset the shape."""
@@ -260,59 +282,164 @@ def _moved_to(face: Any, layers: int, at: float) -> Any:
     return face.translated(_vector(layers, at - _span(face, layers)[0]))
 
 
+class _Unread(Exception):
+    """A plane OCCT can't offset a face of, though the face isn't thinner than its walls."""
+
+
+def _collapses(face: Any, layers: int, walls: float) -> bool:
+    """Whether a face in the layers' plane is gone, offset in by its walls: its common with
+    `ROUND` copies of itself moved its walls round is nothing, as OCCT's 2D offset of a face
+    thinner than its walls raises."""
+    import FreeCAD as App
+
+    first, second = (a for a in range(3) if a != layers)
+    left = face
+    for k in range(ROUND):
+        move = [0.0, 0.0, 0.0]
+        move[first] = walls * math.cos(2 * math.pi * k / ROUND)
+        move[second] = walls * math.sin(2 * math.pi * k / ROUND)
+        left = left.common(face.translated(App.Vector(*move)))
+        if left.Area <= 1e-6:
+            return True
+    return False
+
+
 def layer_core(
     part: Any, layers: int, at: float, walls: float, top: float, bottom: float, up: float
-) -> tuple[float, float] | None:
-    """The core's section at `at` along its layers as Orca slices it, the part's own section
-    there offset in by its walls in its plane, OCCT's 2D offset, rounded at its concave
-    corners, and cut by the part's sections `top` above and `bottom` below it, which its
-    shells need: its area, and its outline's length, the part's section's, in mm² and mm. None
-    where the part has no section there."""
+) -> tuple[Any | None, float] | None:
+    """The core's section at `at` along its layers as Orca slices it: each face of the part's
+    own section there offset in by its walls in its plane, OCCT's 2D offset, rounded at its
+    concave corners, and cut by the part's sections `top` above and `bottom` below it, which
+    its shells need. Each face is offset on its own: OCCT's offset of several fails for all
+    where one is thinner than its walls, and that one alone is then gone (mqucifer/print-shop
+    #356's review). Its faces, or None where nothing's left, and its outline's length, the
+    part's section's, in mm. None where the part has no section there.
+
+    Raises:
+        _Unread: Where OCCT can't offset a face that isn't thinner than its walls.
+    """
+    import Part
+
     own = _section(part, layers, at)
     if own is None:
         return None
     outline = sum(w.Length for w in own.Wires)
-    try:
-        inner = own.makeOffset2D(-walls, 0, False, False, False) if walls > 0 else own
-    except Exception:  # noqa: BLE001 - OCCT raises where nothing's left of a face
-        return 0.0, outline
-    left = inner
+    inner = []
+    for face in own.Faces:
+        if walls <= 0:
+            inner.append(face)
+            continue
+        try:
+            made = face.makeOffset2D(-walls, 0, False, False, False)
+        except Exception as exc:  # noqa: BLE001 - OCCT raises where nothing's left of a face
+            if _collapses(face, layers, walls):
+                continue
+            raise _Unread(str(exc)) from exc
+        inner.extend(f for f in made.Faces if f.Area > 1e-9)
+    left = Part.makeCompound(inner) if inner else None
     for along in (top * up, -bottom * up):
-        if along == 0 or left.Area <= 0:
+        if along == 0 or left is None:
             continue
         other = _section(part, layers, at + along)
         if other is None:
-            return 0.0, outline
+            left = None
+            break
         left = left.common(_moved_to(other, layers, at))
-    return float(left.Area), float(outline)
+        if left.Area <= 1e-9:
+            left = None
+    return left, float(outline)
+
+
+def heights(part: Any, layers: int) -> list[float]:
+    """The planes the cut is checked at, along the part's layers (`checked`): `HEIGHTS` spread
+    over its height, a little off each even step, so that none is one of a stepped part's
+    faces; and `OFF_FACE` either side of each of its faces that lies in its layers' plane, at
+    the middle of each concave edge and each cylinder, where a feature lies between them; at
+    most `PLANES`, the spread ones first."""
+    low, high = _span(part, layers)
+    spread = [low + (high - low) * (k + 0.5 + 0.0137) / HEIGHTS for k in range(HEIGHTS)]
+    way = _vector(layers, 1.0)
+    flat, middles = [], []
+    for face in part.Faces:
+        kind = type(face.Surface).__name__
+        if kind == "Plane":
+            normal = face.normalAt(*face.Surface.parameter(face.CenterOfMass))
+            if abs(abs(normal.dot(way)) - 1) < 1e-6:
+                flat.append(_span(face, layers)[0])
+        elif kind == "Cylinder":
+            middles.append(sum(_span(face, layers)) / 2)
+    for edge, _ in _concave(part):
+        lowest, highest = _span(edge, layers)
+        # An edge in the layers' plane is a flat face's: the planes off that face read it.
+        if highest - lowest > 2 * OFF_FACE:
+            middles.append((lowest + highest) / 2)
+    features = [h + side for h in flat for side in (-OFF_FACE, OFF_FACE)]
+    # None on a flat face itself, where the part's section and the core's are its edge.
+    features += [h for h in middles if all(abs(h - f) > OFF_FACE / 2 for f in flat)]
+    inside = sorted({round(h, 4) for h in features if low + OFF_FACE / 2 < h < high - OFF_FACE / 2}
+                    - {round(h, 4) for h in spread})  # fmt: skip
+    room = PLANES - len(spread)
+    if len(inside) > room:
+        inside = [inside[round(k * (len(inside) - 1) / max(room - 1, 1))] for k in range(room)]
+    return sorted(spread + inside)
+
+
+@dataclass(frozen=True)
+class Check:
+    """The cut held to each layer's own (`checked`): the planes where the part has a section,
+    how many were read, and the most the core was short of a layer's, and over it, each as a
+    share of the walls along the outline."""
+
+    planes: int
+    read: int
+    short: float
+    over: float
+
+    def fails(self) -> str | None:
+        """Why it doesn't hold, in words, or None where it does."""
+        if self.read < max(READ_LEAST, math.ceil(READ_SHARE * self.planes)):
+            return (f"only {self.read} of {self.planes} of its layers' planes could be read to "
+                    f"check it, under {100 * READ_SHARE:.0f}% or {READ_LEAST}")
+        if self.short > SHORT:
+            return (f"its core is short of a layer's own outline offset in by its walls by "
+                    f"{100 * self.short:.0f}% of them, past {100 * SHORT:.0f}%: the part would "
+                    "read stronger than printed")
+        if self.over > AGREE:
+            return (f"its core is over a layer's own outline offset in by its walls by "
+                    f"{100 * self.over:.0f}% of them, past {100 * AGREE:.0f}%")
+        return None
 
 
 def checked(
     part: Any, core: Any | None, layers: int, walls: float, top: float, bottom: float,
     up: float,
-) -> tuple[int, float]:
-    """The cut held to the core each layer has as Orca slices it (`layer_core`), at `HEIGHTS`
-    of the part's layers' planes spread over its height, away from its faces: how many were
-    read, and the most the core's section is off one, as a share of the walls along the
-    outline: the area between them over the outline's length and the walls' thickness."""
-    low, high = _span(part, layers)
-    read, worst = 0, 0.0
-    for k in range(HEIGHTS):
-        # A little off each even step, so that no plane is one of a stepped part's faces.
-        at = low + (high - low) * (k + 0.5 + 0.0137) / HEIGHTS
+) -> Check:
+    """The cut held to the core each layer has as Orca slices it (`layer_core`), at each of
+    `heights`: the area of the layer's core the cut's doesn't have, and of the cut's the
+    layer's doesn't, so that a miss is never made up by an excess beside it."""
+    planes = read = 0
+    short = over = 0.0
+    for at in heights(part, layers):
         try:
             want = layer_core(part, layers, at, walls, top, bottom, up)
-            if want is None:
-                continue
-            got = _section(core, layers, at) if core is not None else None
-        except Exception:  # noqa: BLE001 - a plane OCCT can't section isn't read
+        except Exception:  # noqa: BLE001 - a plane OCCT can't section or offset isn't read
+            planes += 1
             continue
-        area, outline = want
-        have = float(got.Area) if got is not None else 0.0
+        if want is None:
+            continue
+        planes += 1
+        shape, outline = want
+        try:
+            got = _section(core, layers, at) if core is not None else None
+            missed = (shape.cut(got).Area if got is not None else shape.Area) if shape else 0.0
+            extra = (got.cut(shape).Area if shape is not None else got.Area) if got else 0.0
+        except Exception:  # noqa: BLE001
+            continue
         read += 1
         if outline > 0 and walls > 0:
-            worst = max(worst, abs(have - area) / (outline * walls))
-    return read, worst
+            short = max(short, missed / (outline * walls))
+            over = max(over, extra / (outline * walls))
+    return Check(planes, read, short, over)
 
 
 def _curved(face: Any) -> bool:
@@ -421,8 +548,9 @@ def mitres(part: Any, layers: int, by: float) -> tuple[list[Any], int]:
     its walls as the copies move it, the most any copy reaches along its normal; and the
     prism between the two faces and the two moved in, along the edge and a wall's width past
     each end, is all of the steps, so the core minus it meets at one mitred corner, the two
-    moved faces' line: the skin there no thinner than its walls, and within a mitre's corner,
-    21% of the walls' square at a right angle, of the round one. The solids,
+    moved faces' line: the skin there no thinner than its walls, and thicker than the round
+    one by a mitre's corner, 21% of the walls' square at a right angle, so a little stronger
+    than printed (`SHORT`). The solids,
     and how many concave edges aren't of two flat faces, or are mitred past `MITRE_LIMIT`."""
     import FreeCAD as App
     import numpy as np
@@ -472,25 +600,27 @@ def mitres(part: Any, layers: int, by: float) -> tuple[list[Any], int]:
 @dataclass(frozen=True)
 class Cut:
     """A part's core where its walls and shells are given: what's left of it, or None for
-    nothing; how it was cut, in words; and the section check's (`checked`): how many of its
-    layers' planes were read, and the most any was off, as a share of its walls."""
+    nothing; how it was cut, in words; and its check against each layer's own (`Check`)."""
 
     core: Any | None
     how: str
-    read: int
-    off: float
+    check: Check
 
 
 def _cut_from(
     part: Any, source: Any, whence: str, layers: int, walls: float, top: float, bottom: float,
-    up: float, bead: float, said: list[str],
+    up: float, bead: float, said: list[str], shells: Any | None = None,
 ) -> Cut | None:
     """The core cut from `source`, the part or a simpler shape of it (`simplified`), by each
-    way in turn, each held to `part`'s own layers: the first that holds, or None, with why each
-    didn't in `said`."""
+    way in turn: the first that holds, or None, with why each didn't in `said`. Each is held
+    to `part` itself: kept within its shells (`eroded_along`), `shells` where they're given,
+    and checked against its own layers (`checked`) and for slivers (`slivers`) as it's cut,
+    and again once they're merged (`healed`)."""
     import Part
 
-    shelled = eroded_along(source, layers, top, bottom, up)
+    if shells is None:
+        shells = eroded_along(part, layers, top, bottom, up)
+    own = shells if source is part else eroded_along(source, layers, top, bottom, up)
     for how in ("offset", "copies"):
         try:
             if how == "offset":
@@ -506,20 +636,19 @@ def _cut_from(
                 words = (f"its common with {ROUND} copies of itself"
                          + (f", mitred at {len(prisms)} concave edge(s)" if prisms else "")
                          + whence)
+            core = None
+            if inside is not None and own is not None:
+                core = _one(_solids(inside.common(own)))
+            if core is not None and source is not part:
+                core = _within(core, shells)
         except Exception as exc:  # noqa: BLE001 - OCCT raises where it can't make it
             what = "its offset" if how == "offset" else "its copies"
             said.append(f"OCCT couldn't make {what}{whence} ({type(exc).__name__})")
             continue
-        core = None
-        if inside is not None and shelled is not None:
-            core = _one(_solids(inside.common(shelled)))
-        read, off = checked(part, core, layers, walls, top, bottom, up)
-        if read == 0:
-            said.append(f"{words}: no layer's plane could be read to check it")
-            continue
-        if off > AGREE:
-            said.append(f"{words}: its core is {100 * off:.0f}% of its walls off a layer's own "
-                        f"outline offset in by them, past {100 * AGREE:.0f}%")
+        check = checked(part, core, layers, walls, top, bottom, up)
+        wrong = check.fails()
+        if wrong is not None:
+            said.append(f"{words}: {wrong}")
             continue
         if core is not None and slivers(core, bead):
             merged = healed(core, bead)
@@ -528,9 +657,34 @@ def _cut_from(
                             f"narrower than a bead, {bead:g} mm, by a curved face, that no "
                             "merge took out")
                 continue
-            core, words = merged, f"{words}, its slivers merged into the faces round them"
-        return Cut(core, words, read, off)
+            words = f"{words}, its slivers merged into the faces round them"
+            try:
+                core = _within(merged, shells)
+            except Exception as exc:  # noqa: BLE001
+                said.append(f"{words}: OCCT couldn't keep it within the part "
+                            f"({type(exc).__name__})")
+                continue
+            check = checked(part, core, layers, walls, top, bottom, up)
+            wrong = check.fails() or (
+                f"{len(slivers(core, bead))} face(s) of its core narrower than a bead by a "
+                "curved face, kept within the part" if core is not None
+                and slivers(core, bead) else None)  # fmt: skip
+            if wrong is not None:
+                said.append(f"{words}: {wrong}")
+                continue
+        return Cut(core, words, check)
     return None
+
+
+def _within(core: Any, shells: Any | None) -> Any | None:
+    """`core` within the part's shells, where it's been cut from a shape other than the part
+    or merged: none of it outside the part, nor nearer its faces along its layers than its
+    shells (mqucifer/print-shop#356's review)."""
+    if shells is None:
+        return None
+    if core.cut(shells).Volume <= NOTHING:
+        return core
+    return _one(_solids(core.common(shells)))
 
 
 def cut_core(
@@ -544,14 +698,15 @@ def cut_core(
     it (`checked`), and may leave no face narrower than a bead by a curved face (`slivers`),
     or have them merged (`healed`). The first that holds is the cut; where none does, each is
     tried again on the part with its own faces under a bead merged (`simplified`), held to
-    the part's own layers still.
+    the part itself still.
 
     Raises:
         NoAnswer: Where none holds, saying why: never a mesh's elements turned inside out by a
             geometry the bench made itself.
     """
     said: list[str] = []
-    found = _cut_from(part, part, "", layers, walls, top, bottom, up, bead, said)
+    shells = eroded_along(part, layers, top, bottom, up)
+    found = _cut_from(part, part, "", layers, walls, top, bottom, up, bead, said, shells)
     if found is not None:
         return found
     simple = simplified(part, bead)
@@ -559,7 +714,7 @@ def cut_core(
         source, count = simple
         found = _cut_from(
             part, source, f", from it with its {count} face(s) under a bead merged first",
-            layers, walls, top, bottom, up, bead, said,
+            layers, walls, top, bottom, up, bead, said, shells,
         )
         if found is not None:
             return found
@@ -765,8 +920,7 @@ def cells(part: Any, printed: Printed, layers: int, folder: Path, name: str) -> 
                 float(sum(s.Volume for s in core)),
                 _box(core),
                 whole.how,
-                whole.read,
-                whole.off,
+                whole.check,
             )
         )
     return found

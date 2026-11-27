@@ -33,7 +33,9 @@ BEAD = 0.45
 
 def read(cell: Any) -> dict[str, Any]:
     core = as_printed._one(list(cell.core))
-    return {"cut": cell.cut, "checked": cell.checked, "off": cell.off,
+    check = cell.check
+    return {"cut": cell.cut, "planes": check.planes, "checked": check.read,
+            "short": check.short, "over": check.over,
             "core_mm3": cell.core_mm3,
             "slivers": len(as_printed.slivers(core, BEAD)) if core is not None else 0}  # fmt: skip
 

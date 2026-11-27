@@ -87,7 +87,7 @@ def inner(assembly_file: str, mesh: float | None) -> None:  # pragma: no cover
         core = None
         if inside is not None and shelled is not None:
             core = as_printed._one(as_printed._solids(inside.common(shelled)))
-        return as_printed.Cut(core, "main's 16 copies", 0, 0.0)
+        return as_printed.Cut(core, "main's 16 copies", None)
 
     cuts = {"main's": mains_cut, "this branch's": branch_cut}
 
@@ -279,10 +279,12 @@ def inner(assembly_file: str, mesh: float | None) -> None:  # pragma: no cover
                 core = None
                 if inside is not None and shelled is not None:
                     core = as_printed._one(as_printed._solids(inside.common(shelled)))
-                read, off = as_printed.checked(own, core, layers, walls, top, bottom, up)
+                check = as_printed.checked(own, core, layers, walls, top, bottom, up)
                 found = as_printed.slivers(core, bead) if core is not None else []
-                print(f"    checked at {read} planes, {100 * off:.1f}% of its walls off at most; "
-                      f"slivers {len(found)}", flush=True)
+                print(f"    checked at {check.read} of {check.planes} planes, short by "
+                      f"{100 * check.short:.1f}% of its walls and over by "
+                      f"{100 * check.over:.1f}% at most: "
+                      f"{check.fails() or 'holds'}; slivers {len(found)}", flush=True)
                 if found:
                     where(core)
                     merged = as_printed.healed(core, bead)
@@ -335,8 +337,10 @@ def inner(assembly_file: str, mesh: float | None) -> None:  # pragma: no cover
                 print(f"  cell {number} of {len(cells)}: "
                       + (f"{len(cell.core)} core solid(s)" if cell.core else "no core")
                       + f"; cut by {cell.cut}"
-                      + (f", checked at {cell.checked} planes, {100 * cell.off:.1f}% of its "
-                         "walls off at most" if cell.checked else ""), flush=True)  # fmt: skip
+                      + (f", checked at {cell.check.read} of {cell.check.planes} planes, short "
+                         f"by {100 * cell.check.short:.1f}% of its walls and over by "
+                         f"{100 * cell.check.over:.1f}% at most"
+                         if cell.check is not None else ""), flush=True)  # fmt: skip
                 if core is not None:
                     faces_said(f"cell {number}'s core", core, bead)
                     print(f"  slivers, under a bead by a curved face: "
