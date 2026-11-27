@@ -415,8 +415,12 @@ def run(loop: StudyLoop, part: StudyPart, stop: threading.Event | None = None) -
                 if not isinstance(args, dict):
                     raise ValueError("the arguments are an object")
                 result, done = _tool(loop, part, state, name, args)
-            except (json.JSONDecodeError, TypeError, KeyError, ValueError) as exc:
-                args, result = {}, f"refused: {exc}"
+            except (json.JSONDecodeError, TypeError, KeyError, ValueError,
+                    AttributeError) as exc:
+                # Arguments that aren't of the tools' shape are refused to the model, never a
+                # crash: the first real run's lessons came as words alone.
+                said = str(exc) if isinstance(exc, ValueError) else f"{type(exc).__name__}: {exc}"
+                args, result = {}, f"refused: {said}"
             state.calls.append(LoopCall(tool=name, arguments=args, result=result,
                                         seconds=round(time.monotonic() - began, 2)))
             messages.append({"role": "tool", "tool_call_id": call.get("id", name),
@@ -496,6 +500,11 @@ def _recommend(loop: StudyLoop, state: _State,
                 + " pass every case: recommend one of them", None)
     lessons = []
     for item in args.get("lessons") or ():
+        if isinstance(item, str):
+            # A lesson as words alone, as the real model gave one: its text, shown by the study.
+            item = {"text": item, "shown_by": []}
+        if not isinstance(item, dict):
+            return ("refused: each lesson is {\"text\": ..., \"shown_by\": [candidates]}", None)
         shown = [str(n) for n in item.get("shown_by") or ()]
         if unknown := [n for n in shown if n not in names]:
             return (f"refused: a lesson's shown_by names {', '.join(unknown)}, not read", None)

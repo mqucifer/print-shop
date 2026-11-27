@@ -262,6 +262,21 @@ def test_what_neither_side_reads_is_refused_with_its_bound(
     assert result.recommended == "c1"
 
 
+def test_arguments_not_of_the_tools_shape_are_refused_never_a_crash(part: StudyPart) -> None:
+    """The first real run's model gave its lessons as words alone, and the study crashed."""
+    model = Model([THREE_WALLS], [FOUR_WALLS],
+                  [("read", {"why": "w", "regions": ["round the hole"]})],
+                  [("recommend", {"candidate": "c1", "reason": "r", "lessons": [7]})],
+                  [("recommend", {"candidate": "c1", "reason": "r",
+                                  "lessons": ["3 walls carry it across its layers"]})])
+    result = run(StudyLoop(chat=model), part)
+    said = [c.result for c in result.calls]
+    assert said[2] == "refused: region 1 is an object"
+    assert said[3].startswith("refused: each lesson is")
+    assert result.recommended == "c1"
+    assert result.lessons == [{"text": "3 walls carry it across its layers", "shown_by": []}]
+
+
 def test_past_its_limits_it_ends_with_the_table_and_no_recommendation(part: StudyPart) -> None:
     model = Model([THREE_WALLS], [FOUR_WALLS])
     result = run(StudyLoop(chat=model, max_calls=2), part)
