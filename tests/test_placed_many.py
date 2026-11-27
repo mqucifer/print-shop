@@ -25,7 +25,9 @@ from print_shop.bench import host
 from print_shop.bench import placed as placed_module
 from print_shop.bench.cli import parser
 from print_shop.bench.report import NoAnswer, Report
-from print_shop.rounds import end_checks, reports
+from print_shop.rounds import end_checks, reports, transcript
+from print_shop.rounds.run import Run
+from tests.rounds_fakes import Scripted, tool
 
 PARTS = '''
 import math
@@ -55,6 +57,8 @@ wedge = (
 cq.exporters.export(ring.intersect(wedge).translate((-30, 0, 0)), "slice.step")
 # A pane on top of it, in its middle.
 cq.exporters.export(box(-2, 2, -2, 2, 5, 6), "pane.step")
+# A rib standing on it, along its middle.
+cq.exporters.export(box(-8, 8, -1, 1, 5, 8), "rib.step")
 '''
 
 #: Each slice's middle, in degrees about z: from 0° to 30°, 30° to 60°, and 90° to 120°.
@@ -335,3 +339,98 @@ def test_fit_on_moves_one_slice_onto_the_others_made_from_its_file(work: Path) -
     assert not any(p["seated"] for p in numbers["places"]), text
     assert set(numbers["placed"]) == {f"slice.step as {n}" for n in RING}
     assert reports.unlike("fit-on", numbers) == []
+
+
+#: An assembly run of two given files, a slice and its rib, each named in three parts: the shape
+#: of a design run's whole-assembly need at `done` (mqucifer/print-shop#343).
+WHOLE = "clearance references/slice.step references/rib.step --placed table.json"
+ASSEMBLY_REQUEST = """\
+Stand a rib on each of three given ring slices, as one assembly. They're approved: don't change
+them.
+
+## Requirements
+- No part passes into another.
+
+## Stops
+- no plan
+"""
+
+
+@pytest.mark.bench
+def test_done_takes_a_whole_assembly_need_and_reads_it_once_a_part(
+    work: Path, tmp_path: Path
+) -> None:
+    """`done` on an assembly of two given files each in three parts: it's an assembly, not too few
+    parts; the need and the harness's own placed reading each read the six parts, 15 pairs."""
+    given = tmp_path / "given"
+    given.mkdir()
+    for name in ("slice.step", "rib.step"):
+        given.joinpath(name).write_bytes((work / name).read_bytes())
+    need = {
+        "id": "whole",
+        "what": "no part passes into another",
+        "source": "request",
+        "quote": "No part passes into another.",
+        "covers": ["R1"],
+        "check": {"by": "bench", "measures": "fit", "command": WHOLE, "verdicts": ["TOUCHING"]},
+    }
+    model = Scripted(
+        [
+            tool(
+                "breakdown",
+                parts=[{"name": n, "what": "a given slice or rib"} for n in ("slice", "rib")],
+                joins=[{"parts": ["slice", "rib"], "how": "the rib stands on its slice"}],
+                look=["three slices of a ring, each with a rib"],
+                **{"from": "the request"},
+            )
+        ],
+        [tool("needs", needs=[need])],
+        [tool("done", script="make.py", part=["table.json"], fix_shape="first", closing="Here.")],
+        [tool("blocked", reason="Out of turns.")],
+    )
+    run = Run.start(
+        tmp_path / "runs",
+        "r",
+        ASSEMBLY_REQUEST,
+        [given / "slice.step", given / "rib.step"],
+        model,
+        sleep=lambda _: None,
+        assembly_run=True,
+    )
+    (run.work / "make.py").write_text("print('placed')\n")
+    parts = []
+    for name, degrees in RING.items():
+        for file, part in (("slice.step", name), ("rib.step", f"r{name[1:]}")):
+            one = entry(part, degrees)
+            one["file"] = f"references/{file}"
+            parts.append(one)
+    (run.work / "table.json").write_text(json.dumps({"parts": parts}))
+    ending = run.drive()
+    events = [e for e in transcript.events_of(run.session.events) if e["kind"] == "tool"]
+    done = [e for e in events if e["name"] == "done"][-1]
+    assert ending.name == "met", [(e["name"], e["reply"][:600]) for e in events]
+    assert done["detail"]["met"] is True, done["reply"]
+    reply = done["reply"]
+    assert "The result is an assembly of given parts: `table.json`" in reply, reply
+    # The harness's own placed reading names the copies by their parts.
+    slices, ribs = "references/slice.step as s", "references/rib.step as r"
+    assert f"`{slices}1` and `{slices}2` touch" in reply, reply
+    assert f"`{ribs}3` and `{slices}3` touch" in reply, reply
+    assert "nothing passes into anything" in reply, reply
+    # Each reading read every part: the need's and the harness's, 15 pairs each.
+    kept = run.folder / "rounds" / "001"
+    placed = [
+        json.loads((kept / name).read_text())
+        for name in ("readings/whole.json", "standing/placed-table_json.json")
+    ]
+    for record in placed:
+        assert record["argv"][-2:] == ["--placed", "table.json"], record["argv"]
+        assert len(record["numbers"]["placed"]) == 6 and len(record["numbers"]["pairs"]) == 15
+    touching = {
+        frozenset((p["a"], p["b"])) for p in placed[0]["numbers"]["pairs"]
+        if p["verdict"] == "TOUCHING"
+    }
+    assert touching == {
+        frozenset((f"{slices}1", f"{slices}2")),
+        *(frozenset((f"{slices}{k}", f"{ribs}{k}")) for k in (1, 2, 3)),
+    }
