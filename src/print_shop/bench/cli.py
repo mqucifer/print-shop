@@ -760,6 +760,9 @@ def parser() -> Parser:
         "against its layers, each joint's force, a through-bolt's washers, nut and the "
         "plastic round it, a dovetail's flanks, seat and latch, and how far the loaded place "
         "moves. Runs in the second image, with FreeCAD's FEM",
+        # Each option in full: the host gives `--parts` the hour and its memory by its words
+        # (`host.asks_two_passes`), so `--part` mustn't read as it (mqucifer/print-shop#336).
+        allow_abbrev=False,
     )
     load.add_argument(
         "assembly",

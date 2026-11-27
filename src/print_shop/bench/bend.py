@@ -44,7 +44,7 @@ from typing import Any
 
 import numpy as np
 
-from .cae import ccx_one_thread, freecad, tidy_mesh, tidy_solve
+from .cae import ccx_one_thread, freecad, gmsh, tidy_mesh, tidy_solve
 from .limits import over, said
 from .report import NoAnswer, Report
 
@@ -193,7 +193,7 @@ def _solve(
         doc.recompute()
         began = time.time()
         tools = GmshTools(mesh)
-        wrong = tools.create_mesh()
+        wrong = gmsh(tools)
         tidy_mesh(tools)
         meshed = time.time() - began
         if wrong or not mesh.FemMesh.VolumeCount:
