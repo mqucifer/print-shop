@@ -547,6 +547,7 @@ def _alone_read(model: _Alone, doc: Any) -> dict[str, Any]:
             "joined": model.joined_said,
             "iterated": model.iterated,
             "straight": None,
+            "finer": model.finer_said(),
         }
     finally:
         App.closeDocument(doc.Name)
@@ -665,6 +666,8 @@ def first(
         "seconds": round(time.time() - began, 1),
         "memory_peak": peak(),
         "iterated": fine["iterated"] or coarse["iterated"],
+        "finer": fine.get("finer"),
+        "coarse_finer": coarse.get("finer"),
     }
     clock.done.append(
         f"the first pass read the whole in {said['seconds']} s ({fine['elements']} elements)"
@@ -753,6 +756,7 @@ def second(
         "seconds": round(time.time() - began, 1),
         "memory_peak": peak(),
         "iterated": sorted(n for n, r in {**reads, **rough}.items() if r["iterated"]),
+        "finer": sorted(n for n, r in {**reads, **rough}.items() if r.get("finer")),
     }
     return reads, rough, said
 
@@ -781,6 +785,17 @@ def pass_lines(report: Any, firsts: dict[str, Any], seconds: dict[str, Any], why
         f"{firsts['coarse_nodes']} nodes; {firsts['seconds']} s, the container's memory at "
         f"most {_gib(firsts['memory_peak'])} by its end"
         + (f"; {firsts['iterated']}" if firsts["iterated"] else "")
+        + (
+            f"; at {firsts['mesh_mm']:g} mm{load._finer_said({'finer': firsts['finer']})}"
+            if firsts.get("finer")
+            else ""
+        )
+        + (
+            f"; at {firsts['coarse_mesh_mm']:g} mm"
+            f"{load._finer_said({'finer': firsts['coarse_finer']})}"
+            if firsts.get("coarse_finer")
+            else ""
+        )
     )
     report.line(
         f"pass 2, each part on its own: {seconds['parts']} parts at a mesh of at most "
@@ -792,6 +807,12 @@ def pass_lines(report: Any, firsts: dict[str, Any], seconds: dict[str, Any], why
             f"; {', '.join(seconds['iterated'])} solved by CalculiX's iterative solver, "
             "corrected, where its direct one met the container's memory"
             if seconds["iterated"]
+            else ""
+        )
+        + (
+            f"; {', '.join(seconds['finer'])} meshed finer where two of its faces that meet "
+            "nowhere lie closer than its triangles' sag"
+            if seconds.get("finer")
             else ""
         )
     )

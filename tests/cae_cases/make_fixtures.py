@@ -64,6 +64,11 @@ between two blocks and standing 10 proud of their tops, the seam turned 30° abo
 is drawn flat, as printed, and placed by a turn about x and then about z, its `at` written to six
 decimals, as an assembly's file gives it, so it sits a hair, 0.26 µm, off the blocks; and drawn
 standing and placed by the one turn about z, exactly where it is, and by its `at` to six decimals.
+
+`capped/` (mqucifer/print-shop#346): a top 40 x 40 and 6 thick with a counterbore 10 across and
+2 deep at its middle, and a cap 2 tall standing on the counterbore's floor with play round it,
+turned 15° about its axis so its seam isn't the counterbore's: 0.15 mm of play, a fit's, and
+0.2 µm, a hair, which no mesh parts.
 """
 
 from __future__ import annotations
@@ -1134,8 +1139,34 @@ def printed() -> None:
         assembly(out / f"printed-lines-{angle}.json", [row], held=wall)
 
 
+#: The capped top (mqucifer/print-shop#346): its side and thickness, the counterbore's radius
+#: and depth, and the cap's play round it, a fit's and a hair's, and its turn, in mm and degrees.
+CAPPED_SIDE, CAPPED_T, CAPPED_BORE_R, CAPPED_DEEP = 40.0, 6.0, 5.0, 2.0
+CAPPED_PLAY, CAPPED_HAIR, CAPPED_TURN = 0.15, 2e-4, 15.0
+
+
+def capped() -> None:
+    """A cap in a counterbore with play round it, touching its floor (mqucifer/print-shop#346):
+    the two cylinders meet nowhere, and nor do the cap's top and the top's, a gap apart."""
+    out = Path("capped")
+    middle = App.Vector(CAPPED_SIDE / 2, CAPPED_SIDE / 2, CAPPED_T - CAPPED_DEEP)
+    top = box((0, 0, 0), (CAPPED_SIDE, CAPPED_SIDE, CAPPED_T)).cut(
+        Part.makeCylinder(CAPPED_BORE_R, CAPPED_DEEP + 1, middle)
+    )
+    save(top, out / "top.step")
+    parts: Rows = [{"name": "top", "file": "top.step", "layers": "z"}]
+    for name, play in (("capped", CAPPED_PLAY), ("capped-hair", CAPPED_HAIR)):
+        cap = Part.makeCylinder(CAPPED_BORE_R - play, CAPPED_DEEP, middle)
+        cap.rotate(middle, App.Vector(0, 0, 1), CAPPED_TURN)
+        save(cap, out / f"{name}.step")
+        rows = [*parts, {"name": "cap", "file": f"{name}.step", "layers": "z"}]
+        assembly(out / f"{name}.json", rows, [{"between": ["top", "cap"], "kind": "touching"}],
+                 [{"plane": "z=0", "how": "fixed"}])  # fmt: skip
+
+
 def main() -> None:
     loads()
+    capped()
     printed()
     throughs()
     peaks()

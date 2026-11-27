@@ -14,7 +14,9 @@ Nothing here changes how the bench reads anything else.
 - `misordered`: the most stressed element of the last part with no node on a joint's faces,
   with two of its mid-side nodes given the other way round, as FreeCAD's order would be were
   it wrong (mqucifer/print-shop#320); `unshared` the same, with the checks of its sides' shared
-  nodes and of where they lie turned off, as for a swap they can't tell.
+  nodes and of where they lie turned off, as for a swap they can't tell;
+- `unsized`: the faces found close where gmsh's triangles cross given no local size, so gmsh
+  refuses them as it did (mqucifer/print-shop#346).
 """
 
 from __future__ import annotations
@@ -132,6 +134,10 @@ elif mode in ("misordered", "unshared"):
     if mode == "unshared":
         # A swap neither the sides' shared nodes nor where they lie tells: the balance must.
         load.misordered = lambda wired, points: np.zeros(len(wired), dtype=bool)
+elif mode == "unsized":
+    # Faces that meet nowhere found close where gmsh's triangles cross, but given no local size
+    # (mqucifer/print-shop#346), as where the sizes don't part them.
+    load.close_faces.fields = lambda closes, size: ""
 else:
     raise SystemExit(f"no such mode: {mode}")
 sys.exit(main(given))

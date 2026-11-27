@@ -1684,6 +1684,68 @@ def test_a_peg_in_a_hole_on_a_straight_mesh_reads_each_face_it_meets_once(cae: A
     )
 
 
+#: The cap in its counterbore (`make_fixtures.capped`), pushed down at the middle of its top.
+CAPPED = ("--weight", "1", "--at", "20,20,6", "--mesh", "3")
+
+
+def test_a_cap_in_its_counterbore_with_play_round_it_meshes_curved_and_straight(cae: Any) -> None:
+    """mqucifer/print-shop#346: a design run's table top read `gmsh made no mesh of the joined
+    parts, with its elements' sides curved onto the parts' faces or straight: PLC Error: A
+    segment and a facet intersect at point`, near where a tile's cap sits in its counterbore. A
+    cap standing in a counterbore with 0.15 mm of play round it, turned so its seam isn't the
+    counterbore's, did the same: the two cylinders meet nowhere, and at 3 mm gmsh's chords of
+    each sag inside the other. Meshed finer on those faces alone, it reads, curved and
+    straight: the cap's weight is on the counterbore's floor, and the coarser mesh agrees."""
+    curved = cae("load", "capped/capped.json", *CAPPED)
+    straight = forced(cae, "straight", "load", "capped/capped.json", *CAPPED)
+    for answer in (curved, straight):
+        assert answer.verdict == "OK", answer.text
+        assert answer.numbers["joints"]["top+cap"]["force_n"] == pytest.approx([0, 0, -G], abs=0.01)
+        assert re.search(
+            r"a mesh of at most 3 mm \([^)]*\), finer, to at most [\d.]+ mm, on 2 face\(s\) and "
+            r"\d+ edge\(s\) where \d+ pair\(s\) of faces that meet nowhere lie closer than its "
+            r"triangles' sag, the closest 0\.15 mm apart",
+            answer.text,
+        ), answer.text
+        assert "a mesh of at most 4.5 mm (" in answer.text and answer.text.count(", finer,") >= 2
+        assert "DISAGREE" not in answer.text
+
+
+def test_a_cap_a_hair_from_its_counterbore_names_both_faces_and_how_far_apart(cae: Any) -> None:
+    """mqucifer/print-shop#346: where gmsh's triangles cross where two faces that meet nowhere
+    are so close no mesh parts them, the parts are at fault: the reply names both parts and
+    faces, how far apart they are and how far apart they'd mesh, and nothing more is meshed. A
+    bare gmsh error is not enough."""
+    answer = cae("load", "capped/capped-hair.json", *CAPPED)
+    assert answer.verdict == "NO ANSWER" and answer.code == 2, answer.text
+    why = answer.record["why"]
+    assert "pair(s) of the parts' faces are too close together to mesh" in why, why
+    assert re.search(
+        r"cap and top: the (cap|top)'s cylindrical face of radius [\d.]+ mm round \(20, 20, 5\) "
+        r"and the (cap|top)'s cylindrical face of radius [\d.]+ mm round \(20, 20, 5\) are "
+        r"0\.0002 mm apart, and meet nowhere; they'd mesh [\d.]+ mm or more apart",
+        why,
+    ), why
+    assert why.startswith("load stopped") or why.index("too close together to mesh") < why.index(
+        "PLC Error"
+    ), why
+    assert "Draw each pair meeting face to face" in why
+
+
+def test_where_gmsh_still_refuses_the_faces_nearest_its_crossing_are_named(cae: Any) -> None:
+    """mqucifer/print-shop#346: where gmsh's triangles still cross, the reply says gmsh's own
+    words and then the faces nearest where it says they cross, with their parts, so a design
+    run can find them: the cap's and the top's, not a bare gmsh error."""
+    answer = forced(cae, "unsized", "load", "capped/capped.json", *CAPPED)
+    assert answer.verdict == "NO ANSWER" and answer.code == 2, answer.text
+    why = answer.record["why"]
+    assert "segment-facet intersection" in why, why
+    near = why.split("; the faces nearest where gmsh's triangles cross: ", 1)
+    assert len(near) == 2, why
+    assert "cap's cylindrical face of radius 4.85 mm" in near[1], why
+    assert re.search(r"top's (cylindrical|flat) face", near[1]), why
+
+
 #: The strip in its seam (`make_fixtures.seam`), pushed down at the middle of its top, 10 mm
 #: proud of the blocks.
 SEAM_ARGS = ("--weight", "1", "--at", "12.6154,8.1495,50")
