@@ -43,7 +43,7 @@ REPORTS: dict[str, tuple[str, ...]] = {
         "volume_mesh_mm3",
         "watertight",
     ),
-    "clearance": ("bodies", "lift", "pairs", "placed", "places", "slide"),
+    "clearance": ("bodies", "by_boxes", "lift", "pairs", "pairs_s", "placed", "places", "slide"),
     "readback": (
         "after_mm3",
         "before_mm3",
@@ -776,9 +776,22 @@ SHAPES: dict[str, dict[str, Any]] = {
                     # By the names the need's own `--box NAME=...` and `--facing NAME=...` give.
                     "places": Keyed(PLACE),
                     "verdict": TEXT,
+                    # A pair read by its bounds alone, far apart: `boxes`, its bound and which
+                    # ruled it out, and no `gap_mm` (mqucifer/print-shop#354).
+                    "read_by": TEXT,
+                    "box_gap_mm": NUMBER,
+                    "box_by": TEXT,
                 }
             )
         ),
+        # How many pairs were read by their bounds, past which gap, and the least of their bound
+        # gaps, at which pair (mqucifer/print-shop#354).
+        "by_boxes": Row(
+            {"pairs": NUMBER, "beyond_mm": NUMBER, "least_box_gap_mm": NUMBER, "least": NUMBER},
+            closed=True,
+        ),
+        # How long reading the pairs took, in s.
+        "pairs_s": NUMBER,
         # What each place named is: a box's two corners, or the way its faces face.
         "places": Keyed(Row({"box": CORNERS, "facing": TEXT})),
         # What holds the last file named, slid along its way out (mqucifer/print-shop#76): the

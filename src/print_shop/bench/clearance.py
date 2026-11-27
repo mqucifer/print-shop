@@ -44,11 +44,27 @@ it's compared, by `info`'s rule (`shapes.cant_read`): one with a negative volume
 that isn't closed, gives no `CLEAR`, `TOUCHING` or `HELD`. Its pair is `NO ANSWER`, with each
 method's figure beside that, or `INTERFERE` where every method still finds the overlap. That
 ranks under `INTERFERE`, so an overlap found is still the answer.
+
+**A pair read by its boxes** (mqucifer/print-shop#354). Every pair was read by its exact distance,
+about a second a pair, so a whole assembly of alike parts placed by `--placed`, thousands of
+pairs, overran the bench's limit. Past `SAID_WHOLE` pairs, a pair whose bounds lie farther apart
+than any gap the reading judges, its `--min-gap`, its `--max-gap` with places named, its `--lift`
+and touching, is read by them alone: `CLEAR`, with its least bound gap, `box_gap_mm`, and counted
+in one line. A bound is the larger of two figures, each never more than the true gap: the gap
+between the axis-aligned boxes, and the gap between the convex hulls along the way from one to
+the other or along either's main axes, which holds a turned part better. A STEP body's hull is its
+fine mesh's, padded by `HULL_PAD` for the curve between the chords. A pair the bounds can't rule
+out, or with a part that can't be read, is read exactly, as before, so no verdict changes, and a
+pair read by its boxes is never anything but `CLEAR`. It has no `gap_mm`: a need's figure is the
+exact gap, never a bound. It's read exactly with `--exact`, with `--slide` or `--facing`, and where
+`--max-gap` holds each pair's least gap, as a pair far apart is then `TOO LOOSE`. With `--box`
+places, each place must lie clear of one of the pair's boxes, so it catches neither surface.
 """
 
 from __future__ import annotations
 
 import math
+import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any
@@ -61,6 +77,7 @@ import trimesh
 from OCP.BRepExtrema import BRepExtrema_DistShapeShape
 
 from . import placed as placed_module
+from .far import HULL_PAD, Bounds, bounds_from, least_apart
 from .limits import ARITHMETIC, over, said, under
 from .placed import say_placed
 from .report import Report
@@ -112,6 +129,10 @@ DIRECTIONS = {
 }
 
 
+#: What a pair read by its bounds says it was read by.
+BY_BOXES = "boxes"
+
+
 @dataclass
 class Trust:
     """What of the parts given can't be read, by each part's `id` (mqucifer/print-shop#244)."""
@@ -143,6 +164,104 @@ def _apart(a: Part, b: Part, margin: float = 1e-3) -> bool:
     low_a, high_a = a.bounds()
     low_b, high_b = b.bounds()
     return bool(np.any(high_a + margin < low_b) or np.any(high_b + margin < low_a))
+
+
+def bounds_of(part: Part) -> Bounds:
+    """A body's bounds: OCCT's box, or an STL's own, and its fine mesh's convex hull, padded by
+    `HULL_PAD` on a STEP for the curve between the chords."""
+    low, high = part.bounds()
+    mesh = part.fine()
+    try:
+        points = np.asarray(mesh.convex_hull.vertices, dtype=float)
+    except Exception:  # noqa: BLE001 - where qhull refuses a body, every point of it still bounds it
+        points = np.asarray(mesh.vertices, dtype=float)
+    return bounds_from(low, high, points, HULL_PAD if part.is_brep else 0.0)
+
+
+def _clear_of(one: Bounds, place: Place) -> bool:
+    """Whether a body's padded box lies wholly outside a place's box, so the place can't catch
+    its surface."""
+    assert place.low is not None and place.high is not None
+    margin = one.pad + 1e-3
+    return bool(np.any(one.high + margin < place.low) or np.any(place.high + margin < one.low))
+
+
+def boxes_judge(args: Any, named: list[Place], pairs: int) -> float | None:
+    """The farthest gap the reading judges, in mm, past which a pair is read by its bounds; or
+    None where every pair is read exactly: with `--exact`, up to `SAID_WHOLE` pairs, with
+    `--slide` or `--facing`, and where `--max-gap` holds each pair's least gap, as a pair far
+    apart is then `TOO LOOSE` (mqucifer/print-shop#354)."""
+    if getattr(args, "exact", False) or pairs <= SAID_WHOLE or getattr(args, "slide", None):
+        return None
+    if any(place.way is not None for place in named):
+        return None
+    if args.max_gap is not None and not named:
+        return None
+    judged = [TOUCHING, args.min_gap or 0.0, args.max_gap or 0.0]
+    lift = getattr(args, "lift", None)
+    if lift is not None:
+        # `_lift_said` reads a gap within the chords of the lift as the lift itself.
+        judged.append(abs(lift) + 2 * FINE[0] + TOUCHING)
+    return max(judged)
+
+
+def by_boxes(
+    a: Part,
+    b: Part,
+    bounds: dict[int, Bounds],
+    beyond: float,
+    named: list[Place],
+    trust: Trust,
+) -> dict[str, Any] | None:
+    """A pair read by its bounds, `CLEAR`, where they lie farther apart than `beyond` and every
+    place named lies clear of one of the pair; else None, and it's read exactly. A part that
+    can't be read is always read exactly, as its pair is `NO ANSWER`."""
+    if trust.why(a, b):
+        return None
+    one, two = bounds[id(a)], bounds[id(b)]
+    outside: dict[str, list[str]] = {}
+    for place in named:
+        missed = [p.name for p, got in ((a, one), (b, two)) if _clear_of(got, place)]
+        if not missed:
+            return None
+        outside[place.name] = missed
+    by_box, by_hull = least_apart(one, two)
+    gap = max(by_box, by_hull)
+    if gap <= beyond:
+        return None
+    row: dict[str, Any] = {
+        "a": a.name,
+        "b": b.name,
+        "verdict": "CLEAR",
+        "read_by": BY_BOXES,
+        # Rounded down, so the figure said is never more than the bound.
+        "box_gap_mm": math.floor(gap * 1e4) / 1e4,
+        "box_by": "box" if by_box >= by_hull else "hull",
+        "untrusted": [],
+        "differs": [],
+    }
+    if named:
+        row["places"] = {
+            name: {
+                "gap_mm": None,
+                "gap_by": None,
+                "gap_second_mm": None,
+                "from": None,
+                "to": None,
+                "verdict": NOT_CAUGHT,
+                "why": (
+                    "no surface of both is in the box: "
+                    + " and ".join(f"{n} lies all outside the box, by its bounds" for n in missed)
+                    + ". Move the box so it holds the faces on both sides of the gap you're reading"
+                ),
+            }
+            for name, missed in outside.items()
+        }
+    return row
+
+
+def _boxed(pair: dict[str, Any]) -> bool:
+    return pair.get("read_by") == BY_BOXES
 
 
 def _occt(a: Part, b: Part) -> dict[str, Any]:
@@ -697,14 +816,25 @@ def run(args: Any, report: Report) -> None:
     # play at one place, and a mated pair has several (mqucifer/print-shop#72).
     low, high = (None, None) if named else (args.min_gap, max_gap)
     trust = trust_of(split)
-    results = [measure_pair(a, b, low, high, trust) for a, b in pairs]
-    for (a, b), r in zip(pairs, results, strict=True):
+    # A pair farther apart than any gap judged is read by its bounds (mqucifer/print-shop#354).
+    started = time.monotonic()
+    beyond = boxes_judge(args, named, len(pairs))
+    bounds = {id(piece): bounds_of(piece) for piece in items} if beyond is not None else {}
+    results: list[dict[str, Any]] = []
+    for a, b in pairs:
+        boxed = None if beyond is None else by_boxes(a, b, bounds, beyond, named, trust)
+        if boxed is not None:
+            results.append(boxed)
+            continue
+        r = measure_pair(a, b, low, high, trust)
         if named:
             band = r["overlap_band_mm3"]
             r["places"] = {
                 p.name: measure_place(a, b, p, band, args.min_gap, max_gap, trust) for p in named
             }
+        results.append(r)
     report.numbers["pairs"] = results
+    report.numbers["pairs_s"] = round(time.monotonic() - started, 2)
     if named:
         report.numbers["places"] = {p.name: p.plain() for p in named}
     slid = None
@@ -728,6 +858,8 @@ def run(args: Any, report: Report) -> None:
                 _place_said(report, i, r, name, place, args)
     if folded:
         _quiet_said(report, results, named, brep)
+    if beyond is not None:
+        _boxes_said(report, results, beyond)
     if args.min_gap is not None or max_gap is not None:
         exact = "OCCT's exact distance" if brep else "the mesh's distance"
         held = "each place's least gap" if named else "each pair's least gap"
@@ -746,7 +878,11 @@ def run(args: Any, report: Report) -> None:
     if lift is not None:
         _lift_said(report, results, report.numbers["lift"])
     elif not named and (args.min_gap is not None or max_gap is not None):
-        seated = [r for r in results if r["verdict"] == "INTERFERE" or r["gap_mm"] <= TOUCHING]
+        seated = [
+            r
+            for r in results
+            if not _boxed(r) and (r["verdict"] == "INTERFERE" or r["gap_mm"] <= TOUCHING)
+        ]
         if seated:
             most = max(g for g in (args.min_gap, max_gap) if g is not None)
             report.note(
@@ -762,8 +898,11 @@ def run(args: Any, report: Report) -> None:
     read_at = [p for r in results for p in r.get("places", {}).values()]
     verdicts += [p["verdict"] for p in read_at if p["verdict"] != NOT_CAUGHT]
     worst = min(verdicts, key=ORDER.index)
-    counts = {w: sum(r["verdict"] == w for r in results) for w in ORDER}
+    counts = {w: sum(r["verdict"] == w and not _boxed(r) for r in results) for w in ORDER}
     tally = ", ".join(f"{n} {w.lower()}" for w, n in counts.items() if n)
+    boxed_count = sum(map(_boxed, results))
+    if boxed_count:
+        tally += f"{', ' if tally else ''}{boxed_count} clear by their boxes"
     if read_at:
         at = {w: sum(p["verdict"] == w for p in read_at) for w in [*ORDER, NOT_CAUGHT]}
         tally += "; at the places: " + ", ".join(f"{n} {w.lower()}" for w, n in at.items() if n)
@@ -967,7 +1106,7 @@ def _quiet_said(
     report: Report, results: list[dict[str, Any]], named: list[Place], brep: bool
 ) -> None:
     """The pairs with nothing to report, as one counted line and one second check."""
-    quiet = [(i, r) for i, r in enumerate(results) if _quiet(r)]
+    quiet = [(i, r) for i, r in enumerate(results) if _quiet(r) and not _boxed(r)]
     if not quiet:
         return
     tally = ", ".join(
@@ -981,9 +1120,11 @@ def _quiet_said(
     # A place that catches no surface of one of a pair says nothing of it, whichever pair it is.
     shown = {i for i, r in enumerate(results) if not _quiet(r)}
     for place in named:
-        read = [r["places"][place.name]["verdict"] for k, r in enumerate(results)]
-        quiet_read = [v for k, v in enumerate(read) if k not in shown or v == NOT_CAUGHT]
-        missed = read.count(NOT_CAUGHT)
+        # A pair read by its boxes is said on its own line (`_boxes_said`).
+        read = [(k, r["places"][place.name]["verdict"]) for k, r in enumerate(results)]
+        read = [(k, v) for k, v in read if not _boxed(results[k])]
+        quiet_read = [v for k, v in read if k not in shown or v == NOT_CAUGHT]
+        missed = [v for _, v in read].count(NOT_CAUGHT)
         got = [f"{n} {w.lower()}" for w in QUIET if (n := quiet_read.count(w))]
         line += f"; at {place.name} " + ", ".join(
             [*got, *[f"{missed} not caught"] * bool(missed)]
@@ -998,6 +1139,36 @@ def _quiet_said(
             else f"no overlap by {SECTIONS} sections or by the mesh, and sampled points agree "
             "with the mesh's gaps"
         )
+    )
+
+
+def _boxes_said(report: Report, results: list[dict[str, Any]], beyond: float) -> None:
+    """The pairs read by their boxes, counted in one line with the least of their bound gaps,
+    and what bounded them as the second reading (mqucifer/print-shop#354)."""
+    boxed = [(i, r) for i, r in enumerate(results) if _boxed(r)]
+    exact = len(results) - len(boxed)
+    if not boxed:
+        report.numbers["by_boxes"] = {"pairs": 0, "beyond_mm": beyond}
+        return
+    i, least = min(boxed, key=lambda q: q[1]["box_gap_mm"])
+    by = {w: sum(r["box_by"] == w for _, r in boxed) for w in ("box", "hull")}
+    report.numbers["by_boxes"] = {
+        "pairs": len(boxed),
+        "beyond_mm": beyond,
+        "least_box_gap_mm": least["box_gap_mm"],
+        "least": i,
+    }
+    report.line(
+        f"{len(boxed)} pair(s) farther apart than any gap judged ({beyond:g} mm), read by their "
+        f"boxes: CLEAR, least box gap {least['box_gap_mm']:.4f} mm, pairs.{i}, {least['a']} | "
+        f"{least['b']}. A box gap is never more than the true gap, so each is in the record by "
+        f"it, box_gap_mm, with no gap_mm; the other {exact} pair(s) are read exactly. --exact "
+        "reads every pair exactly"
+    )
+    report.second(
+        f"the {len(boxed)} pair(s) read by their boxes: {by['box']} ruled out by their "
+        f"axis-aligned boxes and {by['hull']} by their convex hulls along a way between them, "
+        f"each a bound no more than the true gap, padded {HULL_PAD:g} mm on a STEP's mesh"
     )
 
 
@@ -1076,7 +1247,7 @@ def _lift_said(report: Report, results: list[dict[str, Any]], lift: dict[str, An
     """What a lifted pair's gap is: the play, or the lift itself where a face that seats meets."""
     moved, mm = lift["file"], abs(lift["mm"])
     for r in results:
-        if moved not in (r["a"].split("#")[0], r["b"].split("#")[0]):
+        if _boxed(r) or moved not in (r["a"].split("#")[0], r["b"].split("#")[0]):
             continue
         if r["verdict"] in ("TOUCHING", "INTERFERE"):
             report.note(

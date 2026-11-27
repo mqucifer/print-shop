@@ -726,6 +726,25 @@ def number_at(numbers: Any, path: str) -> Any:
     return here
 
 
+def _read_by_boxes(numbers: Any, path: str) -> str | None:
+    """Why `clearance`'s `pairs.N...` has no figure where that pair was read by its bounds alone,
+    far apart, with no exact gap (mqucifer/print-shop#354); else None."""
+    parts = path.split(".")
+    if len(parts) < 3 or parts[0] != "pairs" or not parts[1].isdigit():
+        return None
+    try:
+        pair = number_at(numbers, ".".join(parts[:2]))
+    except LookupError:
+        return None
+    if not isinstance(pair, dict) or pair.get("read_by") != "boxes":
+        return None
+    return (
+        f"`{'.'.join(parts[:2])}` was read by its boxes, farther apart than any gap the command "
+        f"judges, at least {pair.get('box_gap_mm')} mm, so it has no `{'.'.join(parts[2:])}`: "
+        "add `--exact` to the command to read every pair by its exact distance"
+    )
+
+
 @dataclass
 class Reading:
     """One need's check, as the harness ran it."""
@@ -829,6 +848,9 @@ def _judge_number(need: Need, reading: Reading, record: dict[str, Any]) -> Readi
     except LookupError:
         names = ", ".join(sorted(numbers)) or "none"
         reading.why = f"this answer has no number `{need.number}`: it has {names}"
+        boxed = _read_by_boxes(numbers, need.number)
+        if boxed is not None:
+            reading.why = boxed
         return reading
     if isinstance(raw, bool) or not isinstance(raw, int | float) or not math.isfinite(raw):
         reading.why = f"`{need.number}` is {raw!r}, not a number"
