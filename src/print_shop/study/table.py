@@ -50,6 +50,8 @@ def _reading(r: Reading) -> bool:
 def _cell_case(r: Reading, name: str) -> str:
     if _reading(r):
         return "reading"
+    if r.ruled_out and not r.cases:
+        return "ruled out"
     if r.error:
         if r.error.startswith("not read"):
             return "not read"
@@ -103,28 +105,33 @@ def table(result: StudyResult, part: str, cases: list[str], where: Path | None =
     out = [f"# Settings study: {part}", "",
            f"{len(own) - reading - cut} candidates of the model's own read"
            + (f" ({more})" if more else "") + " beside the profile's defaults, "
-           f"under {len(cases)} load case{'s' if len(cases) != 1 else ''}, by {result.model}, "
+           + (f"under {len(cases)} load case{'s' if len(cases) != 1 else ''}, " if cases
+              else "with no load cases, for time, grams and finish only, ")
+           + f"by {result.model}, "
            f"in {result.seconds / 60:.0f} min: {result.ended}. Nothing was printed or armed.",
+           *(["", f"The Sponsor's limits, binding on it: {result.limits}."]
+             if result.limits else []),
            "", f"Read within the host's budget, {result.budget or 'one job at a time'}: at most "
            f"{result.most_at_once or 1} slices and reads at once, each single-threaded, so each "
            "figure is what it is read alone.",
-           "", "Each case's cell is its worst figure as a share of its limit, and the margin "
-           "left. Every figure of a printed part rests on the infill model's published tests, "
-           "which no print has checked yet (mqucifer/print-shop#340); * is a figure whose core, "
-           "or the core its skin rests on, is below the density any published test of its "
-           "pattern reaches, so no test checks it.", "",
+           *(["", "Each case's cell is its worst figure as a share of its limit, and the "
+              "margin left. Every figure of a printed part rests on the infill model's "
+              "published tests, which no print has checked yet (mqucifer/print-shop#340); * is "
+              "a figure whose core, or the core its skin rests on, is below the density any "
+              "published test of its pattern reaches, so no test checks it."] if cases else []),
+           "",
            "Each candidate's Orca project, its regions as Orca's own modifiers, is linked in its "
            "row: open it in Orca to see them and its settings by eye.", "",
-           "| Candidate | Settings | Time | Grams | " + " | ".join(cases)
-           + " | Passes | Orca project |",
-           "|---|---|---|---|" + "---|" * len(cases) + "---|---|"]
+           "| " + " | ".join(["Candidate", "Settings", "Time", "Grams", *cases, "Passes",
+                              "Orca project"]) + " |",
+           "|" + "---|" * (len(cases) + 6)]
     for r in rows:
         passes = ("reading" if _reading(r) else "not read" if r.error.startswith("not read")
-                  else "yes" if r.passes else "no")
-        out.append(f"| {r.candidate.name} | {_escape(r.candidate.said())} | "
-                   f"{_cell_time(r, base)} | {_cell_grams(r, base)} | "
-                   + " | ".join(_cell_case(r, c) for c in cases)
-                   + f" | {passes} | {_project(r, where)} |")
+                  else "ruled out" if r.ruled_out else "yes" if r.passes else "no")
+        cells = [r.candidate.name, _escape(r.candidate.said()), _cell_time(r, base),
+                 _cell_grams(r, base), *(_cell_case(r, c) for c in cases), passes,
+                 _project(r, where)]
+        out.append("| " + " | ".join(cells) + " |")
     out.append("")
     chosen = result.recommendation
     if chosen is not None:
@@ -145,15 +152,21 @@ def table(result: StudyResult, part: str, cases: list[str], where: Path | None =
         out += ["", "The trade-off: no other passing candidate beats "
                 + ", ".join(r.candidate.name for r in best)
                 + " on time, grams and margin at once."]
-    # Those that fail: never one still reading, nor one the study's end cut off.
-    failing = [r for r in rows if not r.passes and not _reading(r)
+    # Those that fail: never one still reading, nor one the study's end cut off, nor one the
+    # Sponsor's limits ruled out, which are said apart.
+    failing = [r for r in rows if not r.passes and not _reading(r) and not r.ruled_out
                and not r.error.startswith("not read")]
+    ruled = [f"{r.candidate.name}: {r.ruled_out}" for r in rows if r.ruled_out]
+    ruled += [f"asked, never sliced: {said}" for said in result.ruled_out]
     unread = [r.candidate.name for r in rows if not _reading(r) and r.error.startswith("not read")]
     if failing:
         out += ["", "## Those that fail, and why", ""]
         out += [f"- {r.candidate.name}: {_escape(r.why_not())}" for r in failing]
     if unread:
         out += ["", f"Not read, as the study ended first: {', '.join(unread)}."]
+    if ruled:
+        out += ["", "## Ruled out by the Sponsor's limits", ""]
+        out += [f"- {_escape(line)}" for line in ruled]
     out += ["", "## Each candidate's figures", ""]
     for r in rows:
         why = f" ({r.candidate.why})" if r.candidate.why else ""
@@ -235,6 +248,7 @@ def as_plain(result: StudyResult, part: str) -> dict[str, Any]:
         "model_calls": result.model_calls, "seconds": result.seconds,
         "recommended": result.recommended, "reason": result.reason,
         "budget": result.budget, "most_at_once": result.most_at_once,
+        "limits": result.limits, "ruled_out": result.ruled_out,
         "lessons": result.lessons,
         "readings": [r.plain() for r in result.readings],
         "front": [r.candidate.name for r in front(result.readings)],
