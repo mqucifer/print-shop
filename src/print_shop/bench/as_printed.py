@@ -42,21 +42,20 @@ of sparse infill under it solid, isn't read: `load` isn't given it.
 
 Each cut is held to the core each layer has as Orca slices it (`checked`): the part's section,
 each face of it offset in by its walls with OCCT's 2D offset on its own, opened as Orca opens
-it, and cut by its sections its shells away, at 7 of its layers' planes spread over its height and at its own
-features' heights, just off each face in its layers' plane and at each concave edge's and
-cylinder's middle (`heights`). It's compared as shapes, so a miss isn't made up by an excess
-beside it: the core may be short of a layer's by no more than 2% of the walls along the
+it, and cut by its sections its shells away, at 7 of its layers' planes spread over its height
+and at its own features' heights, just off each face in its layers' plane and at each concave
+edge's and cylinder's middle (`heights`). It's compared as shapes, so a miss isn't made up by an
+excess beside it: the core may be short of a layer's by no more than 2% of the walls along the
 outline (`SHORT`), and over it by no more than 5% (`AGREE`), with 80% of the planes, and at
 least 3, read. It may leave no face of the core narrower than a bead by a curved face
 (`slivers`), unless OCCT can merge it into the faces round it (`healed`), when it's held to the
-part's shells and checked again. Where neither way holds, each is tried on the part with its
-own faces under a bead merged first (`simplified`), its core kept within the part's own shells;
-and where none holds, `load` says so, NO ANSWER, and never shows CalculiX's inside-out elements
-for a geometry the bench made. Only each point's end is tested along the layers, so a slot
-narrower than the shells between a point and the one it tests is passed over, and Orca's own
-rules for small areas, such as filling one under `minimum_sparse_infill_area` solid, aren't
-read: each leaves the core a little larger, and the part a little softer and weaker than
-printed.
+part's shells and checked again. Where neither way holds, each is tried on the part with its own
+faces under a bead merged first (`simplified`), its core kept within the part's own shells; and
+where none holds, `load` says so, NO ANSWER, and never shows CalculiX's inside-out elements for
+a geometry the bench made. Only each point's end is tested along the layers, so a slot narrower
+than the shells between a point and the one it tests is passed over, and Orca's own rules for
+small areas, such as filling one under `minimum_sparse_infill_area` solid, aren't read: each
+leaves the core a little larger, and the part a little softer and weaker than printed.
 
 **Regions** (`printed.Region`) cut the part into cells, each with the settings every region round
 it gives: a height range's first, then each volume's over it in order, the later over the
