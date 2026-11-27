@@ -318,16 +318,18 @@ def test_a_design_round_sets_what_load_says_as_it_goes_aside_before_its_output_i
     it's read, the reply is whole, whatever was said before it."""
     from print_shop.rounds import box
 
-    noise = "".join(
-        f"bench: step {k}.0 reading the joint j{k}\nbench: memory {k}.5 current=1 peak=2\n"
-        for k in range(8000)
-    )
-    assert len(noise) > box.KEEP
+    # Made by the child itself: Linux takes no argument past 128 KiB.
+    line = "bench: step {k}.0 reading the joint j{k}\nbench: memory {k}.5 current=1 peak=2\n"
+    count = 8000
+    assert count * len(line.format(k=count)) > box.KEEP
     child = (
-        f"import sys; sys.stderr.write({noise!r}); sys.stderr.flush(); "
-        "print('verdict: NO ANSWER: the reply'); sys.stdout.flush(); "
-        f"sys.stderr.write({SAID!r}); sys.exit({host.KILLED})"
+        "import sys\n"
+        f"for k in range({count}):\n"
+        f"    sys.stderr.write({line!r}.format(k=k))\n"
+        "sys.stderr.flush(); print('verdict: NO ANSWER: the reply'); sys.stdout.flush()\n"
+        f"sys.stderr.write({SAID!r}); sys.exit({host.KILLED})\n"
     )
+    assert len(child) < 4096
     monkeypatch.setattr(host, "image_id", lambda image=host.IMAGE: "sha256:x")
     monkeypatch.setattr(host, "container", lambda *_, **__: [sys.executable, "-c", child])
     ran = box.Box(tmp_path, 60).bench(["load", "a.json", "--parts"])
