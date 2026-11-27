@@ -27,6 +27,8 @@ LEFT = b"ISO-10303-21;\nDATA;\n#1=BLOCK('left',20.,20.,10.);\nENDSEC;\n"
 RIGHT = b"ISO-10303-21;\nDATA;\n#1=BLOCK('right',20.,20.,10.);\nENDSEC;\n"
 LEFT_SHA = hashlib.sha256(LEFT).hexdigest()
 RIGHT_SHA = hashlib.sha256(RIGHT).hexdigest()
+#: A made-up stand-in for a load, given and never placed or printed (mqucifer/print-shop#365).
+LOAD = b"ISO-10303-21;\nDATA;\n#1=BLOCK('load',40.,40.,0.4);\nENDSEC;\n"
 
 REQUEST = f"""\
 Bolt the two given blocks together, face to face, as one assembly. They're approved: don't
@@ -51,6 +53,21 @@ BROKEN_DOWN = tool(
     ],
     joins=[{"parts": ["left", "right"], "how": "bolted face to face"}],
     look=["two blocks side by side"],
+    **{"from": "the request"},
+)
+#: A breakdown with a part of the run's own beside the given blocks: a part run's.
+BROKEN_DOWN_OWN = tool(
+    "breakdown",
+    parts=[
+        {"name": "left", "what": "the given left block, unchanged"},
+        {"name": "right", "what": "the given right block, unchanged"},
+        {"name": "bracket", "what": "a bracket made here, holding the blocks together"},
+    ],
+    joins=[
+        {"parts": ["left", "bracket"], "how": "screwed to the bracket"},
+        {"parts": ["right", "bracket"], "how": "screwed to the bracket"},
+    ],
+    look=["two blocks on a bracket"],
     **{"from": "the request"},
 )
 MEET = {
@@ -116,12 +133,14 @@ class Box(Answers):
         return super().helper(module, args, timeout, where)
 
 
-def given(root: Path) -> list[Path]:
+def given(root: Path, stand_in: bool = False) -> list[Path]:
     folder = root / "given"
     folder.mkdir(exist_ok=True)
     (folder / "left.step").write_bytes(LEFT)
     (folder / "right.step").write_bytes(RIGHT)
-    return [folder / "left.step", folder / "right.step"]
+    if stand_in:
+        (folder / "load.step").write_bytes(LOAD)
+    return [folder / "left.step", folder / "right.step", *([folder / "load.step"] * stand_in)]
 
 
 def _run(
@@ -131,13 +150,14 @@ def _run(
     assembly: dict[str, Any] | None = None,
     request: str = REQUEST,
     assembly_run: bool = True,
+    stand_in: bool = False,
 ) -> Run:
     model = Scripted(*[[t] for t in turns], [tool("blocked", reason="Out of turns.")])
     run = Run.start(
         root / "runs",
         "r",
         request,
-        given(root),
+        given(root, stand_in),
         model,
         sleep=lambda _: None,
         assembly_run=assembly_run,
@@ -412,15 +432,16 @@ def test_one_given_part_placed_alone_is_no_assembly(tmp_path: Path) -> None:
 
 
 def test_a_part_run_naming_an_assembly_file_is_refused_as_on_main(tmp_path: Path) -> None:
-    """Only a run its starter or a person marked as an assembly run may finish with one: the
-    model can't make a part run finish having made nothing."""
+    """A run that's no assembly run, unmarked, of no assembly kind, with a part of its own in
+    its breakdown, can't finish having made nothing: it's held to the part rules."""
     run = _run(
         tmp_path,
-        BROKEN_DOWN,
+        BROKEN_DOWN_OWN,
         tool("needs", needs=[MEET]),
         tool("done", **DONE),
         assembly_run=False,
     )
+    assert run._assembly_run_by() is None
     done = _refused(run)
     assert (done["why"], done["reply"]) == (
         "not_geometry", "`part` names STEP or STL files, and `table.json` isn't one."
@@ -431,7 +452,7 @@ def test_a_part_run_naming_an_assembly_file_is_refused_as_on_main(tmp_path: Path
 def test_a_person_marks_a_run_already_started_as_an_assembly_run(tmp_path: Path) -> None:
     run = _run(
         tmp_path,
-        BROKEN_DOWN,
+        BROKEN_DOWN_OWN,
         tool("needs", needs=[MEET]),
         tool("done", **DONE),
         assembly_run=False,
@@ -443,6 +464,131 @@ def test_a_person_marks_a_run_already_started_as_an_assembly_run(tmp_path: Path)
     ]
     assert [e["by"] for e in marked] == ["sponsor"]
     assert Run.load(run.folder, run.session.send).state.assembly_run is True
+
+
+# An assembly run by its request's kind, or its breakdown (mqucifer/print-shop#365)
+
+
+def test_an_unmarked_run_whose_breakdown_places_only_given_parts_finishes_with_its_assembly(
+    tmp_path: Path,
+) -> None:
+    """A design run's assembly was stopped at `done` with every need passing: it wasn't marked,
+    so a JSON file in `part` was refused. Its breakdown names only the given blocks."""
+    run = _run(
+        tmp_path,
+        BROKEN_DOWN,
+        tool("needs", needs=[MEET]),
+        tool("done", **DONE),
+        assembly_run=False,
+    )
+    assert run.drive().name == "met"
+    assert run._assembly_run_by() == "breakdown"
+    done = done_reply(run)
+    assert done["outcome"] == "ok" and done["detail"]["met"] is True, done["reply"]
+    assert "The result is an assembly of given parts: `table.json`" in done["reply"]
+    assert f"- `references/left.step`, sha256 {LEFT_SHA}, as given (request)" in done["reply"]
+    stop = (run.folder / "approvals" / "1" / "stop.md").read_text()
+    assert f"## {assembled.HEADING}" in stop and "None: this run made no file to print." in stop
+    (row,) = run.ledger.rows("SELECT * FROM assemblies")
+    assert (row["assembly"], row["met"], json.loads(row["made"])) == ("table.json", 1, [])
+
+
+def test_a_request_of_the_assembly_kind_finishes_with_its_assembly(tmp_path: Path) -> None:
+    request = REQUEST.replace("## Stops", "## Kind\nassembly\n\n## Stops")
+    run = _run(
+        tmp_path,
+        BROKEN_DOWN_OWN,
+        tool("needs", needs=[MEET]),
+        tool("done", **DONE),
+        request=request,
+        assembly_run=False,
+    )
+    assert run._assembly_run_by() == "kind"
+    assert run.drive().name == "met"
+    assert done_reply(run)["detail"]["met"] is True
+
+
+def test_an_assembly_run_that_adds_a_part_holds_it_to_the_part_rules(
+    tmp_path: Path,
+) -> None:
+    """A run that adds a printed file names it beside the assembly, and it's read with every
+    check, as on a marked run."""
+    request = REQUEST.replace("## Stops", "## Kind\nassembly\n\n## Stops")
+    run = _run(
+        tmp_path,
+        BROKEN_DOWN_OWN,
+        tool("needs", needs=[MEET, BRACKET]),
+        tool(
+            "done",
+            **{**DONE, "part": ["table.json", "bracket.step"]},
+            on_bed={"bracket.step": "-z"},
+        ),
+        answers=(TOUCH, "CLEAR", TOUCH, "FAIL"),
+        request=request,
+        assembly_run=False,
+    )
+    assert run.drive().name == "blocked"
+    done = done_reply(run)
+    assert done["detail"]["met"] is False, done["reply"]
+    asked: list[list[str]] = run.box.asked  # type: ignore[attr-defined]
+    assert ["thin", "bracket.step"] in [a[2:] for a in asked], asked
+    assert not any("thin" in a and any("references/" in w for w in a) for a in asked)
+    standing = json.loads((run.folder / "rounds" / "001" / "standing.json").read_text())
+    assert [(one["file"], one["passed"]) for one in standing["printable"]] == [
+        ("bracket.step", False)
+    ]  # fmt: skip
+
+
+def test_a_given_stand_in_failing_thin_isnt_held_against_the_assembly(tmp_path: Path) -> None:
+    """At the same stop the harness listed a stand-in and a placed copy of an approved part as
+    part files whose last `thin` failed. A given file is never printed."""
+    run = _run(
+        tmp_path,
+        BROKEN_DOWN,
+        tool("needs", needs=[MEET]),
+        tool("bench", command="thin references/load.step"),
+        tool("bench", command="thin references/left.step --nozzle 0.6"),
+        tool(
+            "ask",
+            question="Do the blocks sit right with the load on them?",
+            variants=[
+                {"name": "A", "files": ["references/left.step", "references/right.step"]},
+                {"name": "B", "files": ["references/load.step"]},
+            ],
+        ),
+        tool("done", **DONE),
+        answers=("FAIL", "FAIL", TOUCH, TOUCH, TOUCH),
+        assembly_run=False,
+        stand_in=True,
+    )
+    assert run.drive().name == "met"
+    benched = [r for r in replies(run) if r["name"] == "bench"]
+    said = benched[0]["reply"]
+    assert "`references/load.step`: given, not printed, so it isn't read or held" in said
+    assert "whose last `thin` failed" not in said and "Checks whose latest try" not in said
+    assert benched[0]["detail"]["thin_on_given"] == ["references/load.step"]
+    assert "Checks whose latest try" not in benched[1]["reply"]
+    assert run._thin_failing() == [] and run._holding() == []
+    # The ask draws the given files, and reads none of them for printing: it says why.
+    ask = [r for r in replies(run) if r["name"] == "ask"][-1]
+    assert ask["outcome"] == "ok", ask["reply"]
+    assert "given, not printed, so it isn't read or held for printing" in ask["reply"]
+    assert "whose last `thin` failed" not in ask["reply"]
+    assert run.state.draft is None or not run.state.draft.get("thin_failing")
+    asked: list[list[str]] = run.box.asked  # type: ignore[attr-defined]
+    # The model's own two `thin` calls, and none of the harness's, which run with `--out`.
+    harness = [a for a in asked if a[:1] == ["--out"] and a[2:3] == ["thin"]]
+    assert not any(w.startswith("references/") for a in harness for w in a), harness
+    assert [a for a in asked if a[:1] == ["thin"]] == [
+        ["thin", "references/load.step"], ["thin", "references/left.step", "--nozzle", "0.6"]
+    ]  # fmt: skip
+    # `done` passes with the assembly file, and says why the stand-in isn't read.
+    done = done_reply(run)
+    assert done["detail"]["met"] is True, done["reply"]
+    assert "Nor on the other given files, `references/load.step`" in done["reply"]
+    stop = (run.folder / "approvals" / "1" / "stop.md").read_text()
+    assert "whose last `thin` failed" not in stop
+    assert "Nor on the other given files, `references/load.step`" in stop
 
 
 # A reference replaced while the run goes on
