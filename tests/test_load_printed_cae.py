@@ -298,3 +298,105 @@ def test_a_print_load_can_t_read_says_why_and_nothing_is_solved(
     assert answer.verdict == "NO ANSWER" and answer.code == 2, answer.text
     assert says in answer.text
     assert math.isfinite(answer.record["seconds"])
+
+
+#: The bowed bars of `make_fixtures.bowed` (mqucifer/print-shop#356).
+BOWED = ("bowed", "bowed-up", "bowed-notched")
+
+
+def test_a_bowed_bar_s_walls_are_cut_with_no_sliver_and_never_read_solid_unsaid(cae: Any) -> None:
+    """The cut on the bowed bars, in the second image (`cae_cases/as_printed_cut.py`): main's
+    common of 16 copies left the notched leg's core 16 faces under a bead's width by its
+    B-spline faces, steps at its concave edges, and the lofted bar bowed along its layers no
+    core at all, read solid and said nothing. Now neither: the offset cuts each, and with the
+    offset refused, as on a real leg, the copies mitred at the notch's concave edges leave no
+    sliver, and the empty common is refused in words; each cut held to each layer's own
+    outline offset in by its walls within `AGREE`."""
+    work: Path = cae.work
+    shutil.copy(CASES / "as_printed_cut.py", work / "as_printed_cut.py")
+    done = host.run(["as_printed_cut.py"], work, python=True, image=host.CAE_IMAGE)
+    assert done.returncode == 0, done.stdout + done.stderr
+    found = json.loads(done.stdout.strip().splitlines()[-1])
+    for name in BOWED:
+        now = found[name]["now"]
+        assert now["slivers"] == 0 and now["checked"] >= max(5, 0.8 * now["planes"]), now
+        assert now["short"] <= as_printed.SHORT and now["over"] <= as_printed.AGREE, now
+        assert found[name]["refused"].startswith(
+            f"the skin couldn't be cut round the part {name}'s curved faces: OCCT couldn't make "
+            "its offset"
+        ), found[name]["refused"]
+    assert found["bowed-notched"]["main"]["slivers"] >= 8
+    mitred = found["bowed-notched"]["copies"]
+    assert "mitred at 2 concave edge(s)" in mitred["cut"] and mitred["slivers"] == 0
+    assert mitred["short"] <= as_printed.SHORT and mitred["over"] <= as_printed.AGREE
+    assert mitred["core_mm3"] == pytest.approx(found["bowed-notched"]["now"]["core_mm3"],
+                                               rel=0.005)  # fmt: skip
+    # Bowed along its layers its sections are the bar's, moved up and down: its shells, not
+    # its walls, set its sloped faces, so its core is the straight bar's.
+    side = as_printed.wall_thickness(2, 0.45, 0.2)
+    assert found["bowed-up"]["main"]["core_mm3"] == 0
+    assert found["bowed-up"]["now"]["core_mm3"] == pytest.approx(
+        (120 - 2 * side) * (20 - 2 * side) * 8.4, rel=0.01)
+    assert "short of a layer's own outline" in found["bowed-up"]["copies"]["refused"]
+
+
+@pytest.mark.parametrize("name", BOWED)
+def test_a_bowed_bar_reads_as_printed_between_solid_and_its_core_alone(
+    cae: Any, name: str
+) -> None:
+    """Each bowed bar, held at its root and loaded at x 110, meshes and solves as printed at
+    the defaults with nothing turned inside out, moves more than it does solid and less than
+    it would all core, the core's stiffness along it; and its solid read is as it was."""
+    work: Path = cae.work
+    at = ",".join(f"{v:g}" for v in json.loads((work / "load/bowed-at.json").read_text())[name])
+    solid = cae("load", f"load/{name}.json", "--weight", "1", "--at", at)
+    printed = cae("load", f"load/printed-{name}.json", "--weight", "1", "--at", at)
+    assert solid.verdict != "NO ANSWER" and "printed" not in solid.numbers, solid.text
+    assert printed.verdict != "NO ANSWER", printed.text
+    assert "inside out" not in printed.text
+    cell = printed.numbers["printed"]["bar"][0]
+    assert cell["cut_planes_read"] >= max(5, 0.8 * cell["cut_planes"]), cell
+    assert cell["core_mm3"] > 0, cell
+    assert cell["cut_short_walls_pct"] <= 100 * as_printed.SHORT, cell
+    assert cell["cut_over_walls_pct"] <= 100 * as_printed.AGREE, cell
+    assert f"its walls cut by {cell['cut']}" in printed.text
+    found = infill.core(Settings(pattern="grid", infill=20, infill_angle=0), MATERIALS["petg"])
+    up, first, second = np.eye(3)[2], np.eye(3)[0], np.eye(3)[1]
+    along = infill.pulled(found.stiffness(up, first, second), first)
+    moves, alone = printed.numbers["moves_mm"], solid.numbers["moves_mm"]
+    assert alone < moves < alone * MODULUS / along
+
+
+def test_the_cut_s_check_holds_it_to_each_layer_and_to_the_part(cae: Any) -> None:
+    """mqucifer/print-shop#356's review, each case a cut made wrong on purpose
+    (`cae_cases/as_printed_checks.py`):
+
+    - a block and a fin thinner than its walls: each layer's core is the block's, though OCCT's
+      2D offset of the two together fails for both. An empty cut is refused, never read solid,
+      and the 16 copies' cut, the block's alone, holds;
+    - a bar's core moved 0.5 mm across, the same area each layer, isn't the cut; nor is one cut
+      4% of its walls too far in, the unsafe side, while 4% too little is within `AGREE`;
+    - a bar with a ledge, its core missing a slab between the spread planes: read at planes
+      just off the ledge, the cut missing it isn't taken;
+    - a bar whose layers can be read at one plane only is refused, not passed on one;
+    - a core cut from the bar with a lump on it is kept within the bar's own shells."""
+    work: Path = cae.work
+    shutil.copy(CASES / "as_printed_checks.py", work / "as_printed_checks.py")
+    done = host.run(["as_printed_checks.py"], work, python=True, image=host.CAE_IMAGE)
+    assert done.returncode == 0, done.stdout + done.stderr
+    found = json.loads(done.stdout.strip().splitlines()[-1])
+    fin = found["fin"]
+    assert fin["layer_mm2"] == pytest.approx(fin["true_mm2"], rel=1e-6)
+    assert "the skin couldn't be cut round the part test's faces" in fin["empty"]["refused"]
+    assert "short of a layer's own outline" in fin["empty"]["refused"]
+    side = as_printed.wall_thickness(2, 0.45, 0.2)
+    assert fin["copies"]["cut"] == "its common with 16 copies of itself"
+    # The block's core over its 40 mm, less its shells, and a strip of the base's under it.
+    assert fin["copies"]["core_mm3"] > (10 - 2 * side) ** 2 * (40 - 1.0 - 2.6)
+    for name in ("shifted", "short", "ledge"):
+        assert found[name]["cut"] == "its common with 16 copies of itself", (name, found[name])
+    assert found["over"]["cut"] == "OCCT's offset of it stretched along its layers"
+    assert found["over"]["core_mm3"] > found["shifted"]["core_mm3"]
+    assert "only 1 of" in found["unread"]["refused"]
+    assert "planes could be read to check it" in found["unread"]["refused"]
+    assert found["outside"]["cut"] is not None and found["outside"]["outside_mm3"] == 0.0
