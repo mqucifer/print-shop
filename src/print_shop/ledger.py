@@ -95,6 +95,7 @@ from print_shop.setup.proposal import PAUSE, Change, Proposal
 from print_shop.setup.reading import Flag, SliceReading
 from print_shop.sliced import SlicedRecord
 from print_shop.slicer.store import ProfilesUsed
+from print_shop.study.schema import SCHEMA as STUDIES_SCHEMA
 
 __all__ = [
     "DEFAULT_PATH",
@@ -589,6 +590,8 @@ class Ledger:
         self._conn.executescript(SLICED_SCHEMA)
         self._conn.executescript(PLATES_SCHEMA)
         self._conn.executescript(ARMED_SCHEMA)
+        # A part's settings studies and their lessons (mqucifer/print-shop#339): no print.
+        self._conn.executescript(STUDIES_SCHEMA)
         self._has_sliced = self._has_swaps = True
         self._has_plates = True
 
