@@ -68,6 +68,15 @@ TIMEOUTS = {"optimise": 3600}
 #: one pass that could go on to two passes says so first (`ABLE`), so that where the host stops
 #: it at `TIMEOUT`, past what its clock foresaw, the reply names `--parts` (`past`).
 TWO_PASSES = 3600
+#: And its memory, for `load` that asks for two passes with `--parts` (mqucifer/print-shop#336):
+#: a design run's whole table, 37 parts with 36 through joints and 4 latched dovetails, its
+#: leading thousands of small round faces, was killed at `MEMORY` meshing pass 1's whole. Read
+#: under 6g it held 3.32 GiB at the most meshing that whole with its sides curved, `load`'s own
+#: process at 1.0 GiB of it, and 3.66 GiB meshing it again straight-sided, before the curved
+#: try's mesh was let go first. Docker here has about 12.5 GB, and at most two design runs read
+#: at once: two of these are 8 of it. Every other command, and a `load` without `--parts`,
+#: keeps `MEMORY`, so what each proves of the 3 GiB stands.
+TWO_PASSES_MEMORY = "4g"
 OFFER = "BENCH_TIMEOUT_TWO_PASSES"
 TAKEN = "bench: two passes take the longer limit"
 ABLE = "bench: two passes could read it"
@@ -145,9 +154,12 @@ def container(
     workdir: str = "/work",
     image: str = IMAGE,
     env: dict[str, str] | None = None,
+    memory: str | None = None,
 ) -> list[str]:
     """The `docker run` for a command over a working directory, in either image under the same
-    limits. It holds no secret. `env` is more of its environment, none of it a secret either."""
+    limits, but for the memory a command may be given (`memory_for`). It holds no secret. `env`
+    is more of its environment, none of it a secret either."""
+    memory = MEMORY if memory is None else memory
     user = f"{os.getuid()}:{os.getgid()}"
     more = [word for key, value in (env or {}).items() for word in ("-e", f"{key}={value}")]
     return [
@@ -161,9 +173,9 @@ def container(
         "--cpus",
         CPUS,
         "--memory",
-        MEMORY,
+        memory,
         "--memory-swap",
-        MEMORY,
+        memory,
         "--pids-limit",
         PIDS,
         "--read-only",
@@ -253,6 +265,12 @@ def asks_two_passes(args: list[str]) -> bool:
     return word == "load" and "--parts" in args[args.index(word) + 1 :]
 
 
+def memory_for(args: list[str]) -> str:
+    """The memory a bench command runs in: `TWO_PASSES_MEMORY` for a `load` that asks for two
+    passes with `--parts`, and `MEMORY` for every other."""
+    return TWO_PASSES_MEMORY if asks_two_passes(args) else MEMORY
+
+
 def offered(args: list[str]) -> int | None:
     """The longer limit a bench command may take up as it runs, or None: `TWO_PASSES` for a
     `load` that may come to two passes, where it isn't already given it."""
@@ -292,12 +310,14 @@ def run(
     env = {"BENCH_TIMEOUT": str(timeout)}
     if longer is not None:
         env[OFFER] = str(longer)
+    memory = MEMORY if python else memory_for(args)
     argv = container(
         work,
         command,
         name,
         image=image or (IMAGE if python else image_for(args)),
         env=env,
+        memory=memory,
     )
     done, limit, could = _waited(argv, timeout, longer)
     if done is None:
@@ -308,7 +328,7 @@ def run(
         trace.extend(said)
     if done.returncode == KILLED:
         # A process that's killed takes its buffered output with it, so this may be all there is.
-        return subprocess.CompletedProcess(argv, 2, done.stdout + killed(said), err)
+        return subprocess.CompletedProcess(argv, 2, done.stdout + killed(said, memory), err)
     return subprocess.CompletedProcess(argv, done.returncode, done.stdout, err)
 
 
@@ -328,11 +348,13 @@ def _gib(count: str) -> str:
     return f"{int(count) / 2**30:.2f} GiB" if count.isdigit() else "unknown"
 
 
-def killed(said: list[str]) -> str:
+def killed(said: list[str], memory: str | None = None) -> str:
     """The verdict of a command the kernel killed: where it had said it was, the step it was in
     and when, and the most the container had held when it last said (mqucifer/print-shop#336).
-    A command that says nothing as it goes is said to be killed, as before."""
-    message = f"verdict: NO ANSWER: it was killed, most likely at the {MEMORY} memory limit"
+    A command that says nothing as it goes is said to be killed, as before. `memory` is the
+    limit it ran under, `MEMORY` unless said."""
+    memory = MEMORY if memory is None else memory
+    message = f"verdict: NO ANSWER: it was killed, most likely at the {memory} memory limit"
     steps = [
         line[len(STEP_LINE) + 1 :].split(" ", 1) for line in said if line.startswith(STEP_LINE)
     ]
@@ -347,7 +369,7 @@ def killed(said: list[str]) -> str:
         found = dict(f.split("=", 1) for f in fields if "=" in f)
         message += (
             f". The container's memory: at most {_gib(found.get('peak', '-'))} of its "
-            f"{MEMORY} by {seconds} s in, when it last said, {_gib(found.get('current', '-'))} "
+            f"{memory} by {seconds} s in, when it last said, {_gib(found.get('current', '-'))} "
             f"then, {_gib(found.get('shmem', '-'))} of it files in /tmp"
         )
     return message + "\n"

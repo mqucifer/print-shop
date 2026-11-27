@@ -6,11 +6,11 @@ Run from the folder the assembly is in, as `scripts/bench.py load ...` is:
     uv run python <print-shop>/scripts/load_trace.py [--memory 3g] load ASSEMBLY.json ARGS...
 
 It runs the `load` as the bench does, in the second image, under the bench's limits, but for
-the memory, which `--memory` may set higher than the bench's own, so a case that's killed at the
-bench's can be followed past it. It prints only steps, counts, seconds and memory: each part and
-joint by a number and each joint's kind, never its name; any figure in a step's words, as a
-mesh's size, as `#`; and the verdict's word, never its reasons. Nothing else is printed, and
-the reply `load` saves stays where `load` saves it.
+the memory, which `--memory` may set higher than the bench's own (`host.memory_for`), so a case
+that's killed at the bench's can be followed past it. It prints only steps, counts, seconds and
+memory: each part and joint by a number and each joint's kind, never its name; any figure in a
+step's words, as a mesh's size, as `#`; and the verdict's word, never its reasons. Nothing else
+is printed, and the reply `load` saves stays where `load` saves it.
 """
 
 from __future__ import annotations
@@ -103,7 +103,11 @@ def report(trace: list[str], said: list[tuple[str, str]], most: int = 12) -> lis
 
 def main(argv: list[str]) -> int:
     top = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
-    top.add_argument("--memory", default=host.MEMORY, help="the container's memory, as docker's")
+    top.add_argument(
+        "--memory",
+        default=None,
+        help="the container's memory, as docker's; the bench's own for the command unless given",
+    )
     top.add_argument("command", nargs=argparse.REMAINDER)
     args = top.parse_args(argv)
     if args.command[:1] != ["load"] or len(args.command) < 2:
@@ -111,11 +115,13 @@ def main(argv: list[str]) -> int:
     if host.image_id(host.CAE_IMAGE) is None:
         print(host.missing(host.CAE_IMAGE))
         return 3
-    host.MEMORY = args.memory
+    if args.memory is not None:
+        host.MEMORY = host.TWO_PASSES_MEMORY = args.memory
+    memory = host.memory_for(args.command)
     trace: list[str] = []
     done = host.run(args.command, Path.cwd(), trace=trace)
     said = names(Path(args.command[1]))
-    print(f"load under {args.memory}: exit {done.returncode}")
+    print(f"load under {memory}: exit {done.returncode}")
     found = re.search(r"^verdict: ([A-Z ]+?)(:|$)", done.stdout, re.M)
     print(f"verdict: {found.group(1) if found else 'none'}")
     if done.returncode == 2 and "it was killed" in done.stdout:

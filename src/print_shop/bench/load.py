@@ -2262,11 +2262,16 @@ def _solved(
         with _quiet():
             return _read_solved(assembly, model(False), doc, size)
     except _Curved as curved:
-        doc = App.newDocument("Load")
-        with _quiet():
-            found = _read_solved(assembly, model(True), doc, size)
-        found["straight"] = str(curved)
-        return found
+        why = str(curved)
+    # Meshed again outside the `except`, so what the curved try held, its model and its mesh,
+    # which its traceback keeps, is let go first (mqucifer/print-shop#336): held through the
+    # straight try, a design run's whole table had 0.8 GiB more in use there.
+    give_back()
+    doc = App.newDocument("Load")
+    with _quiet():
+        found = _read_solved(assembly, model(True), doc, size)
+    found["straight"] = why
+    return found
 
 
 def _read_solved(assembly: Assembly, model: _Model, doc: Any, size: float) -> dict[str, Any]:

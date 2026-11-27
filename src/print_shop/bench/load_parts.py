@@ -53,6 +53,7 @@ import numpy as np
 
 from . import load
 from .assembly import AXES, DIAMETER, Assembly, Held, PartAt
+from .cae import give_back
 from .report import NoAnswer
 
 #: A square bore's half width over the round one's radius, in mm: so it holds the round one
@@ -500,11 +501,14 @@ def _alone_solved(make: Any) -> dict[str, Any]:
         with load._quiet():
             return _alone_read(make(False), doc)
     except load._Curved as curved:
-        doc = App.newDocument("Alone")
-        with load._quiet():
-            found = _alone_read(make(True), doc)
-        found["straight"] = str(curved)
-        return found
+        why = str(curved)
+    # Outside the `except`, so the curved try's mesh is let go first, as the whole's is.
+    give_back()
+    doc = App.newDocument("Alone")
+    with load._quiet():
+        found = _alone_read(make(True), doc)
+    found["straight"] = why
+    return found
 
 
 def _alone_read(model: _Alone, doc: Any) -> dict[str, Any]:

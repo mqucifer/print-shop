@@ -31,7 +31,8 @@ and every other command, and a script, keeps the run's own `command_seconds`. A 
 at that limit, of an assembly two passes could read (`host.ABLE`), is told to ask for them with
 `--parts` (`host.past`). And a command killed for memory says the step it was in and the most the
 container had held, from what `load` says as it goes, as from `host.run` (`host.killed`,
-mqucifer/print-shop#336).
+mqucifer/print-shop#336). A `load --parts` runs in the larger memory `host.memory_for` gives it,
+as from `host.run`.
 """
 
 from __future__ import annotations
@@ -128,7 +129,10 @@ class Box:
         if timeout is None:
             timeout = host.TWO_PASSES if host.asks_two_passes(args) else None
             longer = host.offered(args)
-        return self._run(host.bench_command(args), where, timeout, image, longer=longer)
+        return self._run(
+            host.bench_command(args), where, timeout, image, longer=longer,
+            memory=host.memory_for(args),
+        )  # fmt: skip
 
     def helper(
         self, module: str, args: list[str], timeout: int = 120, where: Path | None = None
@@ -151,6 +155,7 @@ class Box:
         image: str = host.IMAGE,
         env: dict[str, str] | None = None,
         longer: int | None = None,
+        memory: str | None = None,
     ) -> Ran:
         """`command` in a container, waited for `timeout`, or the run's own limit; or `longer`
         from when its output says it took that up (`host.TAKEN`)."""
@@ -162,7 +167,9 @@ class Box:
         if longer is not None:
             told[host.OFFER] = str(longer)
         try:
-            argv = host.container(where or self.work, command, name, image=image, env=told)
+            argv = host.container(
+                where or self.work, command, name, image=image, env=told, memory=memory
+            )
             process = subprocess.Popen(argv, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
         except OSError as exc:
             raise Gone(f"docker couldn't be started: {type(exc).__name__}") from exc
@@ -234,7 +241,7 @@ class Box:
             text += "\n" + host.past(limit, could)
             code = 2 if command[1:2] == ["-I"] else 124
         elif code == host.KILLED:
-            text += "\n" + host.killed(said)
+            text += "\n" + host.killed(said, memory)
             code = 2 if command[1:2] == ["-I"] else host.KILLED
         return Ran(code, text, seconds, size[1], timed_out)
 

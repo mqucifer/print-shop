@@ -158,7 +158,8 @@ def test_a_killed_load_run_by_the_host_says_where_it_was(
         monkeypatch, tmp_path, _child("its own\n" + SAID, host.KILLED), args, trace=trace
     )
     assert done.returncode == 2
-    assert done.stdout == host.killed(SAID.splitlines())
+    assert done.stdout == host.killed(SAID.splitlines(), host.memory_for(args))
+    assert f"most likely at the {host.memory_for(args)} memory limit" in done.stdout
     assert "Where it was: the second pass's part post-upper0 on its own" in done.stdout
     assert done.stderr == "its own\n", "what it says as it goes is the host's, not passed on"
     assert trace == SAID.splitlines()
@@ -188,7 +189,7 @@ def test_a_design_round_s_killed_load_says_where_it_was(
     for args in (["load", "a.json", "--weight", "1"], ["load", "a.json", "--parts"]):
         ran = box.Box(tmp_path, 60).bench(args)
         assert ran.code == 2, ran.output
-        assert ran.output == "read\n\n" + host.killed(SAID.splitlines())
+        assert ran.output == "read\n\n" + host.killed(SAID.splitlines(), host.memory_for(args))
 
 
 def test_what_the_process_freed_is_given_back_before_gmsh_and_calculix_and_after_each_step(
@@ -271,3 +272,38 @@ def test_the_diagnostic_says_no_name_and_no_figure(tmp_path: Path) -> None:
         "     1.0      8.0  1.00 2.00  2.00 0.00  0.00 0.00  reading the part part2, at # mm"
     )
     assert "leg" not in "\n".join(lines) and "4 mm" not in "\n".join(lines)
+
+
+def test_a_load_in_two_passes_asked_for_is_given_the_larger_memory_and_nothing_else_is(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """mqucifer/print-shop#336: a design run's whole table meshed pass 1's whole in 3.32 GiB at
+    the most, past the 3 GiB. `load --parts` is given `TWO_PASSES_MEMORY`, by `host.run` and by
+    a design round's `Box`, as it's given the hour; a plain `load`, every other command and a
+    script keep `MEMORY`, so what each proves of the 3 GiB stands."""
+    from print_shop.rounds import box
+
+    assert (host.MEMORY, host.TWO_PASSES_MEMORY) == ("3g", "4g")
+    given: list[str | None] = []
+
+    def container(*_: Any, memory: str | None = None, **__: Any) -> list[str]:
+        given.append(memory)
+        return [sys.executable, "-c", "pass"]
+
+    monkeypatch.setattr(host, "image_id", lambda image=host.IMAGE: "sha256:x")
+    monkeypatch.setattr(host, "code_version", lambda: "abc")
+    real = host.container
+    monkeypatch.setattr(host, "container", container)
+    host.run(["load", "a.json", "--weight", "1", "--parts"], tmp_path)
+    host.run(["--out", "o", "load", "a.json", "--parts"], tmp_path)
+    host.run(["load", "a.json", "--weight", "1"], tmp_path)
+    host.run(["bend", "c.step", "--parts"], tmp_path)
+    host.run(["load.py", "--parts"], tmp_path, python=True)
+    rounds = box.Box(tmp_path, 60)
+    rounds.bench(["load", "a.json", "--parts"])
+    rounds.bench(["load", "a.json"])
+    rounds.python("make.py")
+    assert given == ["4g", "4g", "3g", "3g", "3g", "4g", "3g", None]
+    for memory, said in ((None, "3g"), ("4g", "4g")):
+        argv = real(tmp_path, ["x"], "n", memory=memory)
+        assert argv[argv.index("--memory") + 1] == argv[argv.index("--memory-swap") + 1] == said
