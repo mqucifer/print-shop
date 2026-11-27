@@ -27,6 +27,7 @@ from tests.fakes import STORE_PROFILES
 from tests.test_settings_study import (  # noqa: F401 - `part` is a fixture
     CASES,
     THREE_WALLS,
+    WAIT,
     Model,
     fake_loading,
     fake_slicing,
@@ -153,7 +154,7 @@ def test_a_refused_region_isnt_sliced_and_its_reason_reaches_the_model(part: Stu
         {"joints": ["bar+post-bolt-1"], "margin": 2, "walls": 6}]})
     two = ("read", {"why": "the walls its depth holds", "regions": [
         {"joints": ["bar+post-bolt-1"], "margin": 2, "walls": 2}]})
-    model = Model([six], [two], [THREE_WALLS],
+    model = Model([six], [two, WAIT], [THREE_WALLS, WAIT],
                   [("recommend", {"candidate": "c1", "reason": "r"})])
     result = run(StudyLoop(chat=model), part)
     reads = [c.result for c in result.calls if c.tool == "read"]
@@ -193,8 +194,8 @@ def test_each_candidates_orca_project_is_linked_from_its_row_and_the_recommendat
 
     part.slicing, part.loading = projects, fake_loading([])
     part.workdir = out / "candidates"
-    model = Model([THREE_WALLS], [("recommend", {"candidate": "c1", "reason": "r"})],
-                  [("read", {"why": "w", "settings": {"walls": 4}})],
+    model = Model([THREE_WALLS, WAIT], [("recommend", {"candidate": "c1", "reason": "r"})],
+                  [("read", {"why": "w", "settings": {"walls": 4}}), WAIT],
                   [("recommend", {"candidate": "c1", "reason": "r"})])
     result = run(StudyLoop(chat=model), part)
     text = table(result, "bar", [c.name for c in CASES], where=out)
@@ -216,8 +217,8 @@ def test_without_its_folder_the_link_is_the_projects_whole_path(
         return sliced
 
     part.slicing, part.loading = projects, fake_loading([])
-    model = Model([THREE_WALLS], [("recommend", {"candidate": "none", "reason": "r"})],
-                  [("read", {"why": "w", "settings": {"walls": 4}})],
+    model = Model([THREE_WALLS, WAIT], [("recommend", {"candidate": "none", "reason": "r"})],
+                  [("read", {"why": "w", "settings": {"walls": 4}}), WAIT],
                   [("recommend", {"candidate": "none", "reason": "r"})])
     text = table(run(StudyLoop(chat=model), part), "bar", [c.name for c in CASES])
     assert f"[part.3mf](<{(part.workdir / 'defaults' / 'part.3mf').as_posix()}>)" in text

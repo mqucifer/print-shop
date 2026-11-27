@@ -11,11 +11,14 @@ with tools, as the print loop is (`setup.loop`, mqucifer/print-shop#129), never 
   compared with them, and the model starts from where the part is stressed and which way;
 - **`published`**: what the published tests say of each pattern, its walls and its wall order
   (`study.published`): direction matters as much as density;
-- **`read`**: a candidate (`study.candidate`), sliced through Orca for its time and grams and
-  read by `load` under each of the part's load cases (`study.reading`). The reply says each
-  case's worst figures against their limits, where and which way, what rests on the infill
-  model, and the trade-off so far: which candidates no other beats on time, grams and margin
-  at once;
+- **`read`**: a candidate (`study.candidate`), queued to be sliced through Orca for its time and
+  grams and read by `load` under each of the part's load cases (`study.reading`). It replies at
+  once: the slices and reads run in parallel, as many at once as the host's budget holds
+  (`bench.budget`, mqucifer/print-shop#364), each single-threaded inside, so every figure is
+  what it would be read alone;
+- **`wait`**: the readings that have landed, in the candidates' order: each case's worst figures
+  against their limits, where and which way, what rests on the infill model, and the trade-off
+  so far, which candidates no other beats on time, grams and margin at once;
 - **`past_studies`**: the lessons kept from studies of parts with the same traits and joints,
   and what those studies recommended (`study.lessons`);
 - **`recommend`**: one candidate read, or none, with the reason, and what it found, as lessons
@@ -32,15 +35,19 @@ no recommendation, saying so. Every tool call is kept with its arguments, result
 from __future__ import annotations
 
 import json
+import queue
 import threading
 import time
 from collections.abc import Callable
+from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from print_shop.bench import host
 from print_shop.bench.as_printed import wall_thickness
 from print_shop.bench.assembly import Material
+from print_shop.bench.budget import Budget, Slots, megabytes
 from print_shop.bench.printed import Settings
 from print_shop.core.state import Orientation
 from print_shop.expert.client import CutOff, LLMConfig, Stopped, TimedOut, chat_with_tools
@@ -57,6 +64,7 @@ from print_shop.study.candidate import (
 from print_shop.study.published import published
 from print_shop.study.reading import (
     Case,
+    CaseRead,
     Loading,
     Reading,
     Slicing,
@@ -101,9 +109,11 @@ _SYSTEM = (
     "the layers' bond. Choose walls, top and bottom shells, infill density, pattern and angle, "
     "regions of their own round the joints (a cylinder round each bolt's hole, a mesh of the "
     "joint's own faces, or a band of layers), the wall order only where the finish matters, and "
-    "another pose only where it changes what the layers carry. `read` slices each through Orca "
-    "for its time and grams and reads it with load under each of the part's load cases. Go on "
-    "from what you read: where the trade-off is still open, read a candidate between. Then "
+    "another pose only where it changes what the layers carry. `read` queues each, to be sliced "
+    "through Orca for its time and grams and read with load under each of the part's load "
+    "cases: several read at once, so queue those you'd read anyway, and `wait` for their "
+    "readings as they land. Go on from what you read: where the trade-off is still open, read a "
+    "candidate between. Once every candidate you queued has landed, "
     "`recommend` one that passes every case, with your reason against the defaults, and what "
     f"you found as lessons for later parts like this. Read at least {LEAST_OWN} candidates of "
     "your own first. Nothing is printed: the Sponsor decides at the gate."
@@ -143,9 +153,9 @@ TOOLS: list[dict[str, Any]] = [
         "takes, and from what density a test checks it; the walls' thickness by count; Orca's "
         "own words for each wall order.",
         {"pattern": {"type": "string", "enum": list(PATTERNS)}}, []),
-    _fn("read", "Slice a candidate through Orca for its time and grams, and read it with load "
-        "under each of the part's load cases: each case's worst figures against their limits, "
-        "where and which way. Give only what differs from the defaults. A region with walls of "
+    _fn("read", "Queue a candidate, to be sliced through Orca for its time and grams and read "
+        "with load under each of the part's load cases: it replies at once, and `wait` gives its "
+        "reading as it lands. Give only what differs from the defaults. A region with walls of "
         "its own is walled round its own outline from every side, so it holds one wall for each "
         "two bead spacings of its depth in the part (a face mesh 1 mm deep holds 1): choose its "
         "depth (margin) and walls together. One asking more than it holds is refused before "
@@ -156,6 +166,9 @@ TOOLS: list[dict[str, Any]] = [
          "turn": {"type": "array", "items": _NUMBER, "minItems": 3, "maxItems": 3},
          "regions": {"type": "array", "maxItems": 8, "items": _REGION}},
         ["why"]),
+    _fn("wait", "Wait for a queued candidate to land, and read each that has: its time and "
+        "grams, each case's worst figures against their limits, where and which way, what Orca "
+        "built in each region, and the trade-off so far.", {}, []),
     _fn("past_studies", "The lessons kept from studies of parts with this part's traits and "
         "joints, and what those studies recommended.", {}, []),
     _fn("recommend", "The candidate to print with, by its name (or \"none\" where none "
@@ -210,6 +223,9 @@ class StudyPart:
     #: The profile's own wall order.
     wall_sequence: str = ""
     filament: str = ""
+    #: What the host runs at once: each slice holds a core, and each `load` its memory and a
+    #: core (`bench.budget`). One at a time unless given.
+    slots: Slots = field(default_factory=lambda: Slots(Budget.serial()))
 
 
 @dataclass
@@ -226,6 +242,9 @@ class StudyResult:
     reason: str = ""
     #: What it found, each with the candidates that show it.
     lessons: list[dict[str, Any]] = field(default_factory=list)
+    #: The host's budget it read within, and the most jobs that ran at once.
+    budget: str = ""
+    most_at_once: int = 0
 
     @property
     def recommendation(self) -> Reading | None:
@@ -245,13 +264,31 @@ def llm_chat(config: LLMConfig, stop: threading.Event | None = None) -> Chat:
     return chat
 
 
-def read_candidate(part: StudyPart, candidate: Candidate) -> Reading:
+def _load_memory(case: Case) -> int:
+    """The memory `load` runs in under a case, in MiB: its container's own (`host.memory_for`)."""
+    return megabytes(host.memory_for(["load", "-", *case.args]))
+
+
+def read_candidate(part: StudyPart, candidate: Candidate,
+                   cancel: threading.Event | None = None) -> Reading:
     """A candidate sliced and read under each case. Never raises for Orca or `load`: what fails
-    is said, as the reading's error or a case's verdict."""
+    is said, as the reading's error or a case's verdict. Its slice holds a core of the host's
+    budget, and each case's `load` its own memory and a core, all its cases at once as the
+    budget allows; each is single-threaded inside, so what it reads is what it would alone. Its
+    cases are in the part's order, however they land. One `cancel`led before it starts isn't
+    read."""
     out = part.workdir / candidate.name
     reading = Reading(candidate)
+    if cancel is not None and cancel.is_set():
+        reading.error = "not read: the study ended before it was"
+        return reading
     try:
-        reading.sliced = part.slicing(candidate, out)
+        with part.slots.take():
+            # Queued, it may have waited for its slot past the study's end.
+            if cancel is not None and cancel.is_set():
+                reading.error = "not read: the study ended before it was"
+                return reading
+            reading.sliced = part.slicing(candidate, out)
     except Exception as exc:  # noqa: BLE001 - Orca failing is the candidate's answer, said
         reading.error = f"Orca couldn't slice it: {type(exc).__name__}: {exc}"[:400]
         return reading
@@ -262,12 +299,21 @@ def read_candidate(part: StudyPart, candidate: Candidate) -> Reading:
                          "read them as asked, stronger than printed: "
                          + "; ".join(reading.sliced.unbuilt))[:900]
         return reading
-    for case in part.cases:
+    sliced = reading.sliced
+
+    def one(case: Case) -> CaseRead:
         try:
-            record = part.loading(candidate, reading.sliced, case, out / case.name)
+            with part.slots.take(_load_memory(case)):
+                if cancel is not None and cancel.is_set():
+                    raise RuntimeError("the study ended before it was read")
+                record = part.loading(candidate, sliced, case, out / case.name)
         except Exception as exc:  # noqa: BLE001 - load failing is the case's answer, said
             record = {"verdict": "NO ANSWER", "why": f"{type(exc).__name__}: {exc}"[:400]}
-        reading.cases.append(figures(record, part.name, case))
+        return figures(record, part.name, case)
+
+    with ThreadPoolExecutor(max_workers=max(1, len(part.cases)),
+                            thread_name_prefix=f"study-{candidate.name}") as cases:
+        reading.cases = list(cases.map(one, part.cases))
     return reading
 
 
@@ -349,6 +395,30 @@ class _State:
     calls: list[LoopCall]
     by_key: dict[str, Reading] = field(default_factory=dict)
     own: int = 0
+    #: The candidates queued that haven't landed, and those landed that the model hasn't been
+    #: given yet, by name; and the names as they land, from the reads' threads.
+    pending: dict[str, Future[None]] = field(default_factory=dict)
+    unsaid: list[str] = field(default_factory=list)
+    landed: queue.Queue[str] = field(default_factory=queue.Queue)
+    cancel: threading.Event = field(default_factory=threading.Event)
+    reads: ThreadPoolExecutor | None = None
+    #: Called in the loop's thread as each reading lands: the table as it fills in.
+    on_land: Callable[[], None] | None = None
+
+    def land(self, name: str) -> None:
+        self.pending.pop(name, None)
+        self.unsaid.append(name)
+        if self.on_land is not None:
+            self.on_land()
+
+    def drain(self) -> None:
+        """Take what's landed off the queue, in the loop's thread."""
+        while True:
+            try:
+                name = self.landed.get_nowait()
+            except queue.Empty:
+                return
+            self.land(name)
 
 
 def _user(part: StudyPart, loop: StudyLoop, base: Reading) -> str:
@@ -382,13 +452,16 @@ def _user(part: StudyPart, loop: StudyLoop, base: Reading) -> str:
     return "\n".join(lines)
 
 
-def run(loop: StudyLoop, part: StudyPart, stop: threading.Event | None = None) -> StudyResult:
+def run(loop: StudyLoop, part: StudyPart, stop: threading.Event | None = None,
+        progress: Callable[[StudyResult], None] | None = None) -> StudyResult:
     """The study, to `recommend`, a limit or `stop`. It never raises for the model: a failure is
     an ending, with the table read so far."""
     started = time.monotonic()
     base = read_candidate(part, Candidate(DEFAULTS, Settings(), turn=part.turn,
                                           why="the profile's own settings, read first by code"))
-    state = _State(readings=[base], calls=[])
+    state = _State(readings=[base], calls=[],
+                   reads=ThreadPoolExecutor(max_workers=max(1, loop.max_candidates),
+                                            thread_name_prefix="study-read"))
     state.by_key[base.candidate.key()] = base
     messages: list[dict[str, Any]] = [
         {"role": "system", "content": _SYSTEM},
@@ -396,9 +469,28 @@ def run(loop: StudyLoop, part: StudyPart, stop: threading.Event | None = None) -
     ]
     model_calls = 0
 
+    def so_far() -> None:
+        assert progress is not None
+        progress(StudyResult("reading", state.readings, state.calls, model_calls,
+                             round(time.monotonic() - started, 1), loop.model,
+                             budget=part.slots.budget.said(), most_at_once=part.slots.most))
+
+    if progress is not None:
+        state.on_land = so_far
+        so_far()
+
     def ended(why: str, **done: Any) -> StudyResult:
+        # What's queued and not begun isn't read; what's running is waited for, as a container
+        # can't be stopped mid-solve and still say what it read.
+        state.cancel.set()
+        if state.reads is not None:
+            state.reads.shutdown(wait=True, cancel_futures=True)
+        for reading in state.readings:
+            if reading.sliced is None and not reading.error:
+                reading.error = "not read: the study ended before it was"
         return StudyResult(why, state.readings, state.calls, model_calls,
-                           round(time.monotonic() - started, 1), loop.model, **done)
+                           round(time.monotonic() - started, 1), loop.model, **done,
+                           budget=part.slots.budget.said(), most_at_once=part.slots.most)
 
     if base.error:
         # The part and the profiles are every candidate's: what refuses the defaults, such as a
@@ -445,7 +537,7 @@ def run(loop: StudyLoop, part: StudyPart, stop: threading.Event | None = None) -
                 args = json.loads(call["function"].get("arguments") or "{}")
                 if not isinstance(args, dict):
                     raise ValueError("the arguments are an object")
-                result, done = _tool(loop, part, state, name, args)
+                result, done = _tool(loop, part, state, name, args, started, stop)
             except (json.JSONDecodeError, TypeError, KeyError, ValueError,
                     AttributeError) as exc:
                 # Arguments that aren't of the tools' shape are refused to the model, never a
@@ -460,8 +552,9 @@ def run(loop: StudyLoop, part: StudyPart, stop: threading.Event | None = None) -
                 return ended("recommended", **done)
 
 
-def _tool(loop: StudyLoop, part: StudyPart, state: _State, name: str,
-          args: dict[str, Any]) -> tuple[str, dict[str, Any] | None]:
+def _tool(loop: StudyLoop, part: StudyPart, state: _State, name: str, args: dict[str, Any],
+          started: float = 0.0, stop: threading.Event | None = None,
+          ) -> tuple[str, dict[str, Any] | None]:
     if name == "published":
         pattern = args.get("pattern")
         return published(str(pattern) if pattern else None, part.material,
@@ -469,6 +562,8 @@ def _tool(loop: StudyLoop, part: StudyPart, state: _State, name: str,
                          float(part.defaults.layer_height or 0.2)), None
     if name == "read":
         return _read(loop, part, state, args), None
+    if name == "wait":
+        return _wait(loop, state, started, stop), None
     if name == "past_studies":
         lines = ["Kept lessons for parts with these keys "
                  f"({', '.join(part.keys) or 'no traits or joints'}):",
@@ -477,27 +572,65 @@ def _tool(loop: StudyLoop, part: StudyPart, state: _State, name: str,
                  *(f"- {line}" for line in part.earlier or ("none",))]
         return "\n".join(lines), None
     if name == "recommend":
+        state.drain()
+        if state.pending:
+            return (f"refused: {', '.join(state.pending)} still reading: `wait` for "
+                    f"{'them' if len(state.pending) > 1 else 'it'} first", None)
         return _recommend(loop, state, args)
-    return f"no tool {name!r}: published, read, past_studies or recommend", None
+    return f"no tool {name!r}: published, read, wait, past_studies or recommend", None
 
 
 def _read(loop: StudyLoop, part: StudyPart, state: _State, args: dict[str, Any]) -> str:
+    """Queue a candidate: it's read on the reads' threads, within the host's budget, and the
+    model goes on. Its row is in the table from now, so the table's order is the order it was
+    asked in, whatever order the readings land in."""
+    state.drain()
     if state.own >= loop.max_candidates:
         return (f"refused: {state.own} candidates of your own is the most. Recommend one of "
                 "those read.")
     candidate = part.shaper.candidate(f"c{state.own + 1}", args)
     same = state.by_key.get(candidate.key())
     if same is not None:
+        if same.candidate.name in state.pending:
+            return f"that's {same.candidate.name}, queued already: `wait` for its reading"
         return (f"that's {same.candidate.name}, read already:\n"
                 + "\n".join(reading_said(same, state.readings[0])))
     state.own += 1
-    reading = read_candidate(part, candidate)
+    reading = Reading(candidate)
     state.readings.append(reading)
     state.by_key[candidate.key()] = reading
-    lines = reading_said(reading, state.readings[0])
-    if reading.sliced is not None and reading.sliced.regions:
-        lines += ["  What Orca built in each region:",
-                  *(f"    {line}" for line in reading.sliced.regions[:24])]
+    assert state.reads is not None
+    name = candidate.name
+
+    def read() -> None:
+        try:
+            found = read_candidate(part, candidate, state.cancel)
+            reading.sliced, reading.cases, reading.error = found.sliced, found.cases, found.error
+        finally:
+            state.landed.put(name)
+
+    state.pending[name] = state.reads.submit(read)
+    notes = [f"  before slicing: {'; '.join(candidate.notes)}"] if candidate.notes else []
+    return "\n".join([
+        f"queued {name}: {candidate.said()}", *notes,
+        f"Reading or queued: {', '.join(state.pending)}, within the host's budget "
+        f"({part.slots.budget.said()}). Queue more you'd read anyway, or `wait` for readings "
+        "as they land."])
+
+
+def _landed_said(state: _State) -> list[str]:
+    """Each reading landed that the model hasn't been given, in the candidates' order, with what
+    Orca built in its regions; then the trade-off so far."""
+    order = {r.candidate.name: k for k, r in enumerate(state.readings)}
+    names = sorted(state.unsaid, key=lambda n: order[n])
+    state.unsaid.clear()
+    lines = []
+    for name in names:
+        reading = state.readings[order[name]]
+        lines += reading_said(reading, state.readings[0])
+        if reading.sliced is not None and reading.sliced.regions:
+            lines += ["  What Orca built in each region:",
+                      *(f"    {line}" for line in reading.sliced.regions[:24])]
     best = front(state.readings)
     if best:
         lines.append("The trade-off so far, the candidates no other passing one beats on time, "
@@ -508,7 +641,29 @@ def _read(loop: StudyLoop, part: StudyPart, state: _State, args: dict[str, Any])
                      + (". It's open between them." if len(best) > 1 else "."))
     else:
         lines.append("Nothing read so far passes every case.")
-    return "\n".join(lines)
+    if state.pending:
+        lines.append(f"Still reading: {', '.join(state.pending)}.")
+    return lines
+
+
+def _wait(loop: StudyLoop, state: _State, started: float,
+          stop: threading.Event | None) -> str:
+    """The readings landed since the model was last given any, waiting for one where none has:
+    no longer than the study's own time, and not past `stop`."""
+    state.drain()
+    while not state.unsaid and state.pending:
+        if (stop is not None and stop.is_set()) or (
+                time.monotonic() - started > loop.max_seconds):
+            return "nothing landed before the study's limit"
+        try:
+            name = state.landed.get(timeout=1.0)
+        except queue.Empty:
+            continue
+        state.land(name)
+        state.drain()
+    if not state.unsaid:
+        return "nothing is reading: queue a candidate with `read`, or recommend one"
+    return "\n".join(_landed_said(state))
 
 
 def _recommend(loop: StudyLoop, state: _State,

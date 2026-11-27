@@ -42,7 +42,14 @@ def _cell_grams(r: Reading, base: Reading | None) -> str:
     return said
 
 
+def _reading(r: Reading) -> bool:
+    """Whether it's queued or reading still: nothing landed, and nothing said against it."""
+    return r.sliced is None and not r.error and not r.cases
+
+
 def _cell_case(r: Reading, name: str) -> str:
+    if _reading(r):
+        return "reading"
     if r.error:
         return "not as sliced" if r.error.startswith("not as sliced") else "not sliced"
     case = next((c for c in r.cases if c.case == name), None)
@@ -90,6 +97,9 @@ def table(result: StudyResult, part: str, cases: list[str], where: Path | None =
            f"{len(rows) - 1} candidates of the model's own read beside the profile's defaults, "
            f"under {len(cases)} load case{'s' if len(cases) != 1 else ''}, by {result.model}, "
            f"in {result.seconds / 60:.0f} min: {result.ended}. Nothing was printed or armed.",
+           "", f"Read within the host's budget, {result.budget or 'one job at a time'}: at most "
+           f"{result.most_at_once or 1} slices and reads at once, each single-threaded, so each "
+           "figure is what it is read alone.",
            "", "Each case's cell is its worst figure as a share of its limit, and the margin "
            "left. Every figure of a printed part rests on the infill model's published tests, "
            "which no print has checked yet (mqucifer/print-shop#340); * is a figure whose core, "
@@ -101,7 +111,7 @@ def table(result: StudyResult, part: str, cases: list[str], where: Path | None =
            + " | Passes | Orca project |",
            "|---|---|---|---|" + "---|" * len(cases) + "---|---|"]
     for r in rows:
-        passes = "yes" if r.passes else "no"
+        passes = "reading" if _reading(r) else "yes" if r.passes else "no"
         out.append(f"| {r.candidate.name} | {_escape(r.candidate.said())} | "
                    f"{_cell_time(r, base)} | {_cell_grams(r, base)} | "
                    + " | ".join(_cell_case(r, c) for c in cases)
@@ -210,6 +220,7 @@ def as_plain(result: StudyResult, part: str) -> dict[str, Any]:
         "part": part, "ended": result.ended, "model": result.model,
         "model_calls": result.model_calls, "seconds": result.seconds,
         "recommended": result.recommended, "reason": result.reason,
+        "budget": result.budget, "most_at_once": result.most_at_once,
         "lessons": result.lessons,
         "readings": [r.plain() for r in result.readings],
         "front": [r.candidate.name for r in front(result.readings)],
