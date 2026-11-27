@@ -639,10 +639,13 @@ def lifted(part: Part, along: str, mm: float) -> Part:
 
 def run(args: Any, report: Report) -> None:
     # A part built flat is read where it sits among the others (mqucifer/print-shop#201).
+    # A file the assembly names in several parts is read once for each, by its part
+    # (mqucifer/print-shop#343).
     given = getattr(args, "placed", None)
-    placed = placed_module.of(args.files, given)
-    parts = [placed_module.load(path, placed) for path in args.files]
-    say_placed(report, placed, given, args.files)
+    named_parts = getattr(args, "parts", None) or []
+    placed = placed_module.of(args.files, given, named_parts)
+    parts = [placed_module.load(path, one) for path, one in placed_module.each(args.files, placed)]
+    say_placed(report, placed, given, args.files, named_parts)
     lift = getattr(args, "lift", None)
     along = getattr(args, "along", "z")
     if lift is not None:

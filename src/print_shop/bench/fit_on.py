@@ -274,6 +274,27 @@ def _box(shape: Any) -> tuple[np.ndarray, np.ndarray]:
     return np.array([box.XMin, box.YMin, box.ZMin]), np.array([box.XMax, box.YMax, box.ZMax])
 
 
+def _moving(file: str, every: list[Any], moving_as: str | None, given: str | None) -> Any:
+    """Where the moving file is read: as the part `--as` names, where the assembly names its
+    file in several parts; or nowhere placed, where it places none (mqucifer/print-shop#343)."""
+    if moving_as:
+        chosen = [one for one in every if one.part == moving_as]
+        if not chosen:
+            parts = ", ".join(one.part for one in every) or "none"
+            raise NoAnswer(
+                f"--as names {moving_as}, and {given} names {file} in no part of that name: its "
+                f"parts are {parts}"
+            )
+        return chosen[0]
+    if len(every) > 1:
+        raise NoAnswer(
+            f"{given} names {file} in {len(every)} parts, {', '.join(o.part for o in every)}, "
+            "and fit-on moves one: name which with --as PART, and its other parts are read as "
+            "ones it could meet where --onto names its file too"
+        )
+    return every[0] if every else None
+
+
 class Way:
     """The moving part, what it goes onto, and its way on."""
 
@@ -286,21 +307,49 @@ class Way:
         if args.step <= 0 or (not clear and args.start <= 0):
             raise NoAnswer("--from and --step are distances, more than 0")
         self.vector = FreeCAD.Vector
-        # A part built flat is read where it sits among the others (mqucifer/print-shop#201).
+        # A part built flat is read where it sits among the others (mqucifer/print-shop#201),
+        # and a file the assembly names in several parts once as each (mqucifer/print-shop#343).
         given = getattr(args, "placed", None)
-        self.placed = placed_module.of([args.moving, *args.onto], given)
+        self.parts = list(getattr(args, "parts", None) or [])
+        moving_as = getattr(args, "moving_as", None)
+        if moving_as and not given:
+            raise NoAnswer(f"--as names {moving_as}, a part of an assembly: give it with --placed")
+        mine = placed_module.of([args.moving], given).get(args.moving, [])
+        moving = _moving(args.moving, mine, moving_as, given)
+        onto = placed_module.of(args.onto, given, self.parts)
+        #: Each file read placed, and each place it's read at: the moving part's first.
+        self.placed = {f: list(every) for f, every in onto.items()}
+        if moving is not None:
+            others = [o for o in self.placed.get(args.moving, []) if o.part != moving.part]
+            self.placed[args.moving] = [moving, *others]
 
-        def read(name: str) -> Any:
+        def read(name: str, one: Any) -> Any:
             shape = Part.read(name)
-            if name in self.placed:
+            if one is not None:
                 shape = shape.copy()
-                shape.transformShape(placed_module.freecad_matrix(FreeCAD, self.placed[name]))
+                shape.transformShape(placed_module.freecad_matrix(FreeCAD, one))
             return shape
 
-        self.moving = read(args.moving)
-        self.onto = [read(name) for name in args.onto]
-        self.names = list(args.onto)
-        self.name = args.moving
+        #: The files under the names they're read by, `FILE as PART` where one is read as several.
+        self.files: dict[str, str] = {}
+        self.moving = read(args.moving, moving)
+        self.name = moving.read_as if moving is not None else args.moving
+        self.files[self.name] = args.moving
+        # Each copy it could meet: its own file's other parts too, never itself.
+        copies = [
+            (f, one)
+            for f, one in placed_module.each(args.onto, onto)
+            if one is None
+            or moving is None
+            or (one.file, one.part) != (moving.file, moving.part)
+        ]
+        if not copies:
+            raise NoAnswer(
+                f"--onto names only {self.name} itself, the part that moves: name what it goes onto"
+            )
+        self.onto = [read(f, one) for f, one in copies]
+        self.names = [one.read_as if one is not None else f for f, one in copies]
+        self.files.update({name: f for name, (f, _) in zip(self.names, copies, strict=True)})
         for name, shape in zip([self.name, *self.names], [self.moving, *self.onto], strict=True):
             if not shape.Solids:
                 raise NoAnswer(f"{name} has no solid in it")
@@ -494,7 +543,9 @@ class Rays:
 
 def run(args: Any, report: Report) -> None:
     way = Way(args)
-    say_placed(report, way.placed, getattr(args, "placed", None), [way.name, *way.names])
+    say_placed(
+        report, way.placed, getattr(args, "placed", None), [args.moving, *args.onto], way.parts
+    )
     every = [piece for out in way.offsets for piece in way.pieces(out)]
     places = []
     for group in _places(every, way.across):
@@ -556,6 +607,10 @@ def run(args: Any, report: Report) -> None:
             f"{_xyz(first['to'])}, where OCCT's common finds no overlap"
             + (f"; and at {len(strays) - 1} more readings" if len(strays) > 1 else "")
         )
+    # Each place names its file, as `arm` and `bend` read it, and the copy it's read as.
+    for place in places:
+        place["read_as"] = place["file"]
+        place["file"] = way.files[place["read_as"]]
     _say(args, report, way, places, rays, apart, strays, every)
 
 
@@ -619,7 +674,7 @@ def _say(
             else (", and still where it sits" if place["seated"] else "")
         )
         report.line(
-            f"places.{number}: {way.name} passes through {place['file']} {lasts}{seated}; "
+            f"places.{number}: {way.name} passes through {place['read_as']} {lasts}{seated}; "
             f"deepest {place['out_mm']:g} mm out, {place['depth_mm']:.3f} mm deep across "
             f"{_way(place['across'])} and {place['along_mm']:.3f} mm along, "
             f"{place['height_mm']:.3f} mm of the way and {place['volume_mm3']:.3f} mm³, at "
@@ -662,7 +717,7 @@ def _say(
     if passing:
         deepest = passing[0]
         why.append(
-            f"{way.name} passes through {deepest['file']} on its way on, {read}, at "
+            f"{way.name} passes through {deepest['read_as']} on its way on, {read}, at "
             f"{len(passing)} place(s): the deepest is {deepest['depth_mm']:.3f} mm deep across "
             f"{_way(deepest['across'])}, as places.{places.index(deepest)}.depth_mm, and "
             f"{deepest['along_mm']:.3f} mm along, at {_xyz(deepest['box'][0])} to "
@@ -677,7 +732,7 @@ def _say(
     if sits:
         first = sits[0]
         why.append(
-            f"{way.name} overlaps {first['file']} where it sits, at {_xyz(first['box'][0])} to "
+            f"{way.name} overlaps {first['read_as']} where it sits, at {_xyz(first['box'][0])} to "
             f"{_xyz(first['box'][1])} with it {first['out_mm']:g} mm out"
             + (f", and at {len(sits) - 1} more place(s)" if len(sits) > 1 else "")
             + ", as places."

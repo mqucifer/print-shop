@@ -271,8 +271,23 @@ def _named_facing(text: str) -> tuple[str, str]:
 PLACED = (
     "an assembly file: each file it names, as a part or in a part's `with`, is read where it "
     "sits, turned by the part's `turn` and moved by its `at`, and every other file where it is. "
-    "A part built flat in its own frame is read so against the parts it meets"
+    "A part built flat in its own frame is read so against the parts it meets. A file it names "
+    "in several parts is read once for each, at each part's place, named `FILE as PART`"
 )
+#: `--part`, beside `--placed` (mqucifer/print-shop#343).
+PART = (
+    "with --placed: a part of the assembly to read a file as, where the assembly names that file "
+    "in several parts. Give it once for each part, or several after it. A file any of whose "
+    "parts is named is read as only those; a file none of whose parts is named is read as each "
+    "of its parts"
+)
+
+
+def _placed_options(command: Any) -> None:
+    command.add_argument("--placed", metavar="ASSEMBLY", help=PLACED)
+    command.add_argument(
+        "--part", dest="parts", action="extend", nargs="+", default=[], metavar="PART", help=PART
+    )
 
 
 def parser() -> Parser:
@@ -330,11 +345,7 @@ def parser() -> Parser:
         "edge and its pocket's wall, and clear of the faces with another play. With a place "
         "named, --min-gap and --max-gap hold each place's gap",
     )
-    clearance.add_argument(
-        "--placed",
-        metavar="ASSEMBLY",
-        help=PLACED,
-    )
+    _placed_options(clearance)
     clearance.add_argument(
         "--facing",
         dest="facings",
@@ -633,10 +644,14 @@ def parser() -> Parser:
         metavar="FILE",
         help="what it goes onto: each STEP file it could meet on its way",
     )
+    _placed_options(fit)
     fit.add_argument(
-        "--placed",
-        metavar="ASSEMBLY",
-        help=PLACED,
+        "--as",
+        dest="moving_as",
+        metavar="PART",
+        help="with --placed: the part MOVING goes on as, where the assembly names its file in "
+        "several parts. It's read there, and its other parts stay where they sit as ones it "
+        "could meet, where its file is in --onto too",
     )
     fit.add_argument(
         "--along",
@@ -1475,6 +1490,9 @@ def parser() -> Parser:
         metavar="ASSEMBLY",
         help=PLACED + ". With variants, each row holding a placed file is drawn placed, and again "
         "after it with those files flat, as built",
+    )
+    render.add_argument(
+        "--part", dest="parts", action="extend", nargs="+", default=[], metavar="PART", help=PART
     )
     render.add_argument("--views", nargs="*", default=["iso", "top", "front", "side"])
     render.add_argument("--section", nargs="*", type=float, default=[], help="z heights to cut")

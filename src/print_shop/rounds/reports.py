@@ -689,10 +689,14 @@ SLICE = Rows(
     )
 )
 
-#: Each file `--placed` placed, by its name: the part entry it's from, its turns and its move
-#: (mqucifer/print-shop#201).
+#: Each file `--placed` placed, by the name it's read by: the part entry it's from, its turns and
+#: its move (mqucifer/print-shop#201). A file an assembly names in several parts is read once for
+#: each, by `FILE as PART`, and `file` is its file (mqucifer/print-shop#343).
 PLACED = Keyed(
-    Row({"part": TEXT, "assembly": TEXT, "turn": Rows(Rows(ANY)), "at": XYZ}, closed=True)
+    Row(
+        {"file": TEXT, "part": TEXT, "assembly": TEXT, "turn": Rows(Rows(ANY)), "at": XYZ},
+        closed=True,
+    )
 )
 
 LOW_HIGH = Row({"min": NUMBER, "max": NUMBER}, closed=True)
@@ -939,6 +943,9 @@ SHAPES: dict[str, dict[str, Any]] = {
                     "height_mm": NUMBER,
                     "last_mm": NUMBER,
                     "out_mm": NUMBER,
+                    # The copy of `file` it's on, `FILE as PART` where an assembly names the
+                    # file in several parts (mqucifer/print-shop#343).
+                    "read_as": TEXT,
                     "readings": NUMBER,
                     "seated": FLAG,
                     "volume_mm3": NUMBER,

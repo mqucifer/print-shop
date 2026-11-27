@@ -119,6 +119,9 @@ class Place:
     verdict: str = ""
     why: str = ""
     numbers: dict[str, Any] = field(default_factory=dict)
+    #: The copy of `file` it's on, as `fit-on` read it: `FILE as PART` where an assembly names
+    #: the file in several parts (mqucifer/print-shop#343), else the file.
+    read_as: str = ""
 
     @property
     def where(self) -> str:
@@ -314,6 +317,7 @@ def _place(
     kept: Path,
     name: str,
     placed: dict[str, Any] | None = None,
+    moving_as: str = "",
 ) -> None:
     """What one place comes to: the arm looked for on each printed file of the two, and bent.
     `placed` is each file `fit-on` read placed, as its record says: the place is turned back
@@ -330,11 +334,11 @@ def _place(
             "its depth isn't across x, y or z, and `bend` takes a push along one of them"
         )
         return
-    for file in (place.file, way.moving):
+    for k, file in enumerate((place.file, way.moving)):
         if file.startswith(holds.REFERENCES):
             continue
         corners = [list(place.box[0]), list(place.box[1])]
-        if file == way.moving:
+        if k == 1:
             # The place is where the part was `out_mm` out: in the part's own file it's back
             # along its way out by that much.
             axis = AXES.index(way.along[1])
@@ -342,8 +346,11 @@ def _place(
             for corner in corners:
                 corner[axis] -= back
         across = place.across
-        if file in (placed or {}):
-            corners, across = own_frame(corners, across, (placed or {})[file])
+        # Each placement is by the name it's read by (mqucifer/print-shop#343): the moving
+        # part's is `fit-on`'s `moving`.
+        copy = (moving_as or file) if k == 1 else (place.read_as or file)
+        if copy in (placed or {}):
+            corners, across = own_frame(corners, across, (placed or {})[copy])
             if not across:
                 place.no_arm.append(
                     f"on `{file}`: its push isn't along an axis of the file as it's built, "
@@ -397,10 +404,21 @@ def read(
                 _axis(read_place.get("across")),
                 float(read_place["out_mm"]),
                 bool(read_place.get("seated")),
+                read_as=str(read_place.get("read_as") or ""),
             )
             one.places.append(place)
             if k < MOST:
-                _place(box, way, place, on_bed, where, kept, f"bend-{n}-{k}", numbers.get("placed"))
+                _place(
+                    box,
+                    way,
+                    place,
+                    on_bed,
+                    where,
+                    kept,
+                    f"bend-{n}-{k}",
+                    numbers.get("placed"),
+                    str(numbers.get("moving") or ""),
+                )
             else:
                 given = [f for f in (place.file, way.moving) if f.startswith(holds.REFERENCES)]
                 place.given = given[0] if given else ""

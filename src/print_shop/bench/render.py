@@ -554,20 +554,47 @@ ROW_SAID = {
 }
 
 
-def _placed(shown: list[Shown], placed: dict[str, placed_module.Placed]) -> dict[str, Shown]:
+def _placed(
+    shown: list[Shown], placed: dict[str, list[placed_module.Placed]]
+) -> dict[str, list[Shown]]:
     """Each placed file drawn where it sits: the same file, colour and mark, turned and moved
-    (mqucifer/print-shop#201)."""
-    found = {}
+    (mqucifer/print-shop#201). A file the assembly names in several parts is drawn once for
+    each, by its name, `FILE as PART`, marked by its part: the first in the file's colour and
+    each other in a colour of its own, unless a look gives the file one
+    (mqucifer/print-shop#343)."""
+    taken = [one.rgb for one in shown]
+    extra = sum(len(placed[one.name]) - 1 for one in shown if one.name in placed and not one.colour)
+    spare = iter(colours_module.distinct(extra, taken))
+    found: dict[str, list[Shown]] = {}
     for one in shown:
-        if one.name in placed:
-            whole = placed_module.place(one.whole, placed[one.name])
+        copies = []
+        for k, where in enumerate(placed.get(one.name, [])):
+            whole = placed_module.place(one.whole, where)
             parts = whole.pieces()
-            found[one.name] = replace(one, whole=whole, parts=parts, anchor=_anchor(parts))
+            alike = where.read_as != one.name
+            copies.append(
+                replace(
+                    one,
+                    name=where.read_as,
+                    whole=whole,
+                    parts=parts,
+                    anchor=_anchor(parts),
+                    mark=where.part if alike else one.mark,
+                    rgb=next(spare) if alike and k and not one.colour else one.rgb,
+                )
+            )
+        if copies:
+            found[one.name] = copies
     return found
 
 
+def _alike(sitting: dict[str, list[Shown]], one: Shown) -> bool:
+    """Whether a file is drawn as several parts' copies, each by its own name."""
+    return any(copy.name != one.name for copy in sitting.get(one.name, []))
+
+
 def _rows(
-    variants: list[tuple[str, list[str]]], placed: dict[str, placed_module.Placed]
+    variants: list[tuple[str, list[str]]], placed: dict[str, list[placed_module.Placed]]
 ) -> list[tuple[str, list[str], str]]:
     """Each variant's row, and whether it's drawn placed: a row holding a placed file is drawn
     with it placed among the others, and again after it with only its placed files, flat, as
@@ -734,8 +761,9 @@ def run_variants(args: Any, report: Report) -> None:
     everyone = _shown(every_file, looks)
     by_name = {s.name: s for s in everyone}
     given = getattr(args, "placed", None)
-    placed = placed_module.of(list(dict.fromkeys(every_file)), given)
-    say_placed(report, placed, given, list(dict.fromkeys(every_file)))
+    named_parts = getattr(args, "parts", None) or []
+    placed = placed_module.of(list(dict.fromkeys(every_file)), given, named_parts)
+    say_placed(report, placed, given, list(dict.fromkeys(every_file)), named_parts)
     sitting = _placed(everyone, placed)
     drawn_rows = _rows(variants, placed)
     marks = (TEST_PIECE_MARK,) if pieces else ()
@@ -752,8 +780,9 @@ def run_variants(args: Any, report: Report) -> None:
     seen_all: dict[str, Any] = {}
     for row, (name, files, how) in enumerate(drawn_rows):
         shown = [
-            sitting[f] if how == PLACED and f in sitting else by_name[f]
+            copy
             for f in dict.fromkeys(files)
+            for copy in (sitting[f] if how == PLACED and f in sitting else [by_name[f]])
         ]
         meshes = [m for one in shown for m in one.meshes]
         shades = [one.shade for one in shown for _ in one.meshes]
@@ -803,16 +832,22 @@ def run_variants(args: Any, report: Report) -> None:
         seen_all[name] = seen
         _say_seen(report, f"{name}: ", seen)
         report.line(f"variant {name}: {', '.join(files)}{ROW_SAID.get(how, '')}")
-    sheet = _with_legend(sheet, everyone)
+    # Each copy of a file read as several parts is in the legend, by its part.
+    legend = [
+        copy
+        for one in everyone
+        for copy in ([one, *sitting[one.name]] if _alike(sitting, one) else [one])
+    ]
+    sheet = _with_legend(sheet, legend)
     path = out / f"variants-{slug('+'.join(n for n, _ in variants))[:60]}-sheet.png"
     sheet.save(path)
     report.wrote(str(path))
     report.line(f"sheet of the variants: {path}")
-    for one in everyone:
+    for one in legend:
         report.line(f"drawn: {one.said}")
     report.numbers["views"] = views
     report.numbers["seen_px"] = seen_all
-    report.numbers["files"] = [_file_numbers(one) for one in everyone]
+    report.numbers["files"] = [_file_numbers(one) for one in legend]
     if problems:
         report.verdict("FAIL", "; ".join(problems))
     else:
@@ -844,10 +879,11 @@ def run(args: Any, report: Report) -> None:
     shown = _shown(args.files, _looks(args.looks))
     # A part built flat is drawn where it sits among the others (mqucifer/print-shop#201).
     given = getattr(args, "placed", None)
-    placed = placed_module.of(args.files, given)
-    say_placed(report, placed, given, args.files)
+    named_parts = getattr(args, "parts", None) or []
+    placed = placed_module.of(args.files, given, named_parts)
+    say_placed(report, placed, given, args.files, named_parts)
     sitting = _placed(shown, placed)
-    shown = [sitting.get(one.name, one) for one in shown]
+    shown = [copy for one in shown for copy in sitting.get(one.name, [one])]
     parts = [one.whole for one in shown]
     for part in parts:
         report.notes += part.notes

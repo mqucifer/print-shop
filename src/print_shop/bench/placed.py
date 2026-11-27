@@ -15,20 +15,30 @@ file is read where it is. The part's file is never changed, and no turned copy i
 placement is one fact, in the assembly file, read each time.
 
 `clearance`, `fit-on` and `render` take it. A reading says which files it placed and how.
+
+**A file in several parts** (mqucifer/print-shop#343). An assembly often names one file in several
+parts: alike slices of a dome, each turned to its place, or four alike legs. Keyed by its file,
+each was read once, at the last part's place, so no pair between two of them was ever read. Now
+such a file is read once for each part that names it, each copy at its own `turn` and `at`, and
+named by its part, `slice.step as s2`; a file the assembly names once keeps its own name. A pair
+between two copies is read like any other, and so is a file in several parts' `with`. Given once
+on the command line, it's read as each of its parts, and the reply says so; `--part NAME` reads it
+as only the parts named, where any of its parts is named, and as all of them where none is.
 """
 
 from __future__ import annotations
 
 import math
 import os
-from dataclasses import dataclass
+from collections.abc import Sequence
+from dataclasses import dataclass, replace
 from pathlib import PurePosixPath
 from typing import Any
 
 import numpy as np
 
 from . import assembly as assembly_module
-from .report import Report
+from .report import NoAnswer, Report
 
 
 @dataclass(frozen=True)
@@ -40,6 +50,13 @@ class Placed:
     turn: tuple[tuple[str, float], ...]
     at: tuple[float, float, float]
     assembly: str
+    #: What it's read by: the file, as named, where the assembly names it in one part, or
+    #: `FILE as PART` where it names it in several (mqucifer/print-shop#343).
+    name: str = ""
+
+    @property
+    def read_as(self) -> str:
+        return self.name or self.file
 
     def matrix(self) -> np.ndarray:
         """Its turns and its move as one 4 x 4 transform, a point as a column."""
@@ -64,6 +81,7 @@ class Placed:
 
     def plain(self) -> dict[str, Any]:
         return {
+            "file": self.file,
             "part": self.part,
             "assembly": self.assembly,
             "turn": [[a, d] for a, d in self.turn],
@@ -75,46 +93,120 @@ def _plain(path: str) -> str:
     return os.path.normpath(path.removeprefix("/work/"))
 
 
-def read(path: str) -> dict[str, Placed]:
+def read(path: str) -> dict[str, list[Placed]]:
     """Each file the assembly file at `path` places, by its path from the working directory:
-    each part's own file and the files in its `with`."""
+    each part's own file and the files in its `with`, with each place a part puts it, in the
+    assembly's order."""
     found = assembly_module.read(path)
     folder = PurePosixPath(path).parent
-    placed: dict[str, Placed] = {}
+    placed: dict[str, list[Placed]] = {}
     for part in found.parts:
-        for file in (part.file, *part.others):
+        for file in dict.fromkeys((part.file, *part.others)):
             name = _plain(str(folder / file))
-            placed[name] = Placed(name, part.name, part.turn, part.at, path)
+            placed.setdefault(name, []).append(Placed(name, part.name, part.turn, part.at, path))
     return placed
 
 
-def of(files: list[str], path: str | None) -> dict[str, Placed]:
-    """The placement of each of `files` the assembly places, by the file as named, or none
-    where no assembly was given."""
+def as_named(file: str, every: Sequence[Placed]) -> list[Placed]:
+    """Each placement of a file named `file` on the command line, named as it's read: `file`
+    where the assembly names it once, else `file as PART`."""
+    if len(every) == 1:
+        return [replace(every[0], name=file)]
+    return [replace(one, name=f"{file} as {one.part}") for one in every]
+
+
+def of(
+    files: Sequence[str], path: str | None, parts: Sequence[str] = ()
+) -> dict[str, list[Placed]]:
+    """The placements of each of `files` the assembly places, by the file as named, or none
+    where no assembly was given: each file once for each part that names it, and with `parts`
+    named, only as those, where any of its own parts is one."""
+    parts = list(dict.fromkeys(parts))
     if not path:
+        if parts:
+            raise NoAnswer(
+                f"--part names {', '.join(parts)}, a part of an assembly: give the assembly "
+                "with --placed"
+            )
         return {}
     placed = read(path)
-    return {f: placed[_plain(f)] for f in files if _plain(f) in placed}
+    found: dict[str, list[Placed]] = {}
+    for file in dict.fromkeys(files):
+        every = as_named(file, placed.get(_plain(file), []))
+        if every:
+            found[file] = [one for one in every if one.part in parts] or every
+    named = {one.part for file in files for one in placed.get(_plain(file), [])}
+    unknown = [n for n in parts if n not in named]
+    if unknown:
+        raise NoAnswer(
+            f"--part names {', '.join(unknown)}, and no part of that name in {path} places any "
+            f"of {', '.join(dict.fromkeys(files))}"
+            + (f": the parts that do are {', '.join(sorted(named))}" if named else "")
+        )
+    return found
+
+
+def each(files: Sequence[str], placed: dict[str, list[Placed]]) -> list[tuple[str, Placed | None]]:
+    """Each copy a reading reads, in the order the files are named: a file the assembly places,
+    once for each of its placements, where it's first named; any other file as it's named."""
+    found: list[tuple[str, Placed | None]] = []
+    seen: set[str] = set()
+    for file in files:
+        if file not in placed:
+            found.append((file, None))
+        elif file not in seen:
+            seen.add(file)
+            found += [(file, one) for one in placed[file]]
+    return found
+
+
+def by_name(placed: dict[str, list[Placed]]) -> dict[str, Placed]:
+    """Every placement, by the name it's read by."""
+    return {one.read_as: one for every in placed.values() for one in every}
 
 
 def say_placed(
-    report: Report, placed: dict[str, Placed], path: str | None, files: list[str]
+    report: Report,
+    placed: dict[str, list[Placed]],
+    path: str | None,
+    files: Sequence[str],
+    parts: Sequence[str] = (),
 ) -> None:
-    """Which files a reading placed, and how: a line, and `placed` in its numbers. Where
-    `--placed` names an assembly that places none of them, that's said too, so the reading isn't
-    taken for a placed one."""
+    """Which files a reading placed, and how: a line, and `placed` in its numbers, each
+    placement by the name it's read by. A file read as several parts is said, with how to read
+    fewer. Where `--placed` names an assembly that places none of them, that's said too, so the
+    reading isn't taken for a placed one."""
     if placed:
-        report.numbers["placed"] = {name: one.plain() for name, one in placed.items()}
+        every = by_name(placed)
+        report.numbers["placed"] = {name: one.plain() for name, one in every.items()}
         report.line(
             "placed: "
-            + "; ".join(one.said for one in placed.values())
+            + "; ".join(one.said for one in every.values())
             + ". Each is read where it sits among the others, and its file stays as it's built"
         )
+        for file, copies in placed.items():
+            if len(copies) < 2 and not copies[0].name.startswith(f"{file} as "):
+                continue
+            names = ", ".join(one.part for one in copies)
+            twice = sum(1 for f in files if f == file)
+            given = "named " + (f"{twice} times" if twice > 1 else "once") + " here"
+            if parts and any(one.part in parts for one in copies):
+                report.line(
+                    f"{file}, {given}, is read as the {len(copies)} of its parts in {path} that "
+                    f"--part names: {names}, each by its name, `{file} as PART`"
+                )
+                continue
+            report.line(
+                f"{file}, {given}, is named in {len(copies)} parts of {path}, so it's read "
+                f"{len(copies)} times, once as each: {names}, each by its name, `{file} as "
+                "PART`, and each pair between them is read like any other. To read it as only "
+                "some of them, name each with --part"
+            )
     elif path:
         report.numbers["placed"] = {}
         report.line(
-            f"placed: nothing. {path} names none of {', '.join(files)} as a part or in a part's "
-            "`with`, so each is read where it's built"
+            f"placed: nothing. {path} names none of {', '.join(dict.fromkeys(files))} as a part "
+            "or in a part's `with`, so each is read where it's built"
         )
 
 
@@ -133,18 +225,19 @@ def place(part: Any, one: Placed) -> Any:
             way[assembly_module.AXES.index(axis)] = 1.0
             moved = moved.rotate(cq.Vector(0, 0, 0), cq.Vector(*way), degrees)
         moved = moved.translate(cq.Vector(*one.at))
-        return Part(part.name, shape=moved, notes=list(part.notes))
+        return Part(one.name or part.name, shape=moved, notes=list(part.notes))
     mesh = part.fine().copy()
     mesh.apply_transform(one.matrix())
-    return Part(part.name, mesh=mesh, notes=list(part.notes))
+    return Part(one.name or part.name, mesh=mesh, notes=list(part.notes))
 
 
-def load(path: str, placed: dict[str, Placed]) -> Any:
-    """A file, as `shapes.load` reads it, placed where the assembly puts it."""
+def load(path: str, one: Placed | None) -> Any:
+    """A file, as `shapes.load` reads it, placed where the assembly puts it, by the name it's
+    read by."""
     from .shapes import load as load_shape
 
     part = load_shape(path)
-    return place(part, placed[path]) if path in placed else part
+    return place(part, one) if one is not None else part
 
 
 def freecad_matrix(free_cad: Any, one: Placed) -> Any:
