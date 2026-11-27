@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import json
 import math
+import os
 import re
 from pathlib import Path
 from typing import Any
@@ -183,6 +184,64 @@ def test_a_step_said_again_says_how_far_it_has_got(capsys: pytest.CaptureFixture
     assert lines[0].endswith("clearance: reading 3 exactly")
     assert lines[1].endswith("clearance: reading 3 exactly: 2 read")
     assert lines[2].endswith("between steps, after clearance: reading 3 exactly: 2 read")
+
+
+def test_a_small_reading_keeps_its_limit_and_a_large_one_states_its_own(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Made-up figures: 95 s in, 10 of 410 pairs read exactly at 3 s each. Its limit is taken
+    up from the pairs read so far, stated with room, and raised as they come slower, up to the
+    hour offered; a reading that fits keeps 600 s."""
+    from print_shop.bench import pace
+
+    monkeypatch.setenv(pace.TIMEOUT, "600")
+    small = pace.Pace(600, 3600)
+    assert small.after(elapsed=30, done=10, spent=5, left=20) is None
+    assert small.limit == 600 and small.took is None
+    assert pace.TAKEN not in capsys.readouterr().err
+    large = pace.Pace(600, 3600)
+    assert large.after(elapsed=95, done=10, spent=30, left=400) == "take"
+    projected = 95 + 400 * 3.0
+    assert large.took == (projected, 10)
+    assert large.limit == math.ceil(projected * pace.ROOM + pace.MARGIN)
+    assert pace.TAKEN in capsys.readouterr().err
+    assert os.environ[pace.TIMEOUT] == str(int(large.limit)), "the `ran:` line's limit"
+    stated = large.limit
+    assert large.after(elapsed=200, done=40, spent=120, left=370) is None, "as projected"
+    assert large.after(elapsed=900, done=100, spent=800, left=310) == "raise"
+    assert stated < large.limit <= 3600
+    assert large.after(elapsed=1000, done=101, spent=900, left=309) is None
+    assert pace.TAKEN not in capsys.readouterr().err, "taken once"
+    capped = pace.Pace(600, 3600)
+    assert capped.after(elapsed=100, done=10, spent=200, left=2000) == "take"
+    assert capped.limit == 3600, "never past the offer"
+    assert capped.after(elapsed=3585, done=1500, spent=3400, left=500) == "stop"
+
+
+def test_with_no_longer_limit_offered_a_reading_stops_itself_before_its_own() -> None:
+    from print_shop.bench import pace
+
+    alone = pace.Pace(600, None)
+    assert alone.after(elapsed=500, done=100, spent=440, left=300) is None
+    assert alone.limit == 600 and alone.took is None
+    assert alone.after(elapsed=581, done=120, spent=520, left=280) == "stop", "20 s to write"
+    assert pace.Pace(None, None).after(elapsed=5000, done=1, spent=1, left=1) is None
+
+
+def test_the_pairs_read_exactly_are_read_in_an_order_spread_through_them() -> None:
+    from print_shop.bench import pace
+
+    for count in (0, 1, 2, 3, 10, 400, 1000):
+        order = pace.spread(count)
+        assert sorted(order) == list(range(count)), count
+    first = pace.spread(400)[:3]
+    assert max(first) - min(first) > 400 / 3, first
+
+
+def test_the_host_offers_clearance_the_hour_as_it_offers_load() -> None:
+    assert host.offered(["clearance", "a.step", "b.step"]) == host.TWO_PASSES
+    assert host.offered(["load", "a.json"]) == host.TWO_PASSES
+    assert host.offered(["info", "a.step"]) is None
 
 
 # The bench, in its image.
@@ -379,7 +438,7 @@ def test_a_rod_through_a_ring_is_read_by_their_meshes_and_a_buried_pin_exactly(
     threaded: Path,
 ) -> None:
     text, record = read(threaded)
-    _, exact = read(threaded, "--exact")
+    exact_text, exact = read(threaded, "--exact")
     far_off = same_as_exact(record, exact)
     assert record["verdict"] == "INTERFERE", text
     # The rod's box and hull lie through the ring's; its mesh is 1.5 mm from the ring's.
@@ -394,6 +453,16 @@ def test_a_rod_through_a_ring_is_read_by_their_meshes_and_a_buried_pin_exactly(
     assert buried["overlap_mesh_mm3"] == pytest.approx(1.0, abs=0.01)
     assert len(far_off) == 9 and record["numbers"]["by_boxes"]["by_mesh"] == 1
     assert "1 by meshes" in text, text
+    # Read exactly, the rod and ring are apart by OCCT's distance and the mesh's, with no overlap
+    # by the mesh, so OCCT's common and cut aren't run; the buried pin's distance is 0, and they
+    # are, and find it.
+    rod = pair_of(exact, "ring.step", "rod.step")
+    assert rod["occt_booleans"] and rod["overlap_occt_common_mm3"] == 0.0
+    assert rod["seconds"]["occt_common"] < 0.01
+    assert "for 1 of them OCCT's common and cut weren't run" in exact_text, exact_text
+    pin = pair_of(exact, "block.step", "pin.step")
+    assert "occt_booleans" not in pin and pin["overlap_occt_common_mm3"] == pytest.approx(1.0)
+    assert set(exact["numbers"]["exact_s"]) >= {"occt_distance", "occt_common", "gap_mesh"}
 
 
 @pytest.mark.bench
@@ -410,5 +479,53 @@ def test_a_plan_says_how_the_pairs_would_be_read_and_judges_nothing(threaded: Pa
     ]
     assert plan["sampled"] == 1 and plan["sample_s"] > 0 and plan["exact_estimate_s"] >= 0
     assert all(plan[k] >= 0 for k in ("load_s", "meshes_s", "bounds_s"))
+    # Where the sampled read's time went, step by step, and the limit it would be under.
+    assert {"occt_distance", "gap_mesh", "occt_common", "occt_cut"} <= set(plan["sample_steps_s"])
+    assert plan["limit_s"] == 600 and "under a limit of 600 s" in text
+    assert "Their steps: " in text
     assert "pairs" not in record["numbers"], "nothing judged"
     assert reports.unlike("clearance", record["numbers"]) == []
+
+
+def under_limit(
+    work: Path, limit: int, offer: int | None, *args: str
+) -> tuple[str, dict[str, Any], int]:
+    """`clearance` on the ring with the container told its limit is `limit` s, and offered
+    `offer`, as the host tells it, while the host waits 600 s, or the offer once it's taken: so
+    a reading of a few seconds meets its limit as a whole assembly's does. The host's limit at
+    the end, too."""
+    import uuid
+
+    env = {"BENCH_TIMEOUT": str(limit), **({host.OFFER: str(offer)} if offer else {})}
+    command = host.bench_command(["clearance", "slice.step", "--placed", "ring.json", *args])
+    name = f"print-bench-{uuid.uuid4().hex[:12]}"
+    argv = host.container(work, command, name, env=env)
+    done, waited, _ = host._waited(argv, 600, offer)
+    assert done is not None, "stopped by the host"
+    saved = re.search(r"saved: (\S+)\.txt and \.json", done.stdout)
+    assert saved, f"nothing saved: {done.stdout}{done.stderr}"
+    return done.stdout, json.loads((work / f"{saved.group(1)}.json").read_text()), waited
+
+
+@pytest.mark.bench
+def test_a_reading_that_projects_past_its_limit_takes_up_the_offer_and_states_its_own(
+    work: Path,
+) -> None:
+    text, record, waited = under_limit(work, 1, 3600)
+    assert waited == 3600, "the host waits for the longer limit once it's taken"
+    assert record["verdict"] == "TOUCHING", text
+    limit = record["numbers"]["limit"]
+    assert limit["limit_s"] == 1 and limit["offered_s"] == 3600
+    assert limit["taken_after"] == 1 and 1 < limit["stated_s"] < 3600
+    assert "so it took up the longer limit offered, 3600 s, and stated" in text, text
+    assert record["ran"]["limit_s"] == int(limit["stated_s"]), "the `ran:` line's limit"
+    assert host.TAKEN not in text
+
+
+@pytest.mark.bench
+def test_a_reading_with_no_longer_limit_offered_stops_itself_before_its_own(work: Path) -> None:
+    text, record, waited = under_limit(work, 1, None)
+    assert waited == 600
+    assert record["verdict"] == "NO ANSWER", text
+    assert "it stopped itself before its 1 s limit, having read 1 of the 24 pairs" in text, text
+    assert "--plan says the split and its time" in text

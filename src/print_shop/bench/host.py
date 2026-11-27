@@ -78,6 +78,9 @@ TWO_PASSES = 3600
 #: keeps `MEMORY`, so what each proves of the 3 GiB stands.
 TWO_PASSES_MEMORY = "4g"
 OFFER = "BENCH_TIMEOUT_TWO_PASSES"
+#: The commands offered the longer limit: `load` for two passes, and `clearance` for a whole
+#: assembly whose exact reads project past `TIMEOUT` (`bench/pace.py`, mqucifer/print-shop#354).
+OFFERED = ("load", "clearance")
 TAKEN = "bench: two passes take the longer limit"
 ABLE = "bench: two passes could read it"
 #: What a command says on stderr as it goes (`progress.py`, mqucifer/print-shop#336): each step
@@ -273,8 +276,9 @@ def memory_for(args: list[str]) -> str:
 
 def offered(args: list[str]) -> int | None:
     """The longer limit a bench command may take up as it runs, or None: `TWO_PASSES` for a
-    `load` that may come to two passes, where it isn't already given it."""
-    if command_word(args) == "load" and timeout_for(args) < TWO_PASSES:
+    `load` that may come to two passes, or a `clearance` whose exact reads may run past
+    `TIMEOUT`, where it isn't already given it."""
+    if command_word(args) in OFFERED and timeout_for(args) < TWO_PASSES:
         return TWO_PASSES
     return None
 

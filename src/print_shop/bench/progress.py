@@ -120,6 +120,11 @@ def step(what: str) -> Iterator[None]:
         _say(STEP_LINE, _steps[-1] if _steps else f"between steps, after {done}")
 
 
+def since() -> float:
+    """Seconds since the command began, as its lines say them."""
+    return time.monotonic() - _began
+
+
 def again(what: str) -> None:
     """The step going on said again, as `what`: how far it's got."""
     if _steps:

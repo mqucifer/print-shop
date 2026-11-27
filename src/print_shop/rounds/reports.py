@@ -46,7 +46,9 @@ REPORTS: dict[str, tuple[str, ...]] = {
     "clearance": (
         "bodies",
         "by_boxes",
+        "exact_s",
         "lift",
+        "limit",
         "pairs",
         "pairs_s",
         "placed",
@@ -791,6 +793,10 @@ SHAPES: dict[str, dict[str, Any]] = {
                     "read_by": TEXT,
                     "box_gap_mm": NUMBER,
                     "box_by": TEXT,
+                    # How long each step of an exact read took, in s, and where OCCT's common
+                    # and cut weren't run, as two other methods read the pair apart.
+                    "seconds": Keyed(NUMBER),
+                    "occt_booleans": TEXT,
                 }
             )
         ),
@@ -822,7 +828,23 @@ SHAPES: dict[str, dict[str, Any]] = {
                 "bounds_s": NUMBER,
                 "sampled": NUMBER,
                 "sample_s": NUMBER,
+                "sample_steps_s": Keyed(NUMBER),
                 "exact_estimate_s": NUMBER,
+                "limit_s": NUMBER,
+            },
+            closed=True,
+        ),
+        # Each step of an exact read, its seconds summed over the pairs read exactly.
+        "exact_s": Keyed(NUMBER),
+        # The longer limit a reading took up, as its exact reads projected past the host's: the
+        # host's, the one offered, the one it stated, its projection, and after how many pairs.
+        "limit": Row(
+            {
+                "limit_s": NUMBER,
+                "offered_s": NUMBER,
+                "stated_s": NUMBER,
+                "projected_s": NUMBER,
+                "taken_after": NUMBER,
             },
             closed=True,
         ),
