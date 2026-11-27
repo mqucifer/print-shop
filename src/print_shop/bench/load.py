@@ -831,11 +831,14 @@ class _Model:
         self.core_tensors = tensors
 
     def size_near(self) -> float:
-        """The mesh's size at a printed part's faces (`_near_walls`), in mm."""
+        """The mesh's size at a printed part's faces (`_near_walls`), in mm: `NEAR` of its
+        walls on the finer of a solve's two meshes, and `COARSER` times that on the coarser,
+        so that its second check reads a mesh coarser at the faces too."""
         if not self.cores:
             return self.size
         walls = min(float(layered.cells[0].walls_mm) for layered in self.cores.values())
-        return float(min(self.size, NEAR * walls))
+        coarser = COARSER * self.local_scale
+        return float(min(self.size, NEAR * walls * coarser))
 
     def _face_name(self, face: Any) -> str:
         # Numbered from the joined shape as it is now.
@@ -1034,27 +1037,24 @@ class _Model:
             self._stiffnesses(fea.inp_file_name)
         self._add_to(fea.inp_file_name)
         kills = oom_kills()
+        if self.cores and ITERATE_PRINTED:
+            # A part read as printed is meshed finer at its faces, a few times the elements:
+            # CalculiX's iterative solver holds them in a fraction of its direct one's memory
+            # (mqucifer/print-shop#363), corrected to the balance as two passes are.
+            with step("CalculiX's iterative solve of the joined parts, as a part is printed"):
+                self._iterated(fea, analysis, memory_met(kills) or 0, printed=True)
+            self.solve_s = round(time.time() - began, 2)
+            self._inverted(fea)
+            tidy_solve(fea)
+            self._balance()
+            return
         with step("CalculiX's solve of the joined parts"):
             _ccx(fea, self.size)
             fea.load_results()
         self.solve_s = round(time.time() - began, 2)
         results = [o for o in analysis.Group if o.isDerivedFrom("Fem::FemResultObject")]
-        if "nonpositive jacobian" in str(getattr(fea, "ccx_stdout", "")):
-            tidy_solve(fea)
-            where = self._inverted_said(str(fea.ccx_stdout))
-            if not self.straight:
-                raise _Curved(
-                    "CalculiX found an element of the curved mesh, at most "
-                    f"{self.size:g} mm, turned inside out{where}",
-                    self.closes,
-                    self.tight,
-                )
-            raise NoAnswer(
-                f"CalculiX solved nothing: an element of the mesh, at most {self.size:g} mm, is "
-                f"turned inside out{where}. One with a curved side on a small hole or a tight "
-                "round can be: give a finer --mesh"
-            )
-        if (not results or not results[0].NodeStrainXX) and self.two_pass:
+        self._inverted(fea)
+        if (not results or not results[0].NodeStrainXX) and (self.two_pass or self.cores):
             full = memory_met(kills)
             if full is not None:
                 self._iterated(fea, analysis, full)
@@ -1298,13 +1298,36 @@ class _Model:
         kinds = self.element_kind if rows is None else self.element_kind[rows]
         return material.modulus_mpa, material.poisson, self.element_tensor[kinds]
 
-    def _iterated(self, fea: Any, analysis: Any, limit: int) -> None:
+    def _inverted(self, fea: Any) -> None:
+        """Where CalculiX found an element turned inside out, nothing is read: the curved mesh
+        is tried again straight, and a straight one is refused, saying where."""
+        if "nonpositive jacobian" not in str(getattr(fea, "ccx_stdout", "")):
+            return
+        tidy_solve(fea)
+        where = self._inverted_said(str(fea.ccx_stdout))
+        if not self.straight:
+            raise _Curved(
+                "CalculiX found an element of the curved mesh, at most "
+                f"{self.size:g} mm, turned inside out{where}",
+                self.closes,
+                self.tight,
+            )
+        raise NoAnswer(
+            f"CalculiX solved nothing: an element of the mesh, at most {self.size:g} mm, is "
+            f"turned inside out{where}. One with a curved side on a small hole or a tight "
+            "round can be: give a finer --mesh"
+        )
+
+    def _iterated(self, fea: Any, analysis: Any, limit: int, printed: bool = False) -> None:
         """Solved by CalculiX's iterative solver, where its direct one met the container's
         memory (mqucifer/print-shop#301), and corrected: the iterative solver stops at a fixed
         residual, which moves a strain by a percent or so, so what's left unbalanced at each
         node, the load less what the elements carry (`element_forces`), is solved for again and
         added, until it's under `RESIDUAL` of the load. Each solve is linear, so the movement,
-        the strain, the stress and the held faces' reaction add."""
+        the strain, the stress and the held faces' reaction add; and in one pass, each node's
+        movement to CalculiX's seven figures (`_printed`) too. With `printed`, it's a part read
+        as printed that's solved so from the start (mqucifer/print-shop#363): an element turned
+        inside out stops it at its first solve, as the direct solver's would."""
         path = Path(fea.inp_file_name)
         text = path.read_text()
         static = re.search(r"^\*STATIC\s*$", text, re.M)
@@ -1318,22 +1341,33 @@ class _Model:
             job.write_text(text)
             fea.inp_file_name = str(job)
             ccx_one_thread(fea)
+            if run == 0 and "nonpositive jacobian" in str(getattr(fea, "ccx_stdout", "")):
+                return
             fea.load_results()
             results = [o for o in analysis.Group if o.isDerivedFrom("Fem::FemResultObject")]
             if not results or not results[-1].NodeStrainXX:
+                if printed and limit == 0:
+                    raise NoAnswer(
+                        f"CalculiX's iterative solver gave no result for the "
+                        f"{self.fem.VolumeCount} elements, at a mesh of at most {self.size:g} mm"
+                    )
                 raise self._too_big(limit)
             row, strain, stress, moved = _arrays(results[-1])
             reaction, held = _reaction(str(job.with_suffix(".dat")))
+            seven = None if self.two_pass else _printed(str(job.with_suffix(".dat")), row)
             if run == 0:
                 self.row, self.strain, self.stress, self.moved = row, strain, stress, moved
                 self.points = np.array([self.nodes[n] for n in results[-1].NodeNumbers])
                 self.reaction, self.held_force = reaction, held
+                self.printed = seven
             else:
                 # The same mesh, its nodes taken in the first solve's order.
                 same = [row[n] for n in self.row]
                 self.strain += strain[same]
                 self.stress += stress[same]
                 self.moved += moved[same]
+                if seven is not None and self.printed is not None:
+                    self.printed = self.printed + seven[same]
                 self.reaction = self.reaction + reaction
                 for node, force in held.items():
                     self.held_force[node] = self.held_force.get(node, 0) + force
@@ -1345,11 +1379,17 @@ class _Model:
                 break
             text = _cload(text, left, self.row)
         self.residuals = runs
+        why = (
+            "a part is read as printed, meshed finer at its faces, so it's solved by CalculiX's "
+            "iterative solver, which holds it in a fraction of the direct one's memory,"
+            if printed
+            else f"CalculiX's direct solver met the container's memory, {limit / 2**30:g} GiB, "
+            "as the container's own count of what it stopped for memory says, so it's solved by "
+            "its iterative solver"
+        )
         self.iterated = (
-            f"CalculiX's direct solver met the container's memory, {limit / 2**30:g} GiB, as the "
-            "container's own count of what it stopped for memory says, so it's solved by its "
-            f"iterative solver and corrected {len(runs) - 1} time(s), each time for what was "
-            f"left unbalanced, to {runs[-1]:.1e} of the load"
+            f"{why} and corrected {len(runs) - 1} time(s), each time for what was left "
+            f"unbalanced, to {runs[-1]:.1e} of the load"
         )
         if runs[-1] > RESIDUAL:
             raise NoAnswer(
@@ -1401,7 +1441,9 @@ class _Model:
         """What's left unbalanced at each node, as rows: the load put on it less what the
         elements carry there, on each axis CalculiX isn't told to hold."""
         wired = self._wired()
-        forces = element_forces(self.points[wired], self.moved[wired], *self._stiff())
+        # To CalculiX's seven figures where it printed them, as the balance reads them.
+        moved = self.printed if self.printed is not None else self.moved
+        forces = element_forces(self.points[wired], moved[wired], *self._stiff())
         return self._left(wired, forces)
 
     def _left(self, wired: np.ndarray, forces: np.ndarray) -> np.ndarray:
@@ -2268,9 +2310,16 @@ CROSSED = re.compile(r"intersect", re.I)
 #: How many of the faces nearest where gmsh's triangles cross are named.
 NEAREST = 4
 #: A printed part's faces are meshed at this many times its walls (`_Model._near_walls`,
-#: mqucifer/print-shop#363): its walls' band a few elements deep, a part's skin read mostly
-#: by elements all skin or laminates of it.
-NEAR = 2.0
+#: mqucifer/print-shop#363): its walls' band about an element deep, a part's skin read mostly
+#: by elements all skin or laminates of it. The planted beam of `tests/test_load_printed_cae.py`
+#: reads 6% softer than the sandwich beam's formula at it, and 24% at twice its walls.
+NEAR = 1.25
+#: Whether a part read as printed is solved by CalculiX's iterative solver from the start
+#: (`_Model.solve`, mqucifer/print-shop#363). It isn't: the direct solver reads the planted beam
+#: in a quarter of the time, in `host.PRINTED_MEMORY`, and the iterative one solves it where
+#: the direct one meets the container's memory. `tests/cae_cases/load_forced.py` turns it on to
+#: hold its figures to the direct solver's.
+ITERATE_PRINTED = False
 #: CalculiX's words for each element it finds turned inside out, with its number.
 INVERTED = re.compile(r"determinant in element\s+(\d+)")
 #: How many times the parts are meshed again finer where gmsh's triangles cross, each time

@@ -68,8 +68,9 @@ class BenchJob:
            files: list[str] | tuple[str, ...]) -> BenchJob:
         """A job of `args` over `files` in `folder`, with the command's own limits."""
         words = list(args)
-        return cls(tuple(words), folder, tuple(files), host.memory_for(words),
-                   host.timeout_for(words))
+        printed = host.reads_printed(words, folder)
+        return cls(tuple(words), folder, tuple(files), host.memory_for(words, printed),
+                   host.timeout_for(words, printed))
 
 
 @dataclass(frozen=True)
