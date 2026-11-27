@@ -357,20 +357,17 @@ def healed(core: Any, bead: float) -> Any | None:
         return core
     merged = _merged(core, narrow)
     if merged is None or slivers(merged, bead):
-        merged, tries = core, 4 * len(narrow)
-        while narrow and tries > 0:
-            for face in narrow:
-                tries -= 1
-                fewer = _merged(merged, [face])
-                if fewer is not None and len(slivers(fewer, bead)) < len(narrow):
-                    merged = fewer
-                    break
-                if tries <= 0:
-                    break
-            else:
+        # One pass, each sliver tried once, by where it is: a merge makes the faces anew.
+        merged, tried = core, set()
+        for _ in range(len(narrow)):
+            left = [f for f in slivers(merged, bead) if _where(f) not in tried]
+            if not left:
                 break
-            narrow = slivers(merged, bead)
-        if narrow:
+            tried.add(_where(left[0]))
+            fewer = _merged(merged, [left[0]])
+            if fewer is not None and len(slivers(fewer, bead)) < len(slivers(merged, bead)):
+                merged = fewer
+        if slivers(merged, bead):
             return None
     moved = abs(merged.Volume - core.Volume) / max(core.Area, 1e-9)
     return merged if moved <= AGREE * bead else None
