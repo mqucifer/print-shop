@@ -2304,15 +2304,29 @@ BALANCED = ("force_n", "moment_nmm", "pull_n", "shear_n", "bending_nmm", "twist_
 
 
 @pytest.mark.assembly
-def test_the_stool_reads_the_same_in_freecad_s_order_as_by_the_old_guess(
-    cae: Any, stool: dict[str, Answer]
-) -> None:
+def test_the_stool_reads_the_same_in_freecad_s_order_as_by_the_old_guess(cae: Any) -> None:
     """mqucifer/print-shop#320: the one pass took each element's mid-side nodes by where they
     lie, and on the stool that wired 5 of its elements otherwise than FreeCAD, small ones on
     the legs' bores, none with a node on a joint's faces. In FreeCAD's order, as now, it reads
     bit-identical to the old guess: each part's strains, each joint's force and moment, on
-    both meshes, and its bolts' pulls, and how far it moves."""
-    now, old = stool["one"], forced(cae, "guess", "load", "large/stool.json", *PUSH)
+    both meshes, and its bolts' pulls, and how far it moves.
+
+    On the same meshes: the first read keeps each mesh gmsh makes, and the second is given them
+    (mqucifer/print-shop#348). gmsh's high-order optimisation, which straightens the stool's
+    elements turned inside out, numbers the elements of each patch it moves by where they lie
+    in memory. So a process laid out otherwise, as any run can be, moves a few hundred of the
+    curved mesh's nodes by up to 2e-3 mm, and every figure after it: a joint's moment in its
+    4th decimal, in 1 of 12 loads on CI's runner and about 1 mesh in 40 on the Mac, one thread
+    or two. No gmsh option orders those patches, and the bench's container can't turn off the
+    address randomisation that varies the layout: its seccomp profile refuses it. On one mesh,
+    every solve and every figure is bit-identical from run to run, so the two wirings are
+    compared bit for bit there."""
+    meshes = "stool-meshes"
+    shutil.rmtree(cae.work / meshes, ignore_errors=True)
+    asked = ("load", "large/stool.json", *PUSH)
+    now = forced(cae, "plain", "--keep-meshes", meshes, *asked)
+    old = forced(cae, "guess", "--meshes", meshes, *asked)
+    shutil.rmtree(cae.work / meshes)
     assert now.verdict == old.verdict == "OK", old.text
     assert now.numbers["parts"] == old.numbers["parts"]
     assert now.numbers["loads"] == old.numbers["loads"]
