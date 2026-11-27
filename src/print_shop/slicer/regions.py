@@ -244,6 +244,15 @@ class Pose:
         a = int(np.argmax(np.abs(up)))
         return "xyz"[a] if abs(abs(up[a]) - 1.0) < 1e-6 else None
 
+    def up(self) -> str | None:
+        """The part's own layers axis with its sign as this pose stands it, as `printed.py`'s
+        `up` takes it (mqucifer/print-shop#337): `-z` for a part turned over."""
+        layers = self.layers()
+        if layers is None:
+            return None
+        sign = float(np.asarray(self.matrix)[2, "xyz".index(layers)])
+        return ("+" if sign > 0 else "-") + layers
+
     def plate_angle(self, own_angle: float) -> float | None:
         """`infill_angle`, the part's own, as Orca's `infill_direction` on the plate."""
         layers = self.layers()
@@ -672,6 +681,8 @@ class RegionsSlice:
     base_grams: float | None
     regions: list[RegionRead]
     settings: Settings
+    #: The way the part stood as it was sliced (`Pose.up`).
+    up: str | None = None
 
     @property
     def time_added_s(self) -> int | None:
@@ -687,8 +698,10 @@ class RegionsSlice:
 
     def for_load(self) -> dict[str, Any]:
         """The part's `print`, whole, as `load` takes it: every setting the part was sliced
-        with, resolved from the profile, and its regions (mqucifer/print-shop#337)."""
-        return as_json(Printed(self.settings, tuple(r.region for r in self.regions)))
+        with, resolved from the profile, the way it stood, and its regions
+        (mqucifer/print-shop#337)."""
+        settings = replace(self.settings, up=self.up) if self.up else self.settings
+        return as_json(Printed(settings, tuple(r.region for r in self.regions)))
 
     def lines(self) -> list[str]:
         out = [f"sliced by OrcaSlicer {self.orca} from the project {self.project.name}, with "
@@ -1050,7 +1063,7 @@ def slice_regions(
         gcode=sliced_path, base_gcode=base_path, orca=sliced_by(sliced_path) or "unknown",
         project=with_regions.path, time_s=sliced.time_s, base_time_s=base_sliced.time_s,
         grams=_footer_grams(sliced), base_grams=_footer_grams(base_sliced), regions=reads,
-        settings=with_regions.settings,
+        settings=with_regions.settings, up=with_regions.pose.up(),
     )
 
 

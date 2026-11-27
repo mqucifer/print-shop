@@ -249,6 +249,44 @@ def element_forces(
     return forces
 
 
+#: A ten-node tetrahedron's own nodes, in its own coordinates: its corners, then `MIDS`.
+_CORNERS = ((0.0, 0.0, 0.0), (1.0, 0.0, 0.0), (0.0, 1.0, 0.0), (0.0, 0.0, 1.0))
+NODES = _CORNERS + tuple(
+    tuple((a + b) / 2 for a, b in zip(_CORNERS[i], _CORNERS[j], strict=True)) for i, j in MIDS
+)
+
+
+def element_strains(
+    places: np.ndarray, moved: np.ndarray, points: tuple[tuple[float, ...], ...] = POINTS
+) -> tuple[np.ndarray, np.ndarray]:
+    """Each second-order tetrahedron's own strain at `points` in its own coordinates, its four
+    integration points unless given, from its ten nodes' movement as `element_forces` takes
+    it, and where each point is: `[element, point, 3, 3]` and `[element, point, 3]`
+    (mqucifer/print-shop#337). A printed part's core is read by its own elements' strain, at
+    their integration points and their own nodes (`NODES`): CalculiX's strain at a node is the
+    mean of its elements', and where a core meets its skin, 10 to 30 times as stiff, that's
+    the core's diluted. An element's own at the node is never less than that mean's share."""
+    corners = np.array([[-1.0, -1, -1], [1, 0, 0], [0, 1, 0], [0, 0, 1]])
+    strain = np.zeros((len(places), len(points), 3, 3))
+    at = np.zeros((len(places), len(points), 3))
+    for k, point in enumerate(points):
+        share = np.array([1 - sum(point), *point])
+        slopes = np.zeros((10, 3))
+        values = np.zeros(10)
+        for i in range(4):
+            slopes[i] = (4 * share[i] - 1) * corners[i]
+            values[i] = share[i] * (2 * share[i] - 1)
+        for m, (i, j) in enumerate(MIDS, 4):
+            slopes[m] = 4 * (share[i] * corners[j] + share[j] * corners[i])
+            values[m] = 4 * share[i] * share[j]
+        mapped = np.einsum("ak,nai->nki", slopes, places)
+        in_space = np.einsum("nik,ak->nai", np.linalg.inv(mapped), slopes)
+        grown = np.einsum("nai,naj->nij", moved, in_space)
+        strain[:, k] = (grown + grown.transpose(0, 2, 1)) / 2
+        at[:, k] = np.einsum("a,nai->ni", values, places)
+    return strain, at
+
+
 def _lame(modulus: Any, poisson: Any, count: int) -> tuple[np.ndarray, np.ndarray]:
     """Lamé's first constant and the shear modulus, one for each of `count` elements."""
     modulus = np.broadcast_to(np.asarray(modulus, dtype=float), (count,))
@@ -1606,16 +1644,26 @@ class _Model:
         for number, (_, name, cell, figures) in enumerate(self.core_solids):
             if name != part.name:
                 continue
-            rows = self.core_rows.get(number, np.array([], dtype=int))
-            if not rows.size:
+            assert self.element_core is not None
+            mine = self._wired()[self.element_core == number]
+            if not len(mine):
                 raise NoAnswer(
                     f"the part {part.name}'s core in {cell.name} has no element of the mesh "
                     f"of its own, at a mesh of at most {self.size:g} mm: give a finer --mesh"
                 )
-            read = figures.read(self.strain[rows], way, first, second)
+            # Its own elements' strain, at their integration points, from each node's movement
+            # to CalculiX's seven figures where it printed them, never averaged with its skin's.
+            moved = self.printed if self.printed is not None else self.moved
+            strain, at = element_strains(self.points[mine], moved[mine], POINTS + NODES)
+            read = figures.read(strain.reshape(-1, 3, 3), way, first, second)
             for key in ("across_at", "stretch_at"):
-                read[key] = _list(self.points[rows[read.pop(key)]], 3)
-            cores.append({"cell": cell.name, "nodes": len(rows), **figures.said(), **read})
+                read[key] = _list(at.reshape(-1, 3)[read.pop(key)], 3)
+            # And CalculiX's own, the mean at each node of every element there, for what it's
+            # worth beside it: never more than the core's own at its nodes.
+            rows = self.core_rows.get(number, np.array([], dtype=int))
+            averaged = np.einsum("i,nij,j->n", way, self.strain[rows], way) if rows.size else [0]
+            read["averaged_across_layers_pct"] = 100 * max(float(np.max(averaged)), 0.0)
+            cores.append({"cell": cell.name, "elements": len(mine), **figures.said(), **read})
         found["cores"] = cores
         return found
 
@@ -2663,7 +2711,13 @@ def _run(
             "UNREAD", "; and ".join(why) + ". Everything else read is within its limit"
         )
     else:
-        worst = max(fine["parts"].items(), key=lambda p: p[1]["across_layers_pct"])
+        # Every part's, and where it's printed its skin's and each core's
+        # (mqucifer/print-shop#337).
+        across = []
+        for name, one in fine["parts"].items():
+            across.append((name + ("'s skin" if one.get("printed") else ""), one))
+            across += [(f"{name}'s core in {c['cell']}", c) for c in one.get("cores", [])]
+        worst = max(across, key=lambda p: p[1]["across_layers_pct"])
         under = (
             f"lifted by {args.lift}, with {1000 * args.weight:.1f} g hanging from it,"
             if args.lift is not None
@@ -2698,11 +2752,13 @@ def _as_printed(assembly: Assembly, report: Report, cores: dict[str, list[Any]])
                 "bottom_mm": round(cell.bottom_mm, 3),
                 "volume_mm3": round(cell.volume_mm3, 1),
                 "core_mm3": round(cell.core_mm3, 1),
+                "core_box": cell.core_box,
                 **figures.said(),
             })
             report.line(
                 f"the part {part.name} as printed, {cell.name}: {cell.settings.said()}; so walls "
-                f"{cell.walls_mm:.2f} mm thick, {cell.top_mm:.2f} mm of shells under each top "
+                f"{cell.walls_mm:.2f} mm thick, as many of Orca's beads' spacing, its classic "
+                f"walls' and Arachne's alike, {cell.top_mm:.2f} mm of shells under each top "
                 f"face and {cell.bottom_mm:.2f} mm over each bottom one, round a core of "
                 f"{cell.core_mm3:.0f} mm³ of its {cell.volume_mm3:.0f}"
                 + ("" if solids else ": its walls and shells fill it, so it's solid")

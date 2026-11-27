@@ -13,8 +13,16 @@ from typing import Any
 import numpy as np
 import pytest
 
-from print_shop.bench import assembly, infill
-from print_shop.bench.load import ANISO, _aniso, element_forces, element_stiffness
+from print_shop.bench import as_printed, assembly, infill
+from print_shop.bench.load import (
+    ANISO,
+    NODES,
+    POINTS,
+    _aniso,
+    element_forces,
+    element_stiffness,
+    element_strains,
+)
 from print_shop.bench.printed import Settings
 from print_shop.bench.report import NoAnswer
 
@@ -216,3 +224,54 @@ def test_an_assembly_part_reads_its_print_and_a_part_without_one_reads_solid(
     path.write_text(json.dumps({"parts": parts}))
     with pytest.raises(NoAnswer, match="the part bar's print's infill"):
         assembly.read(str(path))
+
+
+def test_walls_are_as_thick_as_orca_s_beads_lay_plastic() -> None:
+    """Orca 2.4.2's `Flow.cpp`: a bead's spacing is "width - height * float(1. - 0.25 * PI)",
+    and its plastic per mm is its height times that, so n walls are n spacings of plastic: 2
+    at 0.45 mm lines and 0.2 mm layers are 0.814 mm, not 0.9, and 4 are 1.628."""
+    spacing = 0.45 - 0.2 * (1 - math.pi / 4)
+    assert as_printed.wall_thickness(2, 0.45, 0.2) == pytest.approx(2 * spacing)
+    assert as_printed.wall_thickness(2, 0.45, 0.2) == pytest.approx(0.814, abs=0.001)
+    assert as_printed.wall_thickness(4, 0.45, 0.2) == pytest.approx(1.628, abs=0.001)
+    assert as_printed.wall_thickness(0, 0.45, 0.2) == 0
+
+
+def test_an_element_s_strain_is_its_own_read_from_its_nodes_movement() -> None:
+    """A second-order tetrahedron's strain at its four integration points, from its ten nodes'
+    movement: a movement linear in place is one strain, exactly, wherever the element is, so a
+    core's strain is its own elements' and never its skin's averaged in at a node they share."""
+    corners = np.array([[0.0, 0, 0], [2, 0, 0], [0, 3, 0], [0, 0, 1.5]])
+    places = np.concatenate([corners, [(corners[i] + corners[j]) / 2 for i, j in
+                                       ((0, 1), (1, 2), (2, 0), (0, 3), (1, 3), (2, 3))]])
+    places = np.stack([places, places * 0.7 + 3])
+    grown = np.array([[1e-3, 2e-4, 0], [0, -5e-4, 3e-4], [1e-4, 0, 2e-3]])
+    moved = np.einsum("ij,naj->nai", grown, places)
+    strain, at = element_strains(places, moved)
+    assert strain.shape == (2, 4, 3, 3) and at.shape == (2, 4, 3)
+    assert np.allclose(strain, (grown + grown.T) / 2)
+    # Its points are inside it: each a mean of its corners with positive weights.
+    assert np.allclose(at[0].mean(axis=0), corners.mean(axis=0))
+
+
+def test_a_core_is_read_at_its_own_nodes_never_averaged_with_its_skin_s() -> None:
+    """Two elements sharing a face, a stiff skin's barely strained and a soft core's strained
+    across: CalculiX's strain at a node they share is the mean of the two, half the core's.
+    The core's own at that node, from its own nodes' movement, is the whole of it."""
+    corners = np.array([[0.0, 0, 0], [2, 0, 0], [0, 2, 0], [0, 0, 2]])
+
+    def ten(four: np.ndarray) -> np.ndarray:
+        return np.concatenate([four, [(four[i] + four[j]) / 2 for i, j in
+                                      ((0, 1), (1, 2), (2, 0), (0, 3), (1, 3), (2, 3))]])
+
+    skin, core = ten(corners), ten(corners * [1, 1, -1])
+    pulled = np.array([[0, 0, 0], [0, 0, 0], [0, 0, 4e-3]])
+    moved = np.stack([np.einsum("ij,aj->ai", pulled * 0.05, skin),
+                      np.einsum("ij,aj->ai", pulled, core)])
+    strain, at = element_strains(np.stack([skin, core]), moved, POINTS + NODES)
+    assert strain.shape == (2, 14, 3, 3)
+    shared = strain[:, 4, 2, 2]  # the first corner, a node both have
+    assert shared[1] == pytest.approx(4e-3) and shared[0] == pytest.approx(2e-4)
+    assert shared[1] > 1.9 * shared.mean()
+    assert np.allclose(at[:, 4], 0.0), "the corner both share"
+    assert len(NODES) == 10

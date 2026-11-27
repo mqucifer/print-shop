@@ -21,7 +21,7 @@ from typing import Any
 import numpy as np
 import pytest
 
-from print_shop.bench import host, infill
+from print_shop.bench import as_printed, host, infill
 from print_shop.bench.assembly import MATERIALS
 from print_shop.bench.printed import Settings
 
@@ -75,13 +75,14 @@ def cae(tmp_path_factory: pytest.TempPathFactory) -> Any:
 def sandwich(walls: int, density: float, pattern: str = "grid", angle: float = 0.0) -> float:
     """How far the beam's tip moves as a sandwich beam: FL³/(3·EI), with EI the skin's and the
     core's about their own neutral axis, the skin solid and the core its infill's stiffness
-    along the beam (`infill.Core`). Its walls are 0.45 mm each, and its 5 top and 3 bottom
-    layers 0.2 mm, as `make_fixtures.PRINT` has them."""
+    along the beam (`infill.Core`). Its walls are Orca's beads' spacing at 0.45 mm lines and 0.2
+    mm layers (`as_printed.wall_thickness`), and its 5 top and 3 bottom layers 0.2 mm, as
+    `make_fixtures.PRINT` has them."""
     found = infill.core(Settings(pattern=pattern, infill=density, infill_angle=angle),
                         MATERIALS["petg"])
     up, first, second = np.eye(3)[2], np.eye(3)[0], np.eye(3)[1]
     core = infill.pulled(found.stiffness(up, first, second), first)
-    side, low, high = walls * 0.45, 3 * 0.2, DEPTH - 5 * 0.2
+    side, low, high = as_printed.wall_thickness(walls, 0.45, 0.2), 3 * 0.2, DEPTH - 5 * 0.2
     area, inner = WIDTH * DEPTH, (WIDTH - 2 * side) * (high - low)
     soft = MODULUS - core
     axial = MODULUS * area - soft * inner
@@ -93,13 +94,17 @@ def sandwich(walls: int, density: float, pattern: str = "grid", angle: float = 0
 
 
 def worst(answer: Answer) -> float:
-    """The read nearest its limit, of the skin's and each core's, as a share of the limit."""
+    """What bends the bar nearest its limit, as a share of the limit: the skin's pull across
+    its layers and its stretch, and each core's stretch. A core's own pull across its layers
+    is judged too, but not here: next to the clamped root, where its bottom shells are pushed
+    along it, a stiffer core takes more of the clamp's hold (at 2 walls, 0.166%, 0.187% and
+    0.192% at 20, 40 and 60%, all under its 0.48%), while what bends the bar falls."""
     beam = answer.numbers["parts"]["beam"]
     shares = [beam["across_layers_pct"] / beam["across_limit_pct"],
               beam["stretch_pct"] / beam["stretch_limit_pct"]]
     for core in beam["cores"]:
-        shares += [core["across_layers_pct"] / core["across_limit_pct"],
-                   core["stretch_pct"] / core["stretch_limit_pct"]]
+        shares.append(core["stretch_pct"] / core["stretch_limit_pct"])
+        assert core["across_layers_pct"] < core["across_limit_pct"]
     return float(max(shares))
 
 
@@ -118,12 +123,16 @@ def test_a_printed_bar_reads_stiffer_and_stronger_as_its_walls_and_infill_rise(c
         # Softer than the solid beam, which the skin and core can never pass.
         assert moves > solid.numbers["moves_mm"]
         printed = answer.numbers["printed"]["beam"][0]
-        assert printed["walls_mm"] == pytest.approx(walls * 0.45)
+        side = as_printed.wall_thickness(walls, 0.45, 0.2)
+        assert printed["walls_mm"] == pytest.approx(side, abs=1e-3)
         assert printed["top_mm"] == pytest.approx(1.0)
         assert printed["bottom_mm"] == pytest.approx(0.6)
         assert printed["core_mm3"] == pytest.approx(
-            (120 - 2 * walls * 0.45) * (20 - 2 * walls * 0.45) * (10 - 1.6), rel=0.01
+            (120 - 2 * side) * (20 - 2 * side) * (10 - 1.6), rel=0.01
         )
+        # Printed own +z up: its 3 bottom layers on its z 0 face, its 5 top on its z 10.
+        (_, _, low), (_, _, high) = printed["core_box"]
+        assert (low, high) == (pytest.approx(0.6, abs=1e-3), pytest.approx(9.0, abs=1e-3))
     for walls in (2, 4):
         moves = [read[(walls, d)].numbers["moves_mm"] for d in (20, 40, 60)]
         shares = [worst(read[(walls, d)]) for d in (20, 40, 60)]
@@ -140,7 +149,8 @@ def test_a_printed_bar_reads_stiffer_and_stronger_as_its_walls_and_infill_rise(c
 def test_the_reply_says_what_it_assumed_and_that_no_print_has_checked_it(cae: Any) -> None:
     answer = cae("load", "load/printed-2-20.json", *TIP)
     assert "the part beam as printed, the part: 2 walls" in answer.text
-    assert "walls 0.90 mm thick, 1.00 mm of shells under each top face" in answer.text
+    assert "walls 0.81 mm thick, as many of Orca's beads' spacing" in answer.text
+    assert "1.00 mm of shells under each top face" in answer.text
     assert "Ben hadj Hassine et al. 2024, Polymers 16:1562" in answer.text
     assert "mqucifer/print-shop#340" in answer.text
     assert "Alabdli et al. 2026" in answer.text and "grid from 20%" in answer.text
@@ -171,7 +181,8 @@ def test_a_box_round_the_root_stiffens_it_and_its_own_walls_more(cae: Any) -> No
     box = {c["cell"]: c for c in dense.numbers["printed"]["beam"]}
     assert island["walled"]["core_mm3"] < box["root"]["core_mm3"]
     assert island["the part"]["core_mm3"] < box["the part"]["core_mm3"]
-    whole = (120 - 1.8) * (20 - 1.8) * 8.4
+    side = as_printed.wall_thickness(2, 0.45, 0.2)
+    whole = (120 - 2 * side) * (20 - 2 * side) * 8.4
     assert box["root"]["core_mm3"] + box["the part"]["core_mm3"] == pytest.approx(whole, rel=0.01)
 
 
@@ -189,7 +200,9 @@ def test_a_band_of_layers_is_read_in_the_part_s_own_axes_and_a_box_wins_over_it(
     assert cells["band"]["settings"]["infill"] == 40
     assert cells["the part"]["settings"]["infill"] == 20
     # The band holds the beam's lower 5 mm beyond the box, its bottom shells and walls left out.
-    assert cells["band"]["core_mm3"] == pytest.approx((120 - 30) * (20 - 1.8) * (5 - 0.6), rel=0.02)
+    side = as_printed.wall_thickness(2, 0.45, 0.2)
+    assert cells["band"]["core_mm3"] == pytest.approx(
+        (120 - side - 30) * (20 - 2 * side) * (5 - 0.6), rel=0.01)
 
 
 def test_a_printed_part_s_joint_carries_what_statics_says(cae: Any) -> None:
@@ -225,9 +238,45 @@ def test_lines_along_the_bar_hold_it_stiffer_than_lines_across_it(cae: Any) -> N
         )
 
 
+def test_a_part_printed_turned_over_has_its_top_shells_on_its_other_face(cae: Any) -> None:
+    """Own -z up, its 5 top layers are on its z 0 face and its 3 bottom on its z 10: the core
+    runs from 1.0 to 9.4, where printed own +z up it runs from 0.6 to 9.0. Where a face pulled
+    has the thinner shells under it, it reads weaker."""
+    over = cae("load", "load/printed-over.json", *TIP)
+    assert over.verdict == "OK", over.text
+    (_, _, low), (_, _, high) = over.numbers["printed"]["beam"][0]["core_box"]
+    assert (low, high) == (pytest.approx(1.0, abs=1e-3), pytest.approx(9.4, abs=1e-3))
+    assert "printed own -z up" in over.text
+
+
+def test_a_core_pulled_across_its_layers_is_read_at_its_own_elements(cae: Any) -> None:
+    """A block 40 x 40 x 10 held on its bed face and pulled up by 50 kg over its top: its core
+    is read at its own elements' integration points and nodes, never less than CalculiX's
+    mean at a node, which takes in the skin's where they meet; and on average no less than a
+    column of shells and core beside its walls says: the walls and the column stretch alike,
+    the column's shells and core in series."""
+    pulled = cae("load", "load/printed-pulled.json", "--weight", "50", "--at", "20,20,10",
+                 "--over", "40", "--toward", "+z")
+    assert pulled.verdict == "OK", pulled.text
+    core = pulled.numbers["parts"]["block"]["cores"][0]
+    assert core["across_layers_pct"] >= core["averaged_across_layers_pct"] - 1e-9
+    side = as_printed.wall_thickness(2, 0.45, 0.2)
+    found = infill.core(Settings(pattern="grid", infill=20, infill_angle=0), MATERIALS["petg"])
+    up, first, second = np.eye(3)[2], np.eye(3)[0], np.eye(3)[1]
+    across = infill.pulled(found.stiffness(up, first, second), up)
+    inner = (40 - 2 * side) ** 2
+    column = 1.6 / MODULUS + 8.4 / across
+    stretch = 50 * G / (inner / column + MODULUS * (40**2 - inner) / 10)
+    assert core["across_layers_pct"] > 100 * stretch / column / across
+
+
 @pytest.mark.parametrize(
     ("changed", "says"),
     [
+        ({"up": None}, "doesn't say which way it stands"),
+        ({"walls": 0}, "given walls 0"),
+        ({"top": 0}, "given top 0"),
+        ({"up": "+x"}, "its layers are along its own z"),
         ({"pattern": None}, "without pattern"),
         ({"infill": 90}, "read solid"),
         ({"pattern": "honeycomb"}, "isn't read as printed yet"),

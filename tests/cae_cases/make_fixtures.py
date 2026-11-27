@@ -1075,7 +1075,7 @@ def seam() -> None:
 #: A printed bar's settings (mqucifer/print-shop#337): the store's own lines, 0.45 mm walls and
 #: 0.2 mm layers, five layers on top and three under, as `profiles/standard` gives them.
 PRINT = {"line_width": 0.45, "top": 5, "bottom": 3, "pattern": "grid", "infill_angle": 0,
-         "layer_height": 0.2}
+         "layer_height": 0.2, "up": "+z"}
 #: The printed bar's walls and densities, and its box round the root.
 PRINT_WALLS, PRINT_INFILL = (2, 4), (20, 40, 60)
 
@@ -1104,6 +1104,15 @@ def printed() -> None:
     settings = {**PRINT, "walls": 2, "infill": 20, "regions": [root, band]}
     row = {"name": "beam", "file": "beam.step", "layers": "z", "print": settings}
     assembly(out / "printed-band.json", [row], held=wall)
+    # The beam printed turned over, own -z up: its 5 top layers on its z 0 face.
+    settings = {**PRINT, "walls": 2, "infill": 20, "up": "-z"}
+    row = {"name": "beam", "file": "beam.step", "layers": "z", "print": settings}
+    assembly(out / "printed-over.json", [row], held=wall)
+    # A block pulled straight across its layers, held on its bed face, its top pulled up.
+    save(box((0, 0, 0), (40, 40, 10)), out / "pulled.step")
+    settings = {**PRINT, "walls": 2, "infill": 20}
+    row = {"name": "block", "file": "pulled.step", "layers": "z", "print": settings}
+    assembly(out / "printed-pulled.json", [row], held=[{"plane": "z=0", "how": "fixed"}])
     # The beam as two halves bolted at its middle, as `two.json`, each printed: each has its own
     # walls at the faces where they meet.
     half = BEAM_L / 2

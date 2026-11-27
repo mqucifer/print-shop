@@ -118,7 +118,8 @@ def test_settings_are_said_in_orcas_own_keys() -> None:
         "inner_wall_line_width": "0.45", "outer_wall_line_width": "0.45",
         "bottom_shell_layers": "4", "bottom_shell_thickness": "0",
     }
-    assert set(ORCA) == {f for f in Settings.__dataclass_fields__}
+    # Every setting is Orca's but `up`, the way the part stands, which the pose gives.
+    assert set(ORCA) == {f for f in Settings.__dataclass_fields__} - {"up"}
 
 
 @pytest.mark.parametrize("layers,angle,way", [
@@ -236,3 +237,19 @@ def test_two_regions_of_one_name_are_refused() -> None:
 def test_every_pattern_name_is_orcas() -> None:
     assert {"gyroid", "grid", "rectilinear", "cubic", "line", "triangles"} <= PATTERNS
     assert "zig-zag" not in PATTERNS  # Orca reads it as rectilinear: say that
+
+
+def test_the_way_up_is_the_parts_own_and_signed_and_not_orcas() -> None:
+    """`up` is the part's layers axis with its sign as it prints (mqucifer/print-shop#337): a
+    part posed upside down has its top shells on its own -z faces. It's the whole part's, Orca
+    has no key for it, and `load` needs it only where top and bottom differ."""
+    whole = read({"walls": 2, "top": 5, "bottom": 3, "up": "-z"})
+    assert whole.settings.up == "-z"
+    assert "up" not in whole.settings.missing()
+    assert "up" not in str(whole.settings.orca())
+    assert "own -z up" in whole.settings.said()
+    assert as_json(whole)["up"] == "-z"
+    with pytest.raises(ValueError, match="print's up is"):
+        read({"up": "z"})
+    with pytest.raises(ValueError, match="can't set up"):
+        read({"regions": [{"name": "r", "box": [[0, 0, 0], [1, 1, 1]], "up": "+z"}]})

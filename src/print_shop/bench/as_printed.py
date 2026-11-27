@@ -4,7 +4,8 @@ of their own settings (mqucifer/print-shop#337).
 `load` reads a part the assembly file gives print settings for (`printed.py`) as a solid skin
 round a core, each with its own figures (`infill.py`). This makes the core: whatever of the part
 is further than its walls from its outline in its own layer, and further than its top shells
-below each face it has above, and its bottom shells over each face below. What's left of the
+below each face that looks the way it stands as it prints (`Settings.up`), and its bottom
+shells over each that looks the other way. What's left of the
 part is the skin. The mesh then has a face where the skin meets the core, so each element is
 skin or core, and none is half of each: a 5 mm element can't tell a 0.9 mm wall from the infill
 behind it, and with the skin smeared over the elements it lies in, a bar's section is 19 to 38%
@@ -15,7 +16,8 @@ the point its bottom shells below it, and each of 16 points its walls away round
 layer's plane: so the core is the part's common with each of 18 copies of itself, each moved by
 one of those. It's OCCT's `common` of solids only, which holds on any shape where an offset
 surface doesn't, and it errs one way: a wall between two of the 16 directions is read at least
-cos(11.25°), 98%, as thick as it is, so the skin is never thicker than the slicer's. Only each
+cos(11.25°), 98%, as thick as it is, so the skin is never thicker than its own plastic
+(`wall_thickness`). Only each
 point's end is tested, so a slot narrower than the shells between a point and the one it tests
 is passed over, and Orca's own rules for small areas, such as filling one under
 `minimum_sparse_infill_area` solid, aren't read: each leaves the core a little larger, and the
@@ -62,11 +64,14 @@ class Cell:
     #: The cell's volume, and its core's, in mm³.
     volume_mm3: float
     core_mm3: float
+    #: The core's box in the part's own axes, its least and most corners, or None for none.
+    core_box: tuple[tuple[float, ...], tuple[float, ...]] | None = None
 
     @property
     def walls_mm(self) -> float:
         s = self.settings
-        return float(s.walls or 0) * float(s.line_width or 0)
+        return wall_thickness(int(s.walls or 0), float(s.line_width or 0),
+                              float(s.layer_height or 0))
 
     @property
     def top_mm(self) -> float:
@@ -75,6 +80,19 @@ class Cell:
     @property
     def bottom_mm(self) -> float:
         return float(self.settings.bottom or 0) * float(self.settings.layer_height or 0)
+
+
+def wall_thickness(walls: int, width: float, height: float) -> float:
+    """How thick a part's walls are, in mm: as many beads' spacing, by Orca 2.4.2's own flow,
+    `Flow.cpp`'s "auto out = width - height * float(1. - 0.25 * PI);". That's a bead's plastic
+    over its height ("float(m_height * (m_width - m_height * (1. - 0.25 * PI)))", its mm³ per
+    mm): its loops are laid that far apart (`PerimeterGenerator.cpp`, "coord_t distance = (i
+    == 1) ? ext_perimeter_spacing2 : perimeter_spacing;") and the infill is cut half of it
+    inside the last ("perimeter_spacing / 2"). So the walls are no thicker than their plastic,
+    and the overlap Orca gives the infill onto them adds infill, not wall."""
+    if walls <= 0:
+        return 0.0
+    return walls * (width - height * (1.0 - math.pi / 4))
 
 
 def _vector(axis: int, size: float) -> Any:
@@ -118,14 +136,17 @@ def eroded_in_plane(shape: Any, layers: int, by: float) -> Any | None:
     return left
 
 
-def eroded_along(shape: Any, layers: int, top: float, bottom: float) -> Any | None:
+def eroded_along(
+    shape: Any, layers: int, top: float, bottom: float, up: float = 1.0
+) -> Any | None:
     """What of `shape` is at least `top` below each face it has above, and `bottom` over each
-    face below, along the `layers` axis."""
+    face below, along the `layers` axis: above is its +, or with `up` -1, its - (the part
+    printed turned over)."""
     left = shape
     if top > 0:
-        left = left.common(shape.translated(_vector(layers, -top)))
+        left = left.common(shape.translated(_vector(layers, -top * up)))
     if bottom > 0 and left.Volume > NOTHING:
-        left = left.common(shape.translated(_vector(layers, bottom)))
+        left = left.common(shape.translated(_vector(layers, bottom * up)))
     return left if left.Volume > NOTHING else None
 
 
@@ -185,6 +206,15 @@ def dilated_in_plane(shape: Any, layers: int, by: float) -> Any:
     return grown
 
 
+def _box(solids: list[Any]) -> tuple[tuple[float, ...], tuple[float, ...]] | None:
+    """Solids' box together, its least and most corners, or None for none."""
+    if not solids:
+        return None
+    boxes = [s.BoundBox for s in solids]
+    return (tuple(round(min(getattr(b, f"{a}Min") for b in boxes), 4) for a in "XYZ"),
+            tuple(round(max(getattr(b, f"{a}Max") for b in boxes), 4) for a in "XYZ"))
+
+
 def _fragments(part: Any, shapes: list[tuple[str, Any]]) -> list[tuple[tuple[str, ...], Any]]:
     """The part cut by each region's shape, in order: each piece with the regions round it."""
     pieces: list[tuple[tuple[str, ...], Any]] = [((), part)]
@@ -217,6 +247,13 @@ def cells(part: Any, printed: Printed, layers: int, folder: Path, name: str) -> 
             "reads a printed part from the settings it's sliced with, all of them given at the "
             "part's own level, as the slice's profile has them, and guesses none"
         )
+    up = printed.settings.up
+    if up is not None and up[1] != "xyz"[layers]:
+        raise NoAnswer(
+            f"the part {name}'s print says it stands own {up} up, and its layers are along its "
+            f"own {'xyz'[layers]}: `up` is its layers axis with its sign as it prints"
+        )
+    sign = -1.0 if up is not None and up[0] == "-" else 1.0
     by_name = {r.name: r for r in printed.regions}
     # A volume, a box, a cylinder or a mesh, wins over a height range whatever their order, as
     # Orca applies a height range to the object and its modifiers over it; the volumes, in order.
@@ -238,27 +275,43 @@ def cells(part: Any, printed: Printed, layers: int, folder: Path, name: str) -> 
     seams = [r.name for r in ordered
              if r.settings.walls is not None and not isinstance(r.shape, Layers)]
     line = float(printed.settings.line_width or 0)
-    inner = {r: eroded_in_plane(solid_of[r], layers, line) for r in seams}
-    outer = {r: dilated_in_plane(solid_of[r], layers, line) for r in seams}
+    # One ring of wall: one bead's spacing, as any wall (`wall_thickness`).
+    ring = wall_thickness(1, line, float(printed.settings.layer_height or 0))
+    inner = {r: eroded_in_plane(solid_of[r], layers, ring) for r in seams}
+    outer = {r: dilated_in_plane(solid_of[r], layers, ring) for r in seams}
     found = []
     for labels, piece in pieces:
         own = printed.settings
         for label in labels:
             own = by_name[label].settings.over(own)
-        walls = float(own.walls or 0) * line
+        where = f"the part {name}" + (f"'s {' and '.join(labels)}" if labels else "")
+        for field in ("walls", "top", "bottom"):
+            if not getattr(own, field):
+                raise NoAnswer(
+                    f"{where} is given {field} 0: its core would reach its outside, which "
+                    "`load` doesn't read yet. Give it 1 or more, or leave out its `print` and "
+                    "it's read solid"
+                )
+        if own.top != own.bottom and up is None:
+            raise NoAnswer(
+                f"{where} has {own.top} top layers and {own.bottom} bottom, and its print "
+                "doesn't say which way it stands: give `up`, its layers axis with its sign as "
+                f"it prints, such as \"+{'xyz'[layers]}\" or \"-{'xyz'[layers]}\""
+            )
+        walls = wall_thickness(int(own.walls or 0), line, float(own.layer_height or 0))
         top = float(own.top or 0) * float(own.layer_height or 0)
         bottom = float(own.bottom or 0) * float(own.layer_height or 0)
         core: list[Any] = []
         inside = eroded_in_plane(part, layers, walls)
-        shelled = eroded_along(part, layers, top, bottom) if inside is not None else None
+        shelled = eroded_along(part, layers, top, bottom, sign) if inside is not None else None
         if inside is not None and shelled is not None:
             left = inside.common(shelled).common(piece)
             for seam in seams:
                 if left.Volume <= NOTHING:
                     break
                 if seam in labels:
-                    ring = inner[seam]
-                    left = left.common(ring) if ring is not None else left.cut(left)
+                    within = inner[seam]
+                    left = left.common(within) if within is not None else left.cut(left)
                 else:
                     left = left.cut(outer[seam])
             core = _solids(left)
@@ -270,6 +323,7 @@ def cells(part: Any, printed: Printed, layers: int, folder: Path, name: str) -> 
                 tuple(core),
                 float(piece.Volume),
                 float(sum(s.Volume for s in core)),
+                _box(core),
             )
         )
     return found
