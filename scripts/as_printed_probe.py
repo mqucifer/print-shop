@@ -67,9 +67,12 @@ def step_of(text: str) -> str:
 
 def scrubbed(reason: str, names: list[str], words: int = 24) -> str:
     """A refusal's first `words`, each part's name its number and every figure #."""
-    for k, name in sorted(enumerate(names, 1), key=lambda n: -len(n[1])):
-        reason = reason.replace(name, f"part {k}")
+    ordered = sorted(enumerate(names, 1), key=lambda n: -len(n[1]))
+    for k, name in ordered:
+        reason = reason.replace(name, f"\0{chr(0x100 + k)}\0")
     reason = re.sub(r"\d+(\.\d+)?", "#", reason)
+    for k, _ in ordered:
+        reason = reason.replace(f"\0{chr(0x100 + k)}\0", f"part {k}")
     return " ".join(reason.split()[:words])
 
 
