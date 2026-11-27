@@ -39,6 +39,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from print_shop.bench.as_printed import wall_thickness
 from print_shop.bench.assembly import Material
 from print_shop.bench.printed import Settings
 from print_shop.core.state import Orientation
@@ -144,7 +145,11 @@ TOOLS: list[dict[str, Any]] = [
         {"pattern": {"type": "string", "enum": list(PATTERNS)}}, []),
     _fn("read", "Slice a candidate through Orca for its time and grams, and read it with load "
         "under each of the part's load cases: each case's worst figures against their limits, "
-        "where and which way. Give only what differs from the defaults.",
+        "where and which way. Give only what differs from the defaults. A region with walls of "
+        "its own is walled round its own outline from every side, so it holds one wall for each "
+        "two bead spacings of its depth in the part (a face mesh 1 mm deep holds 1): choose its "
+        "depth (margin) and walls together. One asking more than it holds is refused before "
+        "it's sliced, saying what fits.",
         {"why": _TEXT,
          "settings": {"type": "object", "properties": _OWN, "additionalProperties": False},
          "wall_sequence": {"type": "string", "enum": list(WALL_SEQUENCES)},
@@ -316,6 +321,8 @@ def reading_said(reading: Reading, base: Reading | None, most: int = 3) -> list[
     """A reading as the model and the table say it: its time and grams against the defaults, and
     each case's worst figures, where and which way."""
     lines = [f"{reading.candidate.name}: {reading.candidate.said()}"]
+    if reading.candidate.notes:
+        lines.append("  before slicing: " + "; ".join(reading.candidate.notes))
     if reading.sliced is not None:
         lines.append("  " + _against(reading, base))
     if reading.error:
@@ -351,7 +358,9 @@ def _user(part: StudyPart, loop: StudyLoop, base: Reading) -> str:
         f"The part: {part.name} ({part.stl.name}), printed in {part.filament or 'its filament'}, "
         f"turned {poses_said([part.turn])}, standing own {d.up or '?'} up.",
         f"Its profile's own settings: {d.said()}; walls laid "
-        f"{part.wall_sequence or 'as the profile says'}.",
+        f"{part.wall_sequence or 'as the profile says'}. A bead's spacing is "
+        f"{wall_thickness(1, float(d.line_width or 0.45), float(d.layer_height or 0.2)):.2f} mm: "
+        "a region holds one wall of its own for each two of them across its depth in the part.",
         "Its load cases, each read by load on the part as printed:",
         *(f"- {c.said()}" for c in part.cases),
         "Its joints, each a region can be put round (`regions: [{\"joints\": [NAME], "

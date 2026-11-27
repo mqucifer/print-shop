@@ -38,7 +38,15 @@ from print_shop.bench.printed import Box, Mesh, Printed, Region, Settings, as_js
 from print_shop.ingest.orientation import AXIS_ALIGNED
 from print_shop.setup.context import PartContext
 from print_shop.slicer.joints import round_joints
-from print_shop.slicer.regions import Bed, Pose, degrees_said, fit_of, turned_to_fit
+from print_shop.slicer.regions import (
+    Bed,
+    Pose,
+    degrees_said,
+    fit_of,
+    turned_to_fit,
+    walls_depth,
+    walls_held,
+)
 
 __all__ = [
     "DEFAULTS",
@@ -108,6 +116,9 @@ class Candidate:
     why: str = ""
     #: Each mesh region's file, by its region's name: made in the study's folder.
     meshes: dict[str, Path] = field(default_factory=dict)
+    #: What was found before slicing: each region with walls of its own, how deep it lies in
+    #: the part and the walls that holds (`regions.walls_held`).
+    notes: tuple[str, ...] = ()
 
     def key(self) -> str:
         """What it asks, as one string: two candidates that ask the same are read once."""
@@ -132,7 +143,7 @@ class Candidate:
     def plain(self) -> dict[str, Any]:
         return {"name": self.name, "why": self.why, "said": self.said(),
                 "print": as_json(self.printed()), "turn": list(self.turn),
-                "wall_sequence": self.wall_sequence}
+                "wall_sequence": self.wall_sequence, "notes": list(self.notes)}
 
 
 def _number(raw: Any, where: str, low: float, high: float, whole: bool = False) -> float:
@@ -226,6 +237,9 @@ class Shaper:
     assembly: Assembly | None = None
     part: str | None = None
     poses: tuple[tuple[float, float, float], ...] = AXIS_ALIGNED
+    #: The profile's line width and layer height, which set a bead's spacing.
+    line_width: float = 0.45
+    layer_height: float = 0.2
     made: int = 0
 
     def joints(self) -> list[tuple[str, str]]:
@@ -269,8 +283,48 @@ class Shaper:
                 regions.append(self._region(item, k))
         # Read again whole, so the names are each a region's own and the bands don't overlap.
         whole = read(as_json(Printed(Settings(), tuple(regions))), f"{name}'s regions")
+        notes = self._depths(whole.regions, (turn[0], turn[1], turn[2]))
         return Candidate(name, settings, whole.regions, (turn[0], turn[1], turn[2]),
-                         sequence, str(args.get("why", "")), meshes)
+                         sequence, str(args.get("why", "")), meshes, notes)
+
+    def _depths(self, regions: Sequence[Region], turn: tuple[float, float, float]
+                ) -> tuple[str, ...]:
+        """Each region with walls of its own, how deep it lies in the part and the walls that
+        holds, before Orca slices it (mqucifer/print-shop#357).
+
+        Raises:
+            ValueError: Where a region asks more walls than its depth holds: Orca would lay
+                fewer, the reader would find it, and the candidate would fail as not as sliced,
+                so no slice is spent on it. The refusal says what would fit.
+        """
+        layers = Pose.of(self.mesh, turn).layers()
+        if layers is None:
+            return ()
+        notes, refused = [], []
+        for region in regions:
+            asked = region.settings.walls
+            if asked is None:
+                continue
+            need = walls_depth(asked, self.line_width, self.layer_height)
+            depth = walls_held(self.mesh, region, layers, self.folder, self.line_width,
+                               self.layer_height)
+            if depth is None:
+                continue
+            if asked > depth.holds:
+                fewer = (f"ask {depth.holds} or fewer" if depth.holds else
+                         "give it no walls of its own")
+                refused.append(
+                    f"region {region.name} asks {asked} walls, but it {depth.held()}: {fewer}, "
+                    f"or make it at least {need:.2f} mm deep in the part (a joint region's "
+                    "margin, a cylinder's radius past its hole)")
+            else:
+                notes.append(depth.said())
+        if refused:
+            raise ValueError(
+                "; ".join(refused) + ". A region with walls of its own is walled round its own "
+                "outline from every side, one wall for each two bead spacings of its depth: "
+                "Orca would lay fewer, and load would read them as asked, so it isn't sliced")
+        return tuple(notes)
 
     def _region(self, item: dict[str, Any], k: int) -> Region:
         if extra := set(item) - _REGION:

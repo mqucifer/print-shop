@@ -161,7 +161,7 @@ THREE_WALLS = ("read", {"why": "the skin is pulled across its layers: more walls
 FOUR_WALLS = ("read", {"why": "between", "settings": {"walls": 4, "infill": 30,
                                                        "pattern": "grid", "infill_angle": 0}})
 BOLT = ("read", {"why": "a ring round the hole", "settings": {"walls": 3, "infill": 25},
-                 "regions": [{"joints": ["bar+post-bolt-1"], "margin": 2, "walls": 5}]})
+                 "regions": [{"joints": ["bar+post-bolt-1"], "margin": 2, "walls": 2}]})
 
 
 # --------------------------------------------------------------------------
@@ -420,7 +420,7 @@ def test_regions_round_the_joints_are_cylinders_round_holes_and_meshes_of_their_
     part: StudyPart,
 ) -> None:
     candidate = part.shaper.candidate("c1", {"why": "w", "regions": [
-        {"joints": "all", "margin": 2, "faces": True, "walls": 4, "infill": 40,
+        {"joints": "all", "margin": 2, "faces": True, "walls": 2, "infill": 40,
          "why": "the joints carry it"},
         {"name": "root", "layers": [0, 2], "top": 6},
     ]})

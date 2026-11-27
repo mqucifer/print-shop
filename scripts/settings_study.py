@@ -157,6 +157,7 @@ def study(args: argparse.Namespace) -> int:
     loop = StudyLoop(chat=llm_chat(config), model=config.model,
                      max_candidates=args.max_candidates, max_seconds=args.max_hours * 3600)
     meshes = out / "meshes"
+    own = defaults(profiles, stl, turn)
     started = datetime.now(UTC).isoformat(timespec="seconds")
     where = args.ledger or ledger_path()
     # Open only to read and to record: a study runs for hours, beside the shop's own jobs.
@@ -165,11 +166,12 @@ def study(args: argparse.Namespace) -> int:
         studied_before = lessons.earlier(ledger, keys)
     part = StudyPart(
         name=args.part, stl=stl, turn=turn, cases=tuple(cases),
-        shaper=Shaper(mesh, meshes, context, assembly, args.part,
-                      offered),
+        shaper=Shaper(mesh, meshes, context, assembly, args.part, offered,
+                      line_width=float(own.line_width or 0.45),
+                      layer_height=float(own.layer_height or 0.2)),
         slicing=OrcaSlicing(stl, profiles, meshes),
         loading=BenchLoad(assembly_path, args.part),
-        defaults=defaults(profiles, stl, turn), material=placed.material,
+        defaults=own, material=placed.material,
         workdir=out / "candidates", keys=keys,
         poses=poses,
         lessons=tuple(kept_lessons), earlier=tuple(studied_before),
@@ -179,7 +181,7 @@ def study(args: argparse.Namespace) -> int:
           f"in {out}", flush=True)
     result = run(loop, part)
     names = [c.name for c in cases]
-    (out / "study.md").write_text(table(result, args.part, names))
+    (out / "study.md").write_text(table(result, args.part, names, where=out))
     (out / "study.json").write_text(json.dumps(as_plain(result, args.part), indent=1))
     with Ledger(where) as ledger:
         study_id, made = lessons.record(
