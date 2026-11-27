@@ -40,7 +40,7 @@ import numpy as np
 
 from . import through
 from .assembly import DIAMETER, Assembly, Joint, PartAt
-from .cae import ccx_one_thread, tidy_mesh, tidy_solve
+from .cae import ccx_one_thread, gmsh, tidy_mesh, tidy_solve
 from .report import NoAnswer
 
 #: A part round a bolt is cut off this many diameters of what bears on it there, the washer or
@@ -340,7 +340,7 @@ def round_bolt(
         analysis.addObject(mesh)
         doc.recompute()
         tools = GmshTools(mesh)
-        wrong = tools.create_mesh()
+        wrong = gmsh(tools)
         tidy_mesh(tools)
         fem = mesh.FemMesh
         if wrong or not fem.VolumeCount:

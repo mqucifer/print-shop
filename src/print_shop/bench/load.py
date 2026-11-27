@@ -111,7 +111,7 @@ import numpy as np
 
 from . import dovetail, load_dovetail, load_through, progress, way_in
 from .assembly import AXES, DIAMETER, Assembly, Held, Joint, PartAt, read
-from .cae import ccx_one_thread, freecad, tidy_mesh, tidy_solve
+from .cae import ccx_one_thread, freecad, give_back, gmsh, tidy_mesh, tidy_solve
 from .limits import over, said, under
 from .report import NoAnswer, Report
 from .through import channel_said, channel_saved, lean_off, lean_share, peak_said, peak_saved
@@ -639,7 +639,7 @@ class _Model:
                 )
 
             tools.write_geo = write_geo
-        tools.create_mesh()
+        gmsh(tools)
         tidy_mesh(tools)
         self.mesh_s = round(time.time() - began, 2)
         self.fem = fem = mesh.FemMesh
@@ -1580,7 +1580,8 @@ def step(what: str) -> Iterator[None]:
     a reason it gives itself is said as it is, and anything else as `NoAnswer` naming the step,
     and the part or the joint, where it stopped. Never a traceback's last line alone. And said
     as it begins, with the container's memory, so a command killed for memory says where it was
-    (`progress`, mqucifer/print-shop#336)."""
+    (`progress`, mqucifer/print-shop#336). As it ends, what it freed is given back to the kernel,
+    for the steps after it and the solvers they start (`cae.give_back`)."""
     try:
         with progress.step(what):
             yield
@@ -1588,6 +1589,8 @@ def step(what: str) -> Iterator[None]:
         raise
     except Exception as exc:  # noqa: BLE001 - whatever stops a step is said with the step
         raise NoAnswer(f"load stopped {what}: {type(exc).__name__}: {exc}"[:500]) from exc
+    finally:
+        give_back()
 
 
 #: gmsh's lines that only sum up its errors.
@@ -2317,15 +2320,9 @@ def _run(
 
 
 def _give_back() -> None:
-    """What the solve that met the container's memory held, given back to the kernel: FreeCAD's
-    mesh of it is freed once its document's closed, but the C library keeps the freed memory
-    for the process unless told to return it (mqucifer/print-shop#301)."""
-    import ctypes
-    import gc
-
-    gc.collect()
-    with contextlib.suppress(OSError, AttributeError):
-        ctypes.CDLL("libc.so.6").malloc_trim(0)
+    """What the solve that met the container's memory held, given back to the kernel
+    (mqucifer/print-shop#301), as every step's is (`cae.give_back`)."""
+    give_back()
 
 
 #: Two passes' clock (mqucifer/print-shop#301); or the one pass's, where it could go on to two

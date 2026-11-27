@@ -8,6 +8,9 @@ calls one of them is told so, not left with an import's traceback.
 
 from __future__ import annotations
 
+import contextlib
+import ctypes
+import gc
 import os
 import shutil
 import subprocess
@@ -28,6 +31,26 @@ def freecad(command: str) -> tuple[Any, Any]:
             f"({exc.name} isn't here): ask for it as a bench command, not from a script"
         ) from exc
     return FreeCAD, Part
+
+
+def give_back() -> None:
+    """What the process has freed, given back to the kernel (mqucifer/print-shop#336). FreeCAD's
+    shapes and meshes are freed once their document's closed, but the C library keeps the freed
+    memory for the process unless told to return it: joining a table's parts with their bores
+    squared freed 0.8 GiB that the process went on holding. gmsh and CalculiX are processes of
+    their own, held against the same container's memory, and can't use what this one holds, so
+    it's given back before each of them starts, and as each of `load`'s steps ends. Off Linux,
+    nothing changes."""
+    gc.collect()
+    with contextlib.suppress(OSError, AttributeError):
+        ctypes.CDLL("libc.so.6").malloc_trim(0)
+
+
+def gmsh(tools: Any) -> Any:
+    """gmsh's mesh, as FreeCAD's `GmshTools.create_mesh` makes it, with what this process has
+    freed given back first (`give_back`)."""
+    give_back()
+    return tools.create_mesh()
 
 
 def tidy_mesh(tools: Any) -> None:
@@ -70,6 +93,7 @@ def ccx_one_thread(fea: Any, timeout: float | None = None) -> None:
     passes could go on under the hour, mqucifer/print-shop#331)."""
     fea.setup_ccx()
     folder, name = os.path.split(fea.inp_file_name)
+    give_back()
     done = subprocess.run(
         [fea.ccx_binary, "-i", os.path.splitext(name)[0]],
         cwd=folder,

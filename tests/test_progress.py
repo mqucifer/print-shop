@@ -174,3 +174,42 @@ def test_a_design_round_s_killed_load_says_where_it_was(
         ran = box.Box(tmp_path, 60).bench(args)
         assert ran.code == 2, ran.output
         assert ran.output == "read\n\n" + host.killed(SAID.splitlines())
+
+
+def test_what_the_process_freed_is_given_back_before_gmsh_and_calculix_and_after_each_step(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """gmsh and CalculiX are processes of their own in the same container: what `load`'s own
+    process freed and the C library kept is given back before each starts, and as each step
+    ends, where it ends in a reason too."""
+    from types import SimpleNamespace
+
+    from print_shop.bench import cae
+
+    order: list[str] = []
+    monkeypatch.setattr(cae, "give_back", lambda: order.append("given back"))
+    monkeypatch.setattr(load, "give_back", lambda: order.append("given back"))
+    tools = SimpleNamespace(create_mesh=lambda: order.append("gmsh") or None)
+    cae.gmsh(tools)
+    with load.step("reading"):
+        order.append("read")
+    with pytest.raises(NoAnswer), load.step("stopping"):
+        raise ValueError("no")
+
+    def ran(argv: list[str], **_: Any) -> subprocess.CompletedProcess[bytes]:
+        order.append("calculix")
+        return subprocess.CompletedProcess(argv, 0, b"", b"")
+
+    monkeypatch.setattr(subprocess, "run", ran)
+    fea = SimpleNamespace(setup_ccx=lambda: None, inp_file_name="/tmp/x/a.inp", ccx_binary="ccx")
+    cae.ccx_one_thread(fea)
+    assert order == [
+        "given back", "gmsh", "read", "given back", "given back", "given back", "calculix",
+    ]  # fmt: skip
+    capsys.readouterr()
+
+
+def test_giving_back_runs_where_there_is_no_c_library_to_ask() -> None:
+    from print_shop.bench import cae
+
+    cae.give_back()
