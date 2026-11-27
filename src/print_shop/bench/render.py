@@ -720,7 +720,7 @@ def _with_legend(sheet: Image.Image, shown: list[Shown]) -> Image.Image:
     return whole
 
 
-def _cuts(given: list[str]) -> list[cut_module.Cut]:
+def _cuts(given: list[str]) -> list[cut_module.AnyCut]:
     return [cut_module.parse(text) for text in given]
 
 
@@ -735,9 +735,14 @@ def _say_seen(report: Report, name: str, seen: dict[str, dict[str, int]]) -> Non
 
 
 def _cut_column(
-    shown: list[Shown], cut: cut_module.Cut, size: int, report: Report, name: str
+    shown: list[Shown],
+    cut: cut_module.AnyCut,
+    size: int,
+    report: Report,
+    name: str,
+    gaps: bool = False,
 ) -> tuple[np.ndarray, list[str]]:
-    drawn = cut_module.draw([(s.name, s.parts, s.rgb) for s in shown], cut, size)
+    drawn = cut_module.draw([(s.name, s.parts, s.rgb) for s in shown], cut, size, gaps)
     for line in drawn.seconds:
         report.second(f"{name}{line}")
     for line in drawn.notes:
@@ -747,12 +752,21 @@ def _cut_column(
     return _numbered(drawn.pixels, marks), [f"{name}{p}" for p in drawn.problems]
 
 
+def _gaps(args: Any) -> bool:
+    """Whether each cut marks each pair's least gap on it (mqucifer/print-shop#352)."""
+    gaps = bool(getattr(args, "gaps", False))
+    if gaps and not args.cuts:
+        raise NoAnswer("--gaps marks each pair's least gap on a cut: give a --cut")
+    return gaps
+
+
 def run_variants(args: Any, report: Report) -> None:
     """A sheet for choosing between variants: a labelled row of each one's views, each file in its
     colour, numbered, and named in the legend under it."""
     variants = _variants(args.variants)
     closes = [_close(text) for text in args.close]
     cuts = _cuts(args.cuts)
+    gaps = _gaps(args)
     for _, files in variants:
         _not_both(files, args.test_pieces)
     pieces = _test_pieces(args.test_pieces, report)
@@ -824,7 +838,7 @@ def run_variants(args: Any, report: Report) -> None:
                 problems.append(f"{name} {view}: {problem}")
         for k, cut in enumerate(cuts):
             column = len(args.views) + len(closes) + k
-            pixels, found = _cut_column(shown, cut, size, report, f"{name} ")
+            pixels, found = _cut_column(shown, cut, size, report, f"{name} ", gaps)
             problems += found
             pixels = _stamped(pixels, *scratch) if scratch else pixels
             sheet.paste(Image.fromarray(pixels), (column * size, row * size))
@@ -876,6 +890,7 @@ def run(args: Any, report: Report) -> None:
     _not_both(args.files, args.test_pieces)
     closes = [_close(text) for text in args.close]
     cuts = _cuts(args.cuts)
+    gaps = _gaps(args)
     shown = _shown(args.files, _looks(args.looks))
     # A part built flat is drawn where it sits among the others (mqucifer/print-shop#201).
     given = getattr(args, "placed", None)
@@ -972,7 +987,7 @@ def run(args: Any, report: Report) -> None:
         if problem:
             problems.append(f"close {k + 1}: {problem}")
     for cut in cuts:
-        pixels, found = _cut_column(shown, cut, args.size, report, "")
+        pixels, found = _cut_column(shown, cut, args.size, report, "", gaps)
         problems += found
         pixels = _stamped(pixels, *scratch) if scratch else pixels
         path = out / f"{names}-{slug(cut.name)}.png"
