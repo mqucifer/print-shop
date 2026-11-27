@@ -298,3 +298,68 @@ def test_a_print_load_can_t_read_says_why_and_nothing_is_solved(
     assert answer.verdict == "NO ANSWER" and answer.code == 2, answer.text
     assert says in answer.text
     assert math.isfinite(answer.record["seconds"])
+
+
+#: The bowed bars of `make_fixtures.bowed` (mqucifer/print-shop#356).
+BOWED = ("bowed", "bowed-up", "bowed-notched")
+
+
+def test_a_bowed_bar_s_walls_are_cut_with_no_sliver_and_never_read_solid_unsaid(cae: Any) -> None:
+    """The cut on the bowed bars, in the second image (`cae_cases/as_printed_cut.py`): main's
+    common of 16 copies left the notched leg's core 16 faces under a bead's width by its
+    B-spline faces, steps at its concave edges, and the lofted bar bowed along its layers no
+    core at all, read solid and said nothing. Now neither: the offset cuts each, and with the
+    offset refused, as on a real leg, the copies mitred at the notch's concave edges leave no
+    sliver, and the empty common is refused in words; each cut held to each layer's own
+    outline offset in by its walls within `AGREE`."""
+    work: Path = cae.work
+    shutil.copy(CASES / "as_printed_cut.py", work / "as_printed_cut.py")
+    done = host.run(["as_printed_cut.py"], work, python=True, image=host.CAE_IMAGE)
+    assert done.returncode == 0, done.stdout + done.stderr
+    found = json.loads(done.stdout.strip().splitlines()[-1])
+    for name in BOWED:
+        now = found[name]["now"]
+        assert now["slivers"] == 0 and now["checked"] >= 5, (name, now)
+        assert now["off"] <= as_printed.AGREE, (name, now)
+        assert found[name]["refused"].startswith(
+            f"the skin couldn't be cut round the part {name}'s curved faces: OCCT couldn't make "
+            "its offset"
+        ), found[name]["refused"]
+    assert found["bowed-notched"]["main"]["slivers"] >= 8
+    mitred = found["bowed-notched"]["copies"]
+    assert "mitred at 2 concave edge(s)" in mitred["cut"] and mitred["slivers"] == 0
+    assert mitred["off"] <= as_printed.AGREE
+    assert mitred["core_mm3"] == pytest.approx(found["bowed-notched"]["now"]["core_mm3"],
+                                               rel=0.005)  # fmt: skip
+    # Bowed along its layers its sections are the bar's, moved up and down: its shells, not
+    # its walls, set its sloped faces, so its core is the straight bar's.
+    side = as_printed.wall_thickness(2, 0.45, 0.2)
+    assert found["bowed-up"]["main"]["core_mm3"] == 0
+    assert found["bowed-up"]["now"]["core_mm3"] == pytest.approx(
+        (120 - 2 * side) * (20 - 2 * side) * 8.4, rel=0.01)
+    assert "off a layer's own outline offset in by them" in found["bowed-up"]["copies"]["refused"]
+
+
+@pytest.mark.parametrize("name", BOWED)
+def test_a_bowed_bar_reads_as_printed_between_solid_and_its_core_alone(
+    cae: Any, name: str
+) -> None:
+    """Each bowed bar, held at its root and loaded at x 110, meshes and solves as printed at
+    the defaults with nothing turned inside out, moves more than it does solid and less than
+    it would all core, the core's stiffness along it; and its solid read is as it was."""
+    work: Path = cae.work
+    at = ",".join(f"{v:g}" for v in json.loads((work / "load/bowed-at.json").read_text())[name])
+    solid = cae("load", f"load/{name}.json", "--weight", "1", "--at", at)
+    printed = cae("load", f"load/printed-{name}.json", "--weight", "1", "--at", at)
+    assert solid.verdict != "NO ANSWER" and "printed" not in solid.numbers, solid.text
+    assert printed.verdict != "NO ANSWER", printed.text
+    assert "inside out" not in printed.text
+    cell = printed.numbers["printed"]["bar"][0]
+    assert cell["cut_checked_planes"] >= 5 and cell["core_mm3"] > 0, cell
+    assert cell["cut_off_walls_pct"] <= 100 * as_printed.AGREE, cell
+    assert f"its walls cut by {cell['cut']}" in printed.text
+    found = infill.core(Settings(pattern="grid", infill=20, infill_angle=0), MATERIALS["petg"])
+    up, first, second = np.eye(3)[2], np.eye(3)[0], np.eye(3)[1]
+    along = infill.pulled(found.stiffness(up, first, second), first)
+    moves, alone = printed.numbers["moves_mm"], solid.numbers["moves_mm"]
+    assert alone < moves < alone * MODULUS / along

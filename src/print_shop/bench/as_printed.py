@@ -12,14 +12,26 @@ behind it, and with the skin smeared over the elements it lies in, a bar's secti
 too soft by its own arithmetic.
 
 **The erosion.** A point is in the core where the part holds the point its top shells above it,
-the point its bottom shells below it, and each of 16 points its walls away round it in its
-layer's plane: so the core is the part's common with each of 18 copies of itself, each moved by
-one of those. It's OCCT's `common` of solids only, which holds on any shape where an offset
-surface doesn't, and it errs one way: a wall between two of the 16 directions is read at least
-cos(11.25°), 98%, as thick as it is, so the skin is never thicker than its own plastic
-(`wall_thickness`). Only each
-point's end is tested, so a slot narrower than the shells between a point and the one it tests
-is passed over, and Orca's own rules for small areas, such as filling one under
+the point its bottom shells below it, and every point its walls away round it in its layer's
+plane. The shells are the part's common with 2 copies of itself moved along its layers
+(`eroded_along`). The walls (mqucifer/print-shop#356, `cut_core`) are OCCT's offset of the part
+stretched ten times along its layers, the stretch undone (`offset_in_plane`): within 1.3% of
+the walls on any face they, not the shells, set, and round at a concave edge. Where OCCT can't
+offset a part, as on a real curved leg, they're its common with 16 copies of itself moved its
+walls round (`eroded_in_plane`), which reads a wall between two of the 16 at least
+cos(11.25°), 98%, as thick as it is; that common is stepped at each concave edge, a face of each
+copy a hundredth to three tenths of a millimetre across, and gmsh turned elements inside out
+by them, so where two flat faces meet there the steps are cut out to one mitred corner
+(`mitres`), the two moved faces' line. Each cut is held to the
+core each layer has as Orca slices it, the part's section offset in by its walls with OCCT's
+2D offset and cut by its sections its shells away, at 7 of its layers' planes, within 5% of
+its walls along the outline (`checked`), and may leave no face of the core narrower than a
+bead by a curved face (`slivers`), unless OCCT can merge it into the faces round it
+(`healed`). Where neither holds, each is tried on the part with its own faces under a bead
+merged first (`simplified`), and where none holds, `load` says so, NO ANSWER, and never shows
+CalculiX's inside-out elements for a geometry the bench made. Only each point's end is
+tested, so a slot narrower than the shells between a point and the one it tests is passed
+over, and Orca's own rules for small areas, such as filling one under
 `minimum_sparse_infill_area` solid, aren't read: each leaves the core a little larger, and the
 part a little softer and weaker than printed.
 
@@ -63,7 +75,7 @@ AGREE = 0.05
 #: How many of the part's layers' planes the cut is checked at, spread over its height.
 HEIGHTS = 7
 #: A concave corner further from its edge than this many times its walls isn't mitred: a
-#: sharp one's mitre runs far into the part. Clipper's own limit, which Orca's offsets keep.
+#: sharp one's mitre runs far into the part.
 MITRE_LIMIT = 3.0
 
 
@@ -187,12 +199,15 @@ def offset_in_plane(shape: Any, layers: int, by: float) -> Any | None:
 
 
 def _flattened(shape: Any) -> Any:
-    """`shape` with each face that lies in a plane made on that plane, one solid at a time."""
+    """`shape` with each face that lies in a plane made on that plane, one solid at a time, and
+    its faces in one order, by where each is: OCCT's offset gives them in an order of its own
+    that changes from run to run, and gmsh, meshing them in that order, made another mesh each
+    time."""
     import Part
 
     solids = []
     for solid in shape.Solids:
-        faces, changed = [], False
+        faces = []
         for face in solid.Faces:
             if type(face.Surface).__name__ != "Plane":
                 plane = face.findPlane(1e-7)
@@ -200,17 +215,22 @@ def _flattened(shape: Any) -> Any:
                     flat = Part.Face(plane, face.Wires)
                     if flat.isValid():
                         faces.append(flat)
-                        changed = True
                         continue
             faces.append(face)
-        if not changed:
-            solids.append(solid)
-            continue
+        faces.sort(key=_where)
         made = Part.Solid(Part.Shell(faces))
         if made.Volume < 0:
             made.reverse()
         solids.append(made if made.isValid() else solid)
+    solids.sort(key=_where)
     return _one(solids) if len(solids) != 1 else solids[0]
+
+
+def _where(shape: Any) -> tuple[float, ...]:
+    """Where a face or solid is, to order them by: its centre and its size, to a micron."""
+    centre = shape.CenterOfMass
+    size = shape.Volume if shape.ShapeType == "Solid" else shape.Area
+    return (round(centre.x, 3), round(centre.y, 3), round(centre.z, 3), round(size, 3))
 
 
 def width(face: Any) -> float:
@@ -404,7 +424,8 @@ def mitres(part: Any, layers: int, by: float) -> tuple[list[Any], int]:
     its walls as the copies move it, the most any copy reaches along its normal; and the
     prism between the two faces and the two moved in, along the edge and a wall's width past
     each end, is all of the steps, so the core minus it meets at one mitred corner, the two
-    moved faces' line, as Clipper's offsets meet, that Orca's walls are laid by. The solids,
+    moved faces' line: the skin there no thinner than its walls, and within a mitre's corner,
+    21% of the walls' square at a right angle, of the round one. The solids,
     and how many concave edges aren't of two flat faces, or are mitred past `MITRE_LIMIT`."""
     import FreeCAD as App
     import numpy as np
