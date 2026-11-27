@@ -220,7 +220,9 @@ def test_the_gaps_on_the_cut_are_clearances_and_lie_where_it_says(work: Path) ->
     gaps = {frozenset(g["files"]): g for g in the_cut(record)["gaps"]}
     names = ["lower.step", "upper.step", PIN1, PIN2]
     assert set(gaps) == {frozenset((a, b)) for a in names for b in names if a < b}, gaps
-    _, measured = ask(work, "clearance", *FILES, "--placed", "plates.json")
+    # Every pair by its exact distance, past 3 pairs, as a pair far apart is otherwise read by its
+    # boxes, with no gap_mm (mqucifer/print-shop#354).
+    _, measured = ask(work, "clearance", *FILES, "--placed", "plates.json", "--exact")
     pairs = {frozenset((p["a"], p["b"])): p for p in measured["numbers"]["pairs"]}
     assert set(pairs) == set(gaps)
     expected = {

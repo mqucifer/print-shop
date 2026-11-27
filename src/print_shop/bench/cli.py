@@ -347,6 +347,19 @@ def parser() -> Parser:
     )
     _placed_options(clearance)
     clearance.add_argument(
+        "--exact",
+        action="store_true",
+        help="read every pair by its exact distance. Without it, past 3 pairs, a pair whose "
+        "bounds lie farther apart than any gap the reading judges is read by its bounds alone, "
+        "CLEAR, and counted with its least bound gap (mqucifer/print-shop#354)",
+    )
+    clearance.add_argument(
+        "--plan",
+        action="store_true",
+        help="say how the pairs would be read, how many by their bounds and how many exactly, "
+        "and how long, from a few read exactly to time them, and judge nothing: NO ANSWER",
+    )
+    clearance.add_argument(
         "--as",
         dest="moving_as",
         metavar="PART",
