@@ -199,6 +199,96 @@ def inner(assembly_file: str, mesh: float | None) -> None:  # pragma: no cover
             words.append(close_faces.kind_of(face) + (f" ({', '.join(flags)})" if flags else ""))
         return ", ".join(words) or "none near"
 
+    def dissect(k: int, own: object, layers: int, settings: object) -> None:
+        """This branch's ways, one at a time, on the part and on it simplified, and where any
+        slivers each leaves lie."""
+        bead = float(settings.line_width or 0)  # type: ignore[attr-defined]
+        height = float(settings.layer_height or 0)  # type: ignore[attr-defined]
+        walls = as_printed.wall_thickness(int(settings.walls or 0), bead, height)  # type: ignore[attr-defined]
+        top = float(settings.top or 0) * height  # type: ignore[attr-defined]
+        bottom = float(settings.bottom or 0) * height  # type: ignore[attr-defined]
+        up = -1.0 if (settings.up or "+")[0] == "-" else 1.0  # type: ignore[attr-defined]
+        own_narrow = [f for f in own.Faces if width(f) < bead]  # type: ignore[attr-defined]
+        smooth: list[object] = []
+        mitred: list[object] = []
+        unmitred: list[object] = []
+        for edge in own.Edges:  # type: ignore[attr-defined]
+            faces = own.ancestorsOfType(edge, Part.Face)  # type: ignore[attr-defined]
+            if len(faces) != 2:
+                continue
+            middle = edge.valueAt(sum(edge.ParameterRange) / 2)
+            normals = [f.normalAt(*f.Surface.parameter(middle)) for f in faces]
+            if normals[0].getAngle(normals[1]) < 0.02:
+                smooth.append(edge)
+        for edge, faces in as_printed._concave(own):
+            flat = all(type(f.Surface).__name__ == "Plane" for f in faces)
+            (mitred if flat and type(edge.Curve).__name__ == "Line" else unmitred).append(edge)
+        print(f"  part {k}: concave edges {len(mitred) + len(unmitred)}, {len(unmitred)} not "
+              f"mitred (a curved face or edge); smooth edges {len(smooth)}; its own faces "
+              f"under a bead {len(own_narrow)} ({kinds(own_narrow)})", flush=True)
+
+        def near(face: object, shapes: list[object], within: float) -> bool:
+            return any(face.distToShape(other)[0] < within for other in shapes)  # type: ignore[attr-defined]
+
+        def where(core: object) -> None:
+            found = as_printed.slivers(core, bead)
+            counted: collections.Counter[str] = collections.Counter()
+            for face in found:
+                round_ = sorted({close_faces.kind_of(o) for e in face.Edges
+                                 for o in core.ancestorsOfType(e, Part.Face)  # type: ignore[attr-defined]
+                                 if not o.isSame(face)})  # fmt: skip
+                flags = [w for w, yes in (
+                    ("by the part's own narrow face", near(face, own_narrow, walls + bead)),
+                    ("by a smooth edge", near(face, smooth, 2 * walls)),
+                    ("by a mitred concave edge", near(face, mitred, 2 * walls)),
+                    ("by an unmitred concave edge", near(face, unmitred, 2 * walls)),
+                ) if yes] or ["by none of those"]  # fmt: skip
+                bucket = ("under 0.05 mm" if width(face) < 0.05 else "under 0.15 mm"
+                          if width(face) < 0.15 else "under a bead's width")  # fmt: skip
+                counted[f"{close_faces.kind_of(face)}, {bucket}, touching "
+                    f"{'/'.join(round_)}; {', '.join(flags)}"] += 1
+            for words, n in counted.most_common():
+                print(f"    {n} sliver(s): {words}", flush=True)
+
+        sources = [("the part", own)]
+        simple = as_printed.simplified(own, bead)
+        print(f"  part {k} simplified, its faces under a bead merged: "
+              + (f"{simple[1]} merged, {len(simple[0].Faces)} faces left" if simple
+                 else "none to merge, or OCCT couldn't"), flush=True)  # fmt: skip
+        if simple:
+            sources.append(("it simplified", simple[0]))
+        for label, source in sources:
+            shelled = as_printed.eroded_along(source, layers, top, bottom, up)
+            for how in ("offset", "copies", "copies, mitred"):
+                said(f"part {k}, {label}: {how}")
+                try:
+                    if how == "offset":
+                        inside = as_printed.offset_in_plane(source, layers, -walls)
+                    else:
+                        inside = as_printed.eroded_in_plane(source, layers, walls)
+                        if how.endswith("mitred") and inside is not None:
+                            prisms, _ = as_printed.mitres(source, layers, walls)
+                            if prisms:
+                                inside = as_printed._one(as_printed._solids(
+                                    inside.cut(Part.makeCompound(prisms))))
+                            if inside is not None:
+                                inside = inside.removeSplitter()
+                except Exception as exc:  # noqa: BLE001
+                    print(f"    stopped: {stopped(exc)}", flush=True)
+                    continue
+                core = None
+                if inside is not None and shelled is not None:
+                    core = as_printed._one(as_printed._solids(inside.common(shelled)))
+                read, off = as_printed.checked(own, core, layers, walls, top, bottom, up)
+                found = as_printed.slivers(core, bead) if core is not None else []
+                print(f"    checked at {read} planes, {100 * off:.1f}% of its walls off at most; "
+                      f"slivers {len(found)}", flush=True)
+                if found:
+                    where(core)
+                    merged = as_printed.healed(core, bead)
+                    print("    merged: " + ("none left" if merged is not None else
+                                            "some left"), flush=True)  # fmt: skip
+
     printed = [(k, part) for k, part in enumerate(made.parts, 1) if part.printed is not None]
     if not printed:
         print("verdict: no part has a `print`: load reads them all solid", flush=True)
@@ -213,6 +303,11 @@ def inner(assembly_file: str, mesh: float | None) -> None:  # pragma: no cover
         bead = float(settings.line_width or 0)
         faces_said("the part", own, bead)
         edges_said(own)
+    for k, part in printed:
+        settings = part.printed.settings
+        if settings.missing():
+            continue
+        dissect(k, owns[k], load.AXES.index(part.layers), settings)
     verdicts = {}
     for name, cut in cuts.items():
         stage(f"{name} cut")

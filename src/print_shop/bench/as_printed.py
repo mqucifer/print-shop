@@ -316,20 +316,62 @@ def slivers(core: Any, bead: float) -> list[Any]:
     return found
 
 
+def _merged(shape: Any, faces: list[Any]) -> Any | None:
+    """`shape` with `faces` merged into the faces round them, OCCT's defeaturing, where it
+    leaves one valid solid; or None."""
+    try:
+        merged = shape.defeaturing(faces)
+    except Exception:  # noqa: BLE001 - OCCT raises where it can't merge them
+        return None
+    if merged.isNull() or not merged.isValid() or len(_solids(merged)) != len(_solids(shape)):
+        return None
+    return merged
+
+
 def healed(core: Any, bead: float) -> Any | None:
-    """`core` with its slivers merged into the faces round them, OCCT's defeaturing, where it
-    leaves it valid, with none, and moved by under `AGREE` of a bead over its faces; or None."""
+    """`core` with its slivers (`slivers`) merged into the faces round them, all at once, or
+    else one at a time, where OCCT can merge some and not others: where that leaves none, and
+    moves it by under `AGREE` of a bead over its faces; or None."""
     narrow = slivers(core, bead)
     if not narrow:
         return core
-    try:
-        merged = core.defeaturing(narrow)
-    except Exception:  # noqa: BLE001 - OCCT raises where it can't merge them
-        return None
+    merged = _merged(core, narrow)
+    if merged is None or slivers(merged, bead):
+        merged, tries = core, 4 * len(narrow)
+        while narrow and tries > 0:
+            for face in narrow:
+                tries -= 1
+                fewer = _merged(merged, [face])
+                if fewer is not None and len(slivers(fewer, bead)) < len(narrow):
+                    merged = fewer
+                    break
+                if tries <= 0:
+                    break
+            else:
+                break
+            narrow = slivers(merged, bead)
+        if narrow:
+            return None
     moved = abs(merged.Volume - core.Volume) / max(core.Area, 1e-9)
-    if not merged.isValid() or slivers(merged, bead) or moved > AGREE * bead:
+    return merged if moved <= AGREE * bead else None
+
+
+def simplified(part: Any, bead: float) -> tuple[Any, int] | None:
+    """`part` with its own faces narrower than a bead merged into the faces round them, to cut
+    its core from (mqucifer/print-shop#356): a chamfer or a step under a bead's width, which no
+    print lays a wall round, and which OCCT can't offset and the 16 copies make slivers of. The
+    shape, and how many faces it merged; None where it has none, or OCCT can't merge them, or
+    they move it by more than `AGREE` of a bead over its faces."""
+    narrow = [f for f in part.Faces if width(f) < bead]
+    if not narrow:
         return None
-    return merged
+    merged = _merged(part, narrow)
+    if merged is None:
+        return None
+    moved = abs(merged.Volume - part.Volume) / max(part.Area, 1e-9)
+    if moved > AGREE * bead:
+        return None
+    return merged, len(narrow)
 
 
 def _concave(shape: Any) -> list[tuple[Any, list[Any]]]:
@@ -421,42 +463,34 @@ class Cut:
     off: float
 
 
-def cut_core(
-    part: Any, layers: int, walls: float, top: float, bottom: float, up: float, bead: float,
-    name: str,
-) -> Cut:
-    """The part's core, at least its walls from its outline in its own layer's plane and its
-    shells from its faces along its layers (mqucifer/print-shop#356). The walls are cut by
-    OCCT's offset where it can (`offset_in_plane`), else by the 16 copies, their steps at
-    concave edges mitred (`mitres`); each is held to the core each layer has as Orca slices
-    it (`checked`), and may leave no face narrower than a bead by a curved face (`slivers`),
-    or have them merged (`healed`). The first that holds is the cut.
-
-    Raises:
-        NoAnswer: Where none holds, saying why: never a mesh's elements turned inside out by a
-            geometry the bench made itself.
-    """
+def _cut_from(
+    part: Any, source: Any, whence: str, layers: int, walls: float, top: float, bottom: float,
+    up: float, bead: float, said: list[str],
+) -> Cut | None:
+    """The core cut from `source`, the part or a simpler shape of it (`simplified`), by each
+    way in turn, each held to `part`'s own layers: the first that holds, or None, with why each
+    didn't in `said`."""
     import Part
 
-    shelled = eroded_along(part, layers, top, bottom, up)
-    said = []
+    shelled = eroded_along(source, layers, top, bottom, up)
     for how in ("offset", "copies"):
         try:
             if how == "offset":
-                inside = offset_in_plane(part, layers, -walls) if walls > 0 else part
-                words = "OCCT's offset of it stretched along its layers"
+                inside = offset_in_plane(source, layers, -walls) if walls > 0 else source
+                words = f"OCCT's offset of it stretched along its layers{whence}"
             else:
-                inside = eroded_in_plane(part, layers, walls)
-                prisms, left = mitres(part, layers, walls) if inside is not None else ([], 0)
+                inside = eroded_in_plane(source, layers, walls)
+                prisms, _ = mitres(source, layers, walls) if inside is not None else ([], 0)
                 if prisms and inside is not None:
                     inside = _one(_solids(inside.cut(Part.makeCompound(prisms))))
                 if inside is not None:
                     inside = inside.removeSplitter()
                 words = (f"its common with {ROUND} copies of itself"
-                         + (f", mitred at {len(prisms)} concave edge(s)" if prisms else ""))
+                         + (f", mitred at {len(prisms)} concave edge(s)" if prisms else "")
+                         + whence)
         except Exception as exc:  # noqa: BLE001 - OCCT raises where it can't make it
-            said.append(f"OCCT couldn't make {'its offset' if how == 'offset' else 'its copies'}"
-                        f" ({type(exc).__name__})")
+            what = "its offset" if how == "offset" else "its copies"
+            said.append(f"OCCT couldn't make {what}{whence} ({type(exc).__name__})")
             continue
         core = None
         if inside is not None and shelled is not None:
@@ -478,6 +512,39 @@ def cut_core(
                 continue
             core, words = merged, f"{words}, its slivers merged into the faces round them"
         return Cut(core, words, read, off)
+    return None
+
+
+def cut_core(
+    part: Any, layers: int, walls: float, top: float, bottom: float, up: float, bead: float,
+    name: str,
+) -> Cut:
+    """The part's core, at least its walls from its outline in its own layer's plane and its
+    shells from its faces along its layers (mqucifer/print-shop#356). The walls are cut by
+    OCCT's offset where it can (`offset_in_plane`), else by the 16 copies, their steps at
+    concave edges mitred (`mitres`); each is held to the core each layer has as Orca slices
+    it (`checked`), and may leave no face narrower than a bead by a curved face (`slivers`),
+    or have them merged (`healed`). The first that holds is the cut; where none does, each is
+    tried again on the part with its own faces under a bead merged (`simplified`), held to
+    the part's own layers still.
+
+    Raises:
+        NoAnswer: Where none holds, saying why: never a mesh's elements turned inside out by a
+            geometry the bench made itself.
+    """
+    said: list[str] = []
+    found = _cut_from(part, part, "", layers, walls, top, bottom, up, bead, said)
+    if found is not None:
+        return found
+    simple = simplified(part, bead)
+    if simple is not None:
+        source, count = simple
+        found = _cut_from(
+            part, source, f", from it with its {count} face(s) under a bead merged first",
+            layers, walls, top, bottom, up, bead, said,
+        )
+        if found is not None:
+            return found
     curved = any(_curved(f) for f in part.Faces)
     raise NoAnswer(
         f"the skin couldn't be cut round {name}'s {'curved ' if curved else ''}faces: "
