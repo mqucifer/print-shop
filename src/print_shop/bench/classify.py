@@ -180,34 +180,36 @@ class Layered:
         shape = region.shape
         if isinstance(shape, Layers):
             along = points[:, self.layers]
-            return (along >= shape.low) & (along <= shape.high)
+            return np.asarray((along >= shape.low) & (along <= shape.high), dtype=bool)
         if isinstance(shape, Cylinder):
             axis = np.array(shape.axis, dtype=float)
             axis /= np.linalg.norm(axis)
             off = points - np.array(shape.at, dtype=float)
             along = off @ axis
             apart = np.linalg.norm(off - np.outer(along, axis), axis=1)
-            return (along >= 0) & (along <= shape.length) & (apart <= shape.radius)
+            return np.asarray((along >= 0) & (along <= shape.length) & (apart <= shape.radius),
+                              dtype=bool)  # fmt: skip
         if isinstance(shape, Mesh):
-            return np.array([bool(solid.isInside(App.Vector(*p), 1e-6, True)) for p in points])
+            return np.array([bool(solid.isInside(App.Vector(*p), 1e-6, True)) for p in points],
+                            dtype=bool)  # fmt: skip
         low, high = (np.array(c, dtype=float) for c in shape)
-        return np.all((points >= low) & (points <= high), axis=1)
+        return np.asarray(np.all((points >= low) & (points <= high), axis=1), dtype=bool)
 
     def cell_of(self, points: np.ndarray) -> np.ndarray:
         """Each point's cell, by its place in `cells`: the regions round it, in Orca's order,
         a volume's over a height range's, each later over an earlier."""
-        labels = [()] * len(points)
+        labels: list[tuple[str, ...]] = [()] * len(points)
         for region, solid in self.regions:
             hit = self._in_region(region, solid, points)
             for k in np.flatnonzero(hit):
                 labels[k] = (*labels[k], region.name)
-        known = {c.regions: k for k, c in enumerate(self.cells)}
+        known: dict[tuple[str, ...], int] = {c.regions: k for k, c in enumerate(self.cells)}
         found = np.zeros(len(points), dtype=int)
-        for k, given in enumerate(labels):
+        for at, given in enumerate(labels):
             if given not in known:
                 known[given] = len(self.cells)
                 self.cells.append(self._cell(given))
-            found[k] = known[given]
+            found[at] = known[given]
         return found
 
     # Whether core
@@ -370,9 +372,9 @@ def step_of(share: np.ndarray) -> np.ndarray:
 # The check
 
 
-def _slice(corners: np.ndarray, axis: int, at: float) -> list[np.ndarray]:
+def _slice(corners: np.ndarray, axis: int, at: float) -> list[np.ndarray | None]:
     """Each tetrahedron's section at `at` along `axis`, as its polygon's corners, or none."""
-    found = []
+    found: list[np.ndarray | None] = []
     for four in corners:
         heights = four[:, axis] - at
         points = []
@@ -416,8 +418,10 @@ def checked(layered: Layered, corners_own: np.ndarray, cells: np.ndarray, share:
         if not len(crossing):
             continue
         rings = _slice(corners_own[crossing], axis, at)
-        samples, owners, areas = [], [], []
-        for k, ring in zip(crossing, rings, strict=True):
+        samples: list[np.ndarray] = []
+        owners: list[int] = []
+        areas: list[tuple[int, float, int]] = []
+        for element, ring in zip(crossing.tolist(), rings, strict=True):
             if ring is None:
                 continue
             middle = ring.mean(axis=0)
@@ -427,20 +431,20 @@ def checked(layered: Layered, corners_own: np.ndarray, cells: np.ndarray, share:
             points = [*ring, *[(middle + a + b) / 3 for a, b in zip(ring, np.roll(ring, -1, 0),
                                                                     strict=True)]]  # fmt: skip
             samples += points
-            owners += [k] * len(points)
-            areas.append((k, area, len(points)))
+            owners += [element] * len(points)
+            areas.append((element, area, len(points)))
         if not samples:
             continue
-        points = np.array(samples)
+        sampled = np.array(samples)
         owner = np.array(owners)
-        core = layered.core(points, cells[owner])
+        core = layered.core(sampled, cells[owner])
         missed = extra = 0.0
         start = 0
-        for k, area, n in areas:
+        for element, area, n in areas:
             wanted = float(core[start : start + n].mean())
             start += n
-            missed += max(wanted - share[k], 0.0) * area
-            extra += max(share[k] - wanted, 0.0) * area
+            missed += max(wanted - share[element], 0.0) * area
+            extra += max(share[element] - wanted, 0.0) * area
         read += 1
         if outline > 0 and walls > 0:
             short = max(short, missed / (outline * walls))
