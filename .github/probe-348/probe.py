@@ -43,8 +43,39 @@ def one(work: Path, tag: str) -> dict[str, object]:
     return {"tag": tag, "files": files, "numbers": numbers}
 
 
+def unv_sections(path: Path) -> dict[str, list[str]]:
+    """A UNV file's lines by dataset: 2411 the nodes, 2412 the elements."""
+    found: dict[str, list[str]] = {}
+    lines = path.read_text().splitlines()
+    k = 0
+    while k < len(lines):
+        if lines[k].strip() == "-1" and k + 1 < len(lines):
+            name, end = lines[k + 1].strip(), k + 2
+            while end < len(lines) and lines[end].strip() != "-1":
+                end += 1
+            found.setdefault(name, []).extend(lines[k + 2 : end])
+            k = end + 1
+        else:
+            k += 1
+    return found
+
+
+def compare_meshes(folder: Path) -> None:
+    meshes = sorted(folder.glob("*.unv"))
+    if len(meshes) < 2:
+        return
+    first = unv_sections(meshes[0])
+    for other in meshes[1:]:
+        second = unv_sections(other)
+        for name in first:
+            a, b = first[name], second.get(name, [])
+            differ = sum(x != y for x, y in zip(a, b, strict=False))
+            print(f"   {meshes[0].stem} v {other.stem}: dataset {name}, {len(a)} v {len(b)} "
+                  f"lines, {differ} differ")
+
+
 def main() -> None:
-    work, runs = Path(sys.argv[1]), int(sys.argv[2])
+    work, count = Path(sys.argv[1]), int(sys.argv[2])
     if shutil.which("lscpu"):
         print(subprocess.run(["lscpu"], capture_output=True, text=True).stdout)
     work.mkdir(parents=True, exist_ok=True)
@@ -53,34 +84,19 @@ def main() -> None:
     assert made.returncode == 0, made.stdout + made.stderr
     shutil.copy(CASES / "load_forced.py", work / "load_forced.py")
     shutil.copy(HERE / "keep_load.py", work / "keep_load.py")
-    # In twos, as CI's -n 2 runs them, now and the old guess alternately.
-    tags = [f"{'now' if k % 2 == 0 else 'guess'}-{k}" for k in range(runs)]
+    shutil.copy(HERE / "gmsh_loop.py", work / "gmsh_loop.py")
+    print(one(work, "now-0").get("error", "kept now-0"), flush=True)
+
+    def loop(variant: str) -> str:
+        done = host.run(["gmsh_loop.py", "/work/keep/now-0/01-mesh", variant, str(count)], work,
+                        python=True, image=host.CAE_IMAGE, timeout=2400)  # fmt: skip
+        return done.stdout + done.stderr[-2000:]
+
     with ThreadPoolExecutor(2) as pool:
-        results = list(pool.map(lambda t: one(work, t), tags))
-    for r in results:
-        if "error" in r:
-            print(r["tag"], "ERROR", r["error"])
-    good = [r for r in results if "error" not in r]
-    first = good[0]
-    for r in good:
-        files: dict[str, str] = r["files"]  # type: ignore[assignment]
-        base: dict[str, str] = first["files"]  # type: ignore[assignment]
-        differ = [k for k in base if files.get(k) != base[k]]
-        same = r["numbers"] == first["numbers"]
-        print(r["tag"], "numbers", "SAME" if same else "DIFF", "files differing:", differ[:12])
-        for name in differ[:3]:
-            a = (work / "keep" / str(first["tag"]) / name).read_text(errors="replace").splitlines()
-            b = (work / "keep" / str(r["tag"]) / name).read_text(errors="replace").splitlines()
-            lines = [(i, x, y) for i, (x, y) in enumerate(zip(a, b, strict=False)) if x != y]
-            print(f"   {name}: {len(a)} vs {len(b)} lines, {len(lines)} differ")
-            for i, x, y in lines[:6]:
-                print(f"     {i}: {x[:100]!r}")
-                print(f"     {i}: {y[:100]!r}")
-        if not same:
-            top, top0 = r["numbers"]["parts"]["top"], first["numbers"]["parts"]["top"]  # type: ignore[index]
-            print("   top stretch", top["stretch_pct"], top0["stretch_pct"])
-            j, j0 = (n["joints"]["top+leg0"] for n in (r["numbers"], first["numbers"]))  # type: ignore[index]
-            print("   top+leg0 moment", j["moment_nmm"], j0["moment_nmm"])
+        for said in pool.map(loop, ["as-is", "one-thread", "no-ho", "no-opt"]):
+            print(said, flush=True)
+    for variant in ["as-is", "one-thread", "no-ho", "no-opt"]:
+        compare_meshes(work / f"gmsh-{variant}")
 
 
 if __name__ == "__main__":

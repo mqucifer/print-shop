@@ -193,4 +193,4 @@ jobs:
         with:
           name: cae-image
       - run: zstd -d --stdout cae-image.tar.zst | docker load && rm cae-image.tar.zst
-      - run: uv run python .github/probe-348/probe.py "$RUNNER_TEMP/probe" 12
+      - run: uv run python .github/probe-348/probe.py "$RUNNER_TEMP/probe" 40
