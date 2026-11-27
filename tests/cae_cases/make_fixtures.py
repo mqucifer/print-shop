@@ -1072,8 +1072,62 @@ def seam() -> None:
     assembly(out / "one-turn-written.json", [*blocks, {**standing, "at": written}], joints, held)
 
 
+#: A printed bar's settings (mqucifer/print-shop#337): the store's own lines, 0.45 mm walls and
+#: 0.2 mm layers, five layers on top and three under, as `profiles/standard` gives them.
+PRINT = {"line_width": 0.45, "top": 5, "bottom": 3, "pattern": "grid", "infill_angle": 0,
+         "layer_height": 0.2}
+#: The printed bar's walls and densities, and its box round the root.
+PRINT_WALLS, PRINT_INFILL = (2, 4), (20, 40, 60)
+
+
+def printed() -> None:
+    """The beam printed (mqucifer/print-shop#337): at each of 2 wall counts and 3 densities,
+    held at its root and loaded at its tip as `load/one.json` is; and at 2 walls and 20% with a
+    box round its root, its first 30 mm, at 60% and with walls of its own."""
+    out = Path("load")
+    wall = [{"plane": "x=0", "how": "fixed"}]
+    for walls in PRINT_WALLS:
+        for infill in PRINT_INFILL:
+            settings = {**PRINT, "walls": walls, "infill": infill}
+            row = {"name": "beam", "file": "beam.step", "layers": "z", "print": settings}
+            assembly(out / f"printed-{walls}-{infill}.json", [row], held=wall)
+    root = {"name": "root", "box": [[-1, -1, -1], [30, BEAM_W + 1, BEAM_T + 1]], "infill": 60,
+            "why": "denser at the root, where it's bent most"}
+    walled = {**root, "name": "walled", "walls": 4}
+    # The beam's lower half denser, as a band of layers in its own z, and a box over it at its
+    # root, which wins over the band whatever their order.
+    band = {"name": "band", "layers": [0, 5], "infill": 40}
+    for name, region in (("dense", root), ("walled", walled)):
+        settings = {**PRINT, "walls": 2, "infill": 20, "regions": [region]}
+        row = {"name": "beam", "file": "beam.step", "layers": "z", "print": settings}
+        assembly(out / f"printed-{name}.json", [row], held=wall)
+    settings = {**PRINT, "walls": 2, "infill": 20, "regions": [root, band]}
+    row = {"name": "beam", "file": "beam.step", "layers": "z", "print": settings}
+    assembly(out / "printed-band.json", [row], held=wall)
+    # The beam as two halves bolted at its middle, as `two.json`, each printed: each has its own
+    # walls at the faces where they meet.
+    half = BEAM_L / 2
+    halves: Rows = [
+        {"name": "root", "file": "half.step", "layers": "z",
+         "print": {**PRINT, "walls": 2, "infill": 20}},
+        {"name": "tip", "file": "half.step", "at": [half, 0, 0], "layers": "z",
+         "print": {**PRINT, "walls": 2, "infill": 20}},
+    ]
+    bolted: Rows = [
+        {"between": ["root", "tip"], **BOLT, **HOLDS, "at": [[half, BEAM_W / 2, BEAM_T / 2]]}
+    ]
+    assembly(out / "printed-two.json", halves, bolted, wall)
+    # The same bar's lines along it, and across it.
+    for angle in (0, 45):
+        settings = {**PRINT, "pattern": "rectilinear", "walls": 2, "infill": 20,
+                    "infill_angle": angle}
+        row = {"name": "beam", "file": "beam.step", "layers": "z", "print": settings}
+        assembly(out / f"printed-lines-{angle}.json", [row], held=wall)
+
+
 def main() -> None:
     loads()
+    printed()
     throughs()
     peaks()
     shears()

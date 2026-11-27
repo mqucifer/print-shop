@@ -85,17 +85,27 @@ judged, on both. The held faces' reaction, which CalculiX prints, against the we
 for a joint with every held face on one side of it, statics: what crosses it is the load beyond
 it, whatever the mesh. Two readings of one figure on opposite sides of its limit are `DISAGREE`.
 
-**What it can't read:** a part's walls and infill (each is solid here, so a sparse part is less
-stiff and less strong than this), a printed part's stiffness the other way (one modulus every
-way), creep under a weight left on for months, a bolt's preload or a joint that opens (it's the
-first, linear answer, with no contact), shear where an insert bears on its plastic, a nut's
-thread, a bolt's length, a dovetail's glue and friction, the parts' own weight under a
-`--weight`, buckling, and anything that isn't still: a knock, or someone sitting down.
+**A part as printed** (mqucifer/print-shop#337, `as_printed.py` and `infill.py`): a part the
+assembly file gives a `print` is a solid skin, its walls and shells, round an infill core, each
+core fused into the body so the mesh has a face where it meets its skin. A core's stiffness is
+its pattern's lines as Orca lays them, held to the least share of that the published tests of
+an infill alone reached, and its strain as a share of the solid's those tests took; written
+for CalculiX as anisotropic constants and taken for each element in the nodes' balance. The
+skin is read against the material's limits and each core against its own.
+
+**What it can't read:** a part's walls and infill where it has no `print` (it's solid, so a
+sparse part is less stiff and less strong than this), a part read solid's stiffness the other
+way (one modulus every way), creep under a weight left on for months, a bolt's preload or a
+joint that opens (it's the first, linear answer, with no contact), shear where an insert bears
+on its plastic, a nut's thread, a bolt's length, a dovetail's glue and friction, the parts' own
+weight under a `--weight`, buckling, and anything that isn't still: a knock, or someone sitting
+down.
 """
 
 from __future__ import annotations
 
 import contextlib
+import dataclasses
 import math
 import os
 import re
@@ -109,7 +119,7 @@ from typing import Any
 
 import numpy as np
 
-from . import dovetail, load_dovetail, load_through, way_in
+from . import as_printed, dovetail, infill, load_dovetail, load_through, way_in
 from .assembly import AXES, DIAMETER, Assembly, Held, Joint, PartAt, read
 from .cae import ccx_one_thread, freecad, tidy_mesh, tidy_solve
 from .limits import over, said, under
@@ -201,15 +211,20 @@ POINTS = ((_B, _B, _B), (_A, _B, _B), (_B, _A, _B), (_B, _B, _A))
 
 
 def element_forces(
-    places: np.ndarray, moved: np.ndarray, modulus: float, poisson: float
+    places: np.ndarray,
+    moved: np.ndarray,
+    modulus: Any,
+    poisson: Any,
+    tensor: np.ndarray | None = None,
 ) -> np.ndarray:
     """The force each second-order tetrahedron's stress puts on each of its ten nodes, in N:
     `places` and `moved` are each element's nodes, four corners and then `MIDS`, where they are
     and how far each moved, in mm. It's the element's own stiffness times its movement, the sum
     CalculiX balances at every node, so the forces on a part's nodes add up to what's put on
-    it exactly, where the stress at a sharp inside corner, read off the surface, doesn't."""
-    lame = modulus * poisson / ((1 + poisson) * (1 - 2 * poisson))
-    shear = modulus / (2 * (1 + poisson))
+    it exactly, where the stress at a sharp inside corner, read off the surface, doesn't.
+    `modulus` and `poisson` are the material's; where the elements differ, as a printed part's
+    skin and core do (mqucifer/print-shop#337), `tensor` is each element's stiffness, C_ijkl."""
+    lame, shear = _lame(modulus, poisson, len(places))
     corners = np.array([[-1.0, -1, -1], [1, 0, 0], [0, 1, 0], [0, 0, 1]])
     forces = np.zeros_like(places, dtype=float)
     for point in POINTS:
@@ -224,21 +239,34 @@ def element_forces(
         in_space = np.einsum("nik,ak->nai", np.linalg.inv(mapped), slopes)
         grown = np.einsum("nai,naj->nij", moved, in_space)
         strain = (grown + grown.transpose(0, 2, 1)) / 2
-        stress = 2 * shear * strain
-        stress[:, range(3), range(3)] += lame * np.trace(strain, axis1=1, axis2=2)[:, None]
+        if tensor is not None:
+            stress = np.einsum("nijkl,nkl->nij", tensor, strain)
+        else:
+            stress = 2 * shear[:, None, None] * strain
+            stress[:, range(3), range(3)] += (lame * np.trace(strain, axis1=1, axis2=2))[:, None]
         weight = np.abs(np.linalg.det(mapped)) / 24
         forces += weight[:, None, None] * np.einsum("nij,naj->nai", stress, in_space)
     return forces
 
 
-def element_stiffness(places: np.ndarray, modulus: float, poisson: float) -> np.ndarray:
+def _lame(modulus: Any, poisson: Any, count: int) -> tuple[np.ndarray, np.ndarray]:
+    """Lamé's first constant and the shear modulus, one for each of `count` elements."""
+    modulus = np.broadcast_to(np.asarray(modulus, dtype=float), (count,))
+    poisson = np.broadcast_to(np.asarray(poisson, dtype=float), (count,))
+    lame = modulus * poisson / ((1 + poisson) * (1 - 2 * poisson))
+    return lame, modulus / (2 * (1 + poisson))
+
+
+def element_stiffness(
+    places: np.ndarray, modulus: Any, poisson: Any, tensor: np.ndarray | None = None
+) -> np.ndarray:
     """Each second-order tetrahedron's stiffness matrix, in N/mm, as `[element, node, axis,
     node, axis]`: the force on each of its ten nodes along each axis for a millimetre's
     movement of each along each, which `element_forces` is the sum of. At each integration
     point, for node a along i and node b along k, with each node's slope in space g, it's
     μ g_a·g_b where i is k, and μ g_ak g_bi + λ g_ai g_bk, weighted as the forces are."""
-    lame = modulus * poisson / ((1 + poisson) * (1 - 2 * poisson))
-    shear = modulus / (2 * (1 + poisson))
+    lame, shear = _lame(modulus, poisson, len(places))
+    lame, shear = lame[:, None, None, None, None], shear[:, None, None, None, None]
     corners = np.array([[-1.0, -1, -1], [1, 0, 0], [0, 1, 0], [0, 0, 1]])
     stiffness = np.zeros((len(places), 10, 3, 10, 3))
     for point in POINTS:
@@ -251,6 +279,9 @@ def element_stiffness(places: np.ndarray, modulus: float, poisson: float) -> np.
         mapped = np.einsum("ak,nai->nki", slopes, places)
         g = np.einsum("nik,ak->nai", np.linalg.inv(mapped), slopes)
         weight = (np.abs(np.linalg.det(mapped)) / 24)[:, None, None, None, None]
+        if tensor is not None:
+            stiffness += weight * np.einsum("naj,nijkl,nbl->naibk", g, tensor, g)
+            continue
         both = np.einsum("nac,nbc->nab", g, g)[:, :, None, :, None] * np.eye(3)[None, None, :, None]
         stiffness += weight * (
             shear * both
@@ -374,7 +405,6 @@ def _placed(assembly: Assembly, without_bands: bool = False) -> list[Any]:
 
 def _one_placed(part: PartAt, folder: Path, without_bands: bool) -> Any:
     """One part's one solid, turned by its `turn` and moved by its `at`."""
-    import FreeCAD as App
     import Part
 
     solids = [s for s in Part.read(str(folder / part.file)).Solids if s.Volume > 1e-6]
@@ -393,12 +423,60 @@ def _one_placed(part: PartAt, folder: Path, without_bands: bool) -> Any:
                 f"{len(left)} solids: a part read without its band is one solid still"
             )
         solid = left[0]
+    return _moved(solid, part)
+
+
+def _moved(solid: Any, part: PartAt) -> Any:
+    """A shape in a part's own axes, turned by its `turn` and moved by its `at`, in place."""
+    import FreeCAD as App
+
     for axis, degrees in part.turn:
         way = [0.0, 0.0, 0.0]
         way[AXES.index(axis)] = 1.0
         solid.rotate(App.Vector(0, 0, 0), App.Vector(*way), degrees)
     solid.translate(App.Vector(*part.at))
     return solid
+
+
+def _frame(part: PartAt) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """A part's layers' way and the two ways of their plane its `infill_angle` is measured
+    between, in the assembly's axes: with its layers along its own axis a, from its own axis
+    a+1 toward a+2 (`printed.own_way`)."""
+    matrix = part.matrix()
+    layers = AXES.index(part.layers)
+    return part.layers_way(), matrix[:, (layers + 1) % 3], matrix[:, (layers + 2) % 3]
+
+
+#: CalculiX's order of an anisotropic material's 21 constants, D_ijkl (`*ELASTIC, TYPE=ANISO`).
+ANISO = ("1111", "1122", "2222", "1133", "2233", "3333", "1112", "2212", "3312", "1212", "1113",
+         "2213", "3313", "1213", "1313", "1123", "2223", "3323", "1223", "1323", "2323")
+
+
+def _aniso(tensor: np.ndarray) -> str:
+    """A stiffness, C_ijkl in MPa, as CalculiX's anisotropic constants, eight to a line."""
+    values = [float(tensor[tuple(int(c) - 1 for c in key)]) for key in ANISO]
+    lines = [", ".join(f"{v:.9g}" for v in values[i : i + 8]) for i in range(0, 21, 8)]
+    return "*ELASTIC, TYPE=ANISO\n" + "\n".join(lines) + "\n"
+
+
+def _cores(assembly: Assembly, without_bands: bool = False) -> dict[str, list[Any]]:
+    """Each printed part's cells (`as_printed.cells`, mqucifer/print-shop#337), made in its own
+    axes and placed with it: by part, its cells, each with its core's solids where the assembly
+    puts them. Where its walls and shells fill a cell, the cell has no core, and is solid."""
+    folder = Path(assembly.path).parent
+    found: dict[str, list[Any]] = {}
+    for part in assembly.parts:
+        if part.printed is None:
+            continue
+        with step(f"making the part {part.name}'s skin and core from its print settings"):
+            own = _one_placed(dataclasses.replace(part, turn=(), at=(0.0, 0.0, 0.0)), folder,
+                              without_bands)
+            cells = as_printed.cells(own, part.printed, AXES.index(part.layers), folder,
+                                     part.name)
+            found[part.name] = [
+                (cell, [_moved(s.copy(), part) for s in cell.core]) for cell in cells
+            ]
+    return found
 
 
 def _span(box: Any, axis: int) -> tuple[float, float]:
@@ -422,8 +500,27 @@ class _Model:
         straight: bool = False,
         two_pass: bool = False,
         spread: bool = True,
+        cores: dict[str, list[Any]] | None = None,
     ) -> None:
         self.assembly, self.placed, self.args, self.size = assembly, placed, args, size
+        #: Each printed part's cells and their cores, placed (`_cores`, mqucifer/print-shop#337):
+        #: none for a part read solid.
+        self.cores = cores or {}
+        #: Each core's solid in the joined shape, by its index there, with its part's name, its
+        #: cell and the cell's figures (`infill.core`): filled by `join`.
+        self.core_solids: list[tuple[int, str, Any, Any]] = []
+        #: Each core's stiffness, C_ijkl in MPa, in the assembly's axes.
+        self.core_tensors: list[np.ndarray] = []
+        #: Which core each element is in, and each element's stiffness, in FreeCAD's order,
+        #: where the parts aren't all one material: filled by `solve`.
+        self.element_core: np.ndarray | None = None
+        #: A printed part's skin's nodes, and each of its cores', as rows (mqucifer/print-shop#337):
+        #: none for a part read solid, and in a pass that reads none as printed.
+        self.skin_rows: dict[str, np.ndarray] = {}
+        self.core_rows: dict[int, np.ndarray] = {}
+        #: Each material's stiffness, C_ijkl, and which each element is, by its row there.
+        self.element_tensor: np.ndarray | None = None
+        self.element_kind: np.ndarray | None = None
         #: Whether its second-order elements are straight-sided (mqucifer/print-shop#295).
         self.straight = straight
         self._surface_nodes: list[tuple[int, ...]] | None = None
@@ -470,6 +567,9 @@ class _Model:
             if abs(near.Volume - solid.Volume) > 1e-3 * solid.Volume + 1e-3:
                 raise NoAnswer(f"joined, the part {part.name} isn't the solid it was")
             self.solids.append(near)
+        if self.cores:
+            self._cored()
+            shape = self.shape
         names = [p.name for p in self.assembly.parts]
         self.met: dict[frozenset[str], list[Any]] = {}
         for i, first in enumerate(self.solids):
@@ -502,6 +602,73 @@ class _Model:
                 tail = self.solids[names.index(joint.between[0])]
                 load_dovetail.check(joint, self.joint_faces[joint.name], tail)
         self.between = [f for faces in self.met.values() for f in faces]
+
+    def _cored(self) -> None:
+        """Each printed part as its skin round its cores, one body still (mqucifer/print-shop#337):
+        the cores are fused into the joined parts, so the mesh has a face where each skin meets
+        its core, and every element is the skin's or a core's, never half of each. Each part's
+        solid is then its skin, which has every face the part has: the faces it meets other
+        parts by, is held by and is loaded on."""
+        given = [(name, k, cell, solid)
+                 for name, cells in self.cores.items()
+                 for k, (cell, solids) in enumerate(cells)
+                 for solid in solids]  # fmt: skip
+        if not given:
+            return
+        whole = self.shape.generalFuse([solid for *_, solid in given])[0]
+        self.feature.Shape = whole
+        self.shape = self.feature.Shape
+        solids = self.shape.Solids
+        if len(solids) != len(whole.Solids):
+            raise NoAnswer("the parts with their cores fused in couldn't be read back")
+
+        def within(piece: Any, of: Any) -> bool:
+            """Whether most of `piece` is in `of`: the fuse's pieces don't overlap."""
+            return bool(of.BoundBox.intersect(piece.BoundBox)
+                        and of.common(piece).Volume > 0.5 * piece.Volume)
+
+        cores: dict[int, tuple[str, Any]] = {}
+        for index, piece in enumerate(solids):
+            found = next(((name, cell) for name, _, cell, solid in given if within(piece, solid)),
+                         None)
+            if found is not None:
+                cores[index] = found
+        names = [p.name for p in self.assembly.parts]
+        skins: dict[str, list[int]] = {}
+        for index, solid in enumerate(solids):
+            if index in cores:
+                continue
+            owner = next(
+                (n for n, part in zip(names, self.solids, strict=True) if within(solid, part)),
+                None,
+            )
+            if owner is None:
+                raise NoAnswer("a piece of the parts with their cores fused in is in none of them")
+            skins.setdefault(owner, []).append(index)
+        for k, name in enumerate(names):
+            mine = skins.get(name, [])
+            if len(mine) != 1:
+                raise NoAnswer(
+                    f"the part {name} with its cores fused in is {len(mine)} skins: a printed "
+                    "part's walls and shells are one piece round its core"
+                )
+            self.solids[k] = solids[mine[0]]
+        self.core_solids = [
+            (index, name, cell, infill.core(cell.settings, self.assembly.part(name).material))
+            for index, (name, cell) in sorted(cores.items())
+        ]
+        self.core_tensors = []
+        for _, name, _, figures in self.core_solids:
+            part = self.assembly.part(name)
+            self.core_tensors.append(figures.stiffness(*_frame(part)))
+
+    def _pieces(self, k: int, solid: Any) -> list[Any]:
+        """The part `k`'s solids in the joined shape: its own, and a printed part's cores."""
+        if not self.core_solids:
+            return [solid]
+        name = self.assembly.parts[k].name
+        cores = [self.shape.Solids[i] for i, owner, *_ in self.core_solids if owner == name]
+        return [solid, *cores]
 
     def _face_name(self, face: Any) -> str:
         for number, other in enumerate(self.shape.Faces, 1):
@@ -673,6 +840,8 @@ class _Model:
             raise NoAnswer(f"the solve couldn't be set up: {wrong[:300]}")
         began = time.time()
         fea.write_inp_file()
+        if self.core_solids:
+            self._stiffnesses(fea.inp_file_name)
         self._add_to(fea.inp_file_name)
         kills = oom_kills()
         _ccx(fea, self.size)
@@ -716,6 +885,111 @@ class _Model:
             self.printed = _printed(os.path.splitext(fea.inp_file_name)[0] + ".dat", self.row)
         tidy_solve(fea)
         self._balance()
+
+    def _stiffnesses(self, path: str) -> None:
+        """Each core's elements, and its own stiffness, written into FreeCAD's CalculiX input
+        (mqucifer/print-shop#337): FreeCAD writes the one material for every element, as for
+        any assembly, and each core's elements are then a set of their own, with CalculiX's
+        anisotropic constants in the assembly's axes, and every other element the material's.
+        FreeCAD's own sets, one material to several solids, left elements out of every one."""
+        from .infill import isotropic
+
+        kinds = self._core_elements()
+        text = Path(path).read_text()
+        sections = list(re.finditer(r"^\*SOLID SECTION,\s*ELSET=(\S+),\s*MATERIAL=(\S+)\s*$",
+                                    text, re.M))
+        if len(sections) != 1:
+            raise NoAnswer(
+                f"FreeCAD's CalculiX input has {len(sections)} solid sections, not the one for "
+                "its one material, to write each core's own into"
+            )
+        order = list(self.fem.Volumes)
+
+        def elements(name: str, which: list[int]) -> str:
+            rows = [which[i : i + 8] for i in range(0, len(which), 8)]
+            return f"*ELSET,ELSET={name}\n" + "".join(
+                ", ".join(map(str, r)) + "\n" for r in rows
+            )
+
+        material = sections[0].group(2)
+        written = elements("SKINS", [e for e, k in zip(order, kinds, strict=True) if k < 0])
+        lines = f"*SOLID SECTION, ELSET=SKINS, MATERIAL={material}\n"
+        for number, tensor in enumerate(self.core_tensors):
+            mine = [e for e, k in zip(order, kinds, strict=True) if k == number]
+            if not mine:
+                _, name, cell, _ = self.core_solids[number]
+                raise NoAnswer(
+                    f"the part {name}'s core in {cell.name} has no element of the mesh of its "
+                    f"own, at a mesh of at most {self.size:g} mm: give a finer --mesh"
+                )
+            written += elements(f"CORE{number}", mine)
+            written += f"*MATERIAL, NAME=CORE{number}\n" + _aniso(tensor)
+            lines += f"*SOLID SECTION, ELSET=CORE{number}, MATERIAL=CORE{number}\n"
+        start, end = sections[0].span()
+        text = text[:start] + written + lines.rstrip("\n") + text[end:]
+        Path(path).write_text(text)
+        material_of = self.assembly.parts[0].material
+        self.element_core = kinds
+        self.element_tensor = np.array(
+            [isotropic(material_of.modulus_mpa, material_of.poisson), *self.core_tensors]
+        )
+        self.element_kind = kinds + 1
+
+    def _core_elements(self) -> np.ndarray:
+        """Which core each element is in, by its place in `core_solids`, or -1 for a skin or a
+        part read solid, in FreeCAD's order of the elements: the elements reached from one
+        another without crossing a core's faces are one piece, and which core that is, if any,
+        is asked of the solids once, at one element's middle (as `_owned` parts the parts)."""
+        import FreeCAD as App
+
+        cores = [(number, self.shape.Solids[index])
+                 for number, (index, *_) in enumerate(self.core_solids)]  # fmt: skip
+        walls = {
+            tuple(sorted(nodes[:3]))
+            for _, solid in cores
+            for face in solid.Faces
+            for nodes in self._on_face(face)
+        }
+        order = list(self.fem.Volumes)
+        corners = [tuple(self.fem.getElementNodes(e)[:4]) for e in order]
+        beside: dict[tuple[int, ...], list[int]] = {}
+        for element, four in enumerate(corners):
+            for skip in range(4):
+                face = tuple(sorted(four[:skip] + four[skip + 1 :]))
+                if face not in walls:
+                    beside.setdefault(face, []).append(element)
+        next_to: list[list[int]] = [[] for _ in order]
+        for pair in beside.values():
+            if len(pair) == 2:
+                next_to[pair[0]].append(pair[1])
+                next_to[pair[1]].append(pair[0])
+        kinds = np.full(len(order), -2, dtype=int)
+        for start in range(len(order)):
+            if kinds[start] != -2:
+                continue
+            middle = App.Vector(*np.mean([self.nodes[n] for n in corners[start]], axis=0))
+            kind = next(
+                (number for number, solid in cores
+                 if solid.BoundBox.isInside(middle) and solid.isInside(middle, 1e-6, False)),
+                -1,
+            )  # fmt: skip
+            kinds[start] = kind
+            todo = [start]
+            while todo:
+                for other in next_to[todo.pop()]:
+                    if kinds[other] == -2:
+                        kinds[other] = kind
+                        todo.append(other)
+        return kinds
+
+    def _stiff(self, rows: slice | None = None) -> tuple[Any, Any, np.ndarray | None]:
+        """The elements' stiffness for `element_forces`, of `rows`: the material's modulus and
+        Poisson's ratio where every element is it; else each element's own, C_ijkl."""
+        material = self.assembly.parts[0].material
+        if self.element_tensor is None or self.element_kind is None:
+            return material.modulus_mpa, material.poisson, None
+        kinds = self.element_kind if rows is None else self.element_kind[rows]
+        return material.modulus_mpa, material.poisson, self.element_tensor[kinds]
 
     def _iterated(self, fea: Any, analysis: Any, limit: int) -> None:
         """Solved by CalculiX's iterative solver, where its direct one met the container's
@@ -820,10 +1094,7 @@ class _Model:
         """What's left unbalanced at each node, as rows: the load put on it less what the
         elements carry there, on each axis CalculiX isn't told to hold."""
         wired = self._wired()
-        material = self.assembly.parts[0].material
-        forces = element_forces(
-            self.points[wired], self.moved[wired], material.modulus_mpa, material.poisson
-        )
+        forces = element_forces(self.points[wired], self.moved[wired], *self._stiff())
         return self._left(wired, forces)
 
     def _left(self, wired: np.ndarray, forces: np.ndarray) -> np.ndarray:
@@ -843,16 +1114,16 @@ class _Model:
         size, times how far each of its nodes' movements can be from what CalculiX solved
         (`figures`), summed over the elements at the node; and `LOADS` of the whole load.
         Element by element, in groups of `GROUP`, so it fits the memory."""
-        material = self.assembly.parts[0].material
         apart = figures(moved)
         left = np.zeros((len(self.points), 3))
         allowed = np.zeros((len(self.points), 3))
         for start in range(0, len(wired), GROUP):
             rows = wired[start : start + GROUP]
             places = self.points[rows]
-            forces = element_forces(places, moved[rows], material.modulus_mpa, material.poisson)
+            these = self._stiff(slice(start, start + GROUP))
+            forces = element_forces(places, moved[rows], *these)
             np.add.at(left, rows, -forces)
-            stiff = element_stiffness(places, material.modulus_mpa, material.poisson)
+            stiff = element_stiffness(places, *these)
             np.add.at(allowed, rows, np.einsum("naibk,nbk->nai", np.abs(stiff), apart[rows]))
         for node, push in self.pushed.items():
             left[self.row[node]] += push
@@ -935,14 +1206,22 @@ class _Model:
         nodes from outside: its loads and its held faces' reaction."""
         names = [p.name for p in self.assembly.parts]
         wired = self._wired()
-        material = self.assembly.parts[0].material
-        forces = element_forces(
-            self.points[wired], self.moved[wired], material.modulus_mpa, material.poisson
-        )
+        # A printed part's skin is thin, flat elements, so stiff that the .frd's six figures of
+        # each movement leave up to a newton at a node on the planted beam's halves: its forces
+        # are read from the seven CalculiX prints, where it has them (mqucifer/print-shop#337).
+        # A part read solid is read as it was.
+        moved = self.printed if self.core_solids and self.printed is not None else self.moved
+        forces = element_forces(self.points[wired], moved[wired], *self._stiff())
         owned = self._owned(wired, self.row, self.points)
         if not self.two_pass:
             self._balanced(wired, owned)
         self.part_rows = {name: np.unique(wired[owned[k]]) for k, name in enumerate(names)}
+        if self.element_core is not None:
+            for k, name in enumerate(names):
+                if name in self.cores:
+                    self.skin_rows[name] = np.unique(wired[owned[k] & (self.element_core < 0)])
+            for number in range(len(self.core_solids)):
+                self.core_rows[number] = np.unique(wired[self.element_core == number])
         self.within = {}
         for k, name in enumerate(names):
             total = np.zeros((len(self.points), 3))
@@ -1031,9 +1310,12 @@ class _Model:
                         reached.append(other)
                         todo.append(other)
             middle = App.Vector(*points[wired[start, :4]].mean(axis=0))
+            # A printed part is its skin and its cores (mqucifer/print-shop#337).
             part = next(
-                (k for k, s in enumerate(self.solids) if s.isInside(middle, 1e-6, False)), None
-            )
+                (k for k, s in enumerate(self.solids)
+                 if any(piece.isInside(middle, 1e-6, False) for piece in self._pieces(k, s))),
+                None,
+            )  # fmt: skip
             if part is None:
                 raise NoAnswer("an element of the mesh is in none of the parts")
             owned[part, reached] = True
@@ -1310,8 +1592,35 @@ class _Model:
         return found
 
     def _part_read(self, part: PartAt) -> dict[str, Any]:
-        """One part's worst pull across its layers and largest stretch any way."""
-        rows = self.part_rows[part.name]
+        """One part's worst pull across its layers and largest stretch any way. A printed part
+        (mqucifer/print-shop#337) is read so on its skin, against the material's own limits,
+        and each of its cores against its own (`infill.Core.read`), as `cores`."""
+        if part.name not in self.skin_rows:
+            return self._read_rows(part, self.part_rows[part.name])
+        found = self._read_rows(part, self.skin_rows[part.name])
+        found["printed"] = True
+        found["skin_nodes"] = found.pop("nodes")
+        found["nodes"] = len(self.part_rows[part.name])
+        way, first, second = _frame(part)
+        cores = []
+        for number, (_, name, cell, figures) in enumerate(self.core_solids):
+            if name != part.name:
+                continue
+            rows = self.core_rows.get(number, np.array([], dtype=int))
+            if not rows.size:
+                raise NoAnswer(
+                    f"the part {part.name}'s core in {cell.name} has no element of the mesh "
+                    f"of its own, at a mesh of at most {self.size:g} mm: give a finer --mesh"
+                )
+            read = figures.read(self.strain[rows], way, first, second)
+            for key in ("across_at", "stretch_at"):
+                read[key] = _list(self.points[rows[read.pop(key)]], 3)
+            cores.append({"cell": cell.name, "nodes": len(rows), **figures.said(), **read})
+        found["cores"] = cores
+        return found
+
+    def _read_rows(self, part: PartAt, rows: np.ndarray) -> dict[str, Any]:
+        """The worst pull across its layers and largest stretch any way, of a part's `rows`."""
         way = part.layers_way()
         strain = self.strain[rows]
         across = np.einsum("i,nij,j->n", way, strain, way)
@@ -1801,6 +2110,7 @@ def _solved(
     two_pass: bool = False,
     weighed: list[Any] | None = None,
     spread: bool = True,
+    cores: dict[str, list[Any]] | None = None,
 ) -> dict[str, Any]:
     """One solve at one mesh, and everything read from it. Where gmsh can't curve every
     element's sides onto the parts' faces without turning one inside out, as on a traced
@@ -1812,7 +2122,7 @@ def _solved(
     # One thread, so the same parts are the same mesh, and the same figures, every time.
     App.ParamGet("User parameter:BaseApp/Preferences/Mod/Fem/Gmsh").SetInt("NumOfThreads", 1)
     def model(straight: bool) -> _Model:
-        made = _Model(assembly, placed, args, size, straight, two_pass, spread)
+        made = _Model(assembly, placed, args, size, straight, two_pass, spread, cores)
         if weighed is not None:
             made.weighed = weighed
         return made
@@ -2120,6 +2430,15 @@ def _run(
             )
             return
     size = _mesh_size(placed, args.mesh)
+    printed = [p.name for p in assembly.parts if p.printed is not None]
+    if printed and two_pass is not None:
+        raise NoAnswer(
+            f"{', '.join(printed)} {'is' if len(printed) == 1 else 'are'} read as printed, a "
+            "skin round an infill core, in one pass only so far, and this is read in two "
+            f"({two_pass}): read the printed part(s) on their own, or leave out their `print` "
+            "to read them solid"
+        )
+    cores = _cores(assembly, without_bands) if printed else None
     if two_pass is not None:
         # Two passes (mqucifer/print-shop#301): the first is the whole, read as the one pass
         # reads it but for its bolts' bores, and the parts are read in the second.
@@ -2145,11 +2464,11 @@ def _run(
         one = _on_one_pass()
         if one is not None:
             one.whole_began = time.time()
-        fine = _solved(assembly, placed, args, size)
+        fine = _solved(assembly, placed, args, size, cores=cores)
         if one is not None:
             one.whole_read()
             one.check_coarser(round(size * COARSER, 3))
-        coarse = _solved(assembly, placed, args, round(size * COARSER, 3))
+        coarse = _solved(assembly, placed, args, round(size * COARSER, 3), cores=cores)
     force = float(sum(np.linalg.norm(one["force"]) for one in fine["raw_loads"]))
     meshed = (
         f"a mesh of at most {size:g} mm ({fine['nodes']} nodes, {fine['elements']} elements, "
@@ -2254,8 +2573,14 @@ def _run(
     report.line(
         f"the most any point moves is {fine['most_moves_mm']:.3f} mm, at "
         f"{_xyz(fine['most_moves_at'])}, as most_moves_mm; the loaded place that moves most, "
-        f"{moves_most:.3f} mm, is moves_mm. Both are in proportion to one over the "
-        f"material's stiffness, {assembly.parts[0].material.modulus_mpa:g} MPa, a solid part's"
+        f"{moves_most:.3f} mm, is moves_mm. "
+        + (
+            "Both are in proportion to one over the material's stiffness, "
+            f"{assembly.parts[0].material.modulus_mpa:g} MPa, a solid part's"
+            if not cores
+            else f"The skins are the material's own stiffness, "
+            f"{assembly.parts[0].material.modulus_mpa:g} MPa, and each core its infill's, below"
+        )
     )
     moves = ", ".join(
         f"{o['moves_mm']:.3f} mm at {_xyz(o['at'])} ({_share(o['moves_mm'], f['moves_mm'])} apart)"
@@ -2278,12 +2603,25 @@ def _run(
         )  # fmt: skip
     sources = sorted({p.material.source for p in assembly.parts})
     report.line("the limits are from " + "; ".join(sources))
+    if cores:
+        _as_printed(assembly, report, cores)
+    solid = [p.name for p in assembly.parts if p.printed is None]
     if args.lift is not None:
         report.note(
-            "each part is read as solid, with one stiffness every way, and hangs at its solid "
+            ("each part is read as solid, with one stiffness every way, and" if not cores else
+             f"{', '.join(solid) or 'no part'} is read as solid, with one stiffness every way, "
+             "and every printed part as its skin round its core; each")
+            + " hangs at its solid "
             "weight, which is more than a printed part's with its walls and infill: creep, a "
             f"knock, and the weight of anything bought that hangs with them aren't in it, and "
             f"nor is {args.lift}'s own weight, which is in the hand that lifts it"
+        )
+    elif cores:
+        report.note(
+            f"{', '.join(solid) or 'no part'} {'is' if len(solid) == 1 else 'are'} read as "
+            "solid, with one stiffness every way, and every printed part as its skin round its "
+            "core, and every joint as one piece while it holds: creep, a joint that opens and "
+            "the parts' own weight aren't in it"
         )
     else:
         report.note(
@@ -2339,6 +2677,64 @@ def _run(
             + ("what hangs" if args.lift is not None else "the loaded place")
             + f" moves {moves_most:.3f} mm",
         )
+
+
+def _as_printed(assembly: Assembly, report: Report, cores: dict[str, list[Any]]) -> None:
+    """What a read as printed assumed (mqucifer/print-shop#337): each printed part's cells, its
+    walls and shells, its cores' figures and their source, that no print has checked them, and
+    what of it is still read solid."""
+    from .infill import MOST, TESTED_FROM
+
+    found: dict[str, Any] = {}
+    for part in assembly.parts:
+        if part.name not in cores:
+            continue
+        cells = []
+        for cell, solids in cores[part.name]:
+            figures = infill.core(cell.settings, part.material)
+            cells.append({
+                "cell": cell.name,
+                "settings": cell.settings.given(),
+                "walls_mm": round(cell.walls_mm, 3),
+                "top_mm": round(cell.top_mm, 3),
+                "bottom_mm": round(cell.bottom_mm, 3),
+                "volume_mm3": round(cell.volume_mm3, 1),
+                "core_mm3": round(cell.core_mm3, 1),
+                **figures.said(),
+            })
+            report.line(
+                f"the part {part.name} as printed, {cell.name}: {cell.settings.said()}; so walls "
+                f"{cell.walls_mm:.2f} mm thick, {cell.top_mm:.2f} mm of shells under each top "
+                f"face and {cell.bottom_mm:.2f} mm over each bottom one, round a core of "
+                f"{cell.core_mm3:.0f} mm³ of its {cell.volume_mm3:.0f}"
+                + ("" if solids else ": its walls and shells fill it, so it's solid")
+            )
+        found[part.name] = cells
+        joined = [j.name for j in assembly.joints
+                  if part.name in j.between and j.kind in ("through", "dovetail")]
+        if joined:
+            report.note(
+                f"what's solved again round {', '.join(joined)}, the plastic round each bolt, a "
+                f"dovetail's neck and walls and its latch's tab, is read solid in {part.name}, "
+                "not as printed: stronger than a printed part's, so read it with a margin"
+            )
+    report.numbers["printed"] = found
+    report.line(
+        "each core's figures: its lines as Orca 2.4.2 lays them, each set stiff along its run, "
+        "walled through the layers where a pattern lays the same lines each layer, and bending "
+        "between them (Ashby 2006, The properties of foams and lattices); held to the least "
+        "share of that the published tests of an infill alone reached, Ben hadj Hassine et al. "
+        "2024, Polymers 16:1562, PLA with no walls or shells at 40, 50 and 60%, its Table 3, and "
+        "taking the strain at its yield as a share of the solid's those tests did, at the least "
+        f"(`infill.py`, docs/bench.md). Below {TESTED_FROM:g}% no test checks them; none goes "
+        f"past {MOST:g}%"
+    )
+    report.note(
+        "the infill's figures are published tests of PLA, as shares of their own plastic's, "
+        "taken for PETG: none has been checked against a print from this printer yet, which "
+        "the printed coupons will do (mqucifer/print-shop#340). A printed part hangs at its "
+        "solid weight, more than its own"
+    )
 
 
 def _give_back() -> None:
@@ -2411,8 +2807,9 @@ def _parts(
         one["coarse_stretch_pct"] = other["stretch_pct"]
         way = "(" + ", ".join(f"{v:g}" for v in np.round(one["layers"], 3)) + ")"
         lies = one["stretch_from_layers_deg"]
+        skin = "'s skin, its walls and shells," if one.get("printed") else ""
         report.line(
-            f"the part {name} ({one['material']}, its layers stacked along {way}): pulled "
+            f"the part {name}{skin} ({one['material']}, its layers stacked along {way}): pulled "
             f"across its layers by {one['across_layers_pct']:.3f}% at most, at "
             f"{_xyz(one['across_at'])}, as parts.{name}.across_layers_pct, against "
             f"{one['across_limit_pct']:g}%; its largest stretch any way is a {one['stretch_is']} "
@@ -2421,8 +2818,9 @@ def _parts(
             f"{one['stretch_limit_pct']:g}%"
         )
         report.second(
-            f"the part {name} on the coarser mesh: {other['across_layers_pct']:.3f}% across its "
-            f"layers ({_share(other['across_layers_pct'], one['across_layers_pct'])} apart) and "
+            f"the part {name}{skin} on the coarser mesh: {other['across_layers_pct']:.3f}% "
+            f"across its layers "
+            f"({_share(other['across_layers_pct'], one['across_layers_pct'])} apart) and "
             f"{other['stretch_pct']:.3f}% any way "
             f"({_share(other['stretch_pct'], one['stretch_pct'])} apart)"
         )
@@ -2446,8 +2844,8 @@ def _parts(
                 )
             elif over(value, limit):
                 fails.append(
-                    f"the part {name} is {what} by {said(value, limit, 2)}% at {_xyz(where)}, "
-                    f"over its material's {limit:g}% "
+                    f"the part {name}{skin} is {what} by {said(value, limit, 2)}% at "
+                    f"{_xyz(where)}, over its material's {limit:g}% "
                     + (
                         "across its layers: lay it on the bed so its layers run along this pull, "
                         "or make it thicker there"
@@ -2455,6 +2853,55 @@ def _parts(
                         else "in its layers' plane"
                     )
                 )
+        for core, rough in zip(one.get("cores", []), other.get("cores", []), strict=True):
+            _core(report, name, core, rough, fails, apart)
+
+
+def _core(
+    report: Report,
+    name: str,
+    core: dict[str, Any],
+    rough: dict[str, Any],
+    fails: list[str],
+    apart: list[str],
+) -> None:
+    """A printed part's core (mqucifer/print-shop#337): pulled across its layers, and its
+    stretch any way against the limit for the way it points, against its lines and its
+    layers (`infill.Core.read`), on both meshes."""
+    core["coarse_across_layers_pct"] = rough["across_layers_pct"]
+    core["coarse_stretch_pct"] = rough["stretch_pct"]
+    where = f"the part {name}'s core in {core['cell']}"
+    report.line(
+        f"{where} ({core['said']}): pulled across its layers by "
+        f"{core['across_layers_pct']:.3f}% at most, at {_xyz(core['across_at'])}, against "
+        f"{core['across_limit_pct']:g}%; its stretch nearest its limit is a {core['stretch_is']} "
+        f"of {core['stretch_pct']:.3f}% at {_xyz(core['stretch_at'])}, "
+        f"{core['stretch_from_layers_deg']:.0f}° out of its layers' plane and "
+        f"{core['stretch_from_lines_deg']:.0f}° off its lines, against "
+        f"{core['stretch_limit_pct']:.3g}%"
+    )
+    report.second(
+        f"{where} on the coarser mesh: {rough['across_layers_pct']:.3f}% across its layers "
+        f"({_share(rough['across_layers_pct'], core['across_layers_pct'])} apart) and "
+        f"{rough['stretch_pct']:.3f}% against {rough['stretch_limit_pct']:.3g}% that way"
+    )
+    for key, limit_key, what, at in (
+        ("across_layers_pct", "across_limit_pct", "pulled across its layers", "across_at"),
+        ("stretch_pct", "stretch_limit_pct", "stretched", "stretch_at"),
+    ):
+        value, limit = core[key], core[limit_key]
+        if over(value, limit) != over(rough[key], rough[limit_key]):
+            apart.append(
+                f"{where} is {what} by {said(value, limit)}% of {limit:.3g}% on the mesh and "
+                f"{said(rough[key], rough[limit_key])}% of {rough[limit_key]:.3g}% on the "
+                "coarser one, either side of its limit"
+            )
+        elif over(value, limit):
+            fails.append(
+                f"{where} is {what} by {said(value, limit, 2)}% at {_xyz(core[at])}, over its "
+                f"infill's {limit:.3g}% that way ({core['said']}): give it more walls or "
+                "denser infill there, or turn its lines along the stretch"
+            )
 
 
 def _joints(

@@ -421,6 +421,9 @@ REPORTS: dict[str, tuple[str, ...]] = {
         "moves_mm",
         "nodes",
         "parts",
+        # Each printed part's cells, their walls, shells and cores, and their cores' figures
+        # (mqucifer/print-shop#337).
+        "printed",
         "reaction_n",
         "solve_s",
         "toward",
