@@ -493,6 +493,31 @@ def test_an_unmarked_run_whose_breakdown_places_only_given_parts_finishes_with_i
     assert (row["assembly"], row["met"], json.loads(row["made"])) == ("table.json", 1, [])
 
 
+def test_a_breakdown_naming_given_files_by_their_dash_joined_paths_is_an_assembly_run(
+    tmp_path: Path,
+) -> None:
+    """A breakdown may name each given part by its path, the folder joined by a dash:
+    `references-left.step`. Those are given parts, and nothing of the run's own."""
+    dashed = tool(
+        "breakdown",
+        parts=[
+            {"name": "references-left.step", "what": "the given left block, unchanged"},
+            {"name": "references-right.step", "what": "the given right block, unchanged"},
+        ],
+        joins=[
+            {"parts": ["references-left.step", "references-right.step"], "how": "bolted"}
+        ],
+        look=["two blocks side by side"],
+        **{"from": "the request"},
+    )
+    run = _run(
+        tmp_path, dashed, tool("needs", needs=[MEET]), tool("done", **DONE), assembly_run=False
+    )
+    assert run.drive().name == "met"
+    assert run._assembly_run_by() == "breakdown"
+    assert done_reply(run)["detail"]["met"] is True
+
+
 def test_a_request_of_the_assembly_kind_finishes_with_its_assembly(tmp_path: Path) -> None:
     request = REQUEST.replace("## Stops", "## Kind\nassembly\n\n## Stops")
     run = _run(
