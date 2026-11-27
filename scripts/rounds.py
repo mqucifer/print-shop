@@ -235,26 +235,32 @@ def _lessons(args: argparse.Namespace, ledger: DesignLedger) -> str:
 
 def _studies(folder: Path, root: Path, args: argparse.Namespace) -> str:
     """The settings studies an approval queues by itself, where the run has a load need
-    (mqucifer/print-shop#359). It follows the approval and can't undo it: what goes wrong is
-    said, and the run is approved as it was."""
-    from print_shop.study import orders  # noqa: PLC0415 - Orca's and the study's, on approval
-    from print_shop.study.limits import Limits  # noqa: PLC0415
-
+    (mqucifer/print-shop#359), and the worker that runs them. It follows the approval and can't
+    undo it: what goes wrong is said, and the run is approved as it was."""
     try:
+        from print_shop.env import SETTINGS_PATH, load_env  # noqa: PLC0415
+        from print_shop.study import orders  # noqa: PLC0415 - Orca's and the study's
+        from print_shop.study.limits import Limits  # noqa: PLC0415
+
         limits = Limits.read(args.study_limits) if args.study_limits else None
         made, said = orders.on_approval(
-            folder, DesignLedger(root / "ledger.sqlite"), f"on approval by {args.by}", limits
+            folder.resolve(), DesignLedger(root / "ledger.sqlite"), f"on approval by {args.by}",
+            limits,
         )
     except Exception as exc:  # noqa: BLE001 - nothing about a study holds up an approval
         return f"no settings study queued: {type(exc).__name__}: {exc}"
     if not made:
         return said
+    if limits is None or not limits.given():
+        said += "; with no limits of the Sponsor's (--study-limits FILE gives them)"
     try:
         # Run by themselves: a worker for the root, started where none runs.
-        return f"{said}; {orders.start_worker(root)}"
+        return f"{said}; {orders.start_worker(root.resolve(), load_env(SETTINGS_PATH))}"
     except Exception as exc:  # noqa: BLE001 - nor does starting their worker
-        return (f"{said}; no worker could start ({type(exc).__name__}: {exc}): "
-                "`scripts/settings_study.py work --root ROOT` runs them")
+        return (
+            f"{said}; no worker could start ({type(exc).__name__}: {exc}): "
+            "`scripts/settings_study.py work --root ROOT` runs them"
+        )
 
 
 def _refine(args: argparse.Namespace, folder: Path, ledger: DesignLedger) -> int:
@@ -501,7 +507,7 @@ def main() -> int:
     taught.add_argument("--score", choices=tuple(lessons.SCORES))
     taught.add_argument("--calls", help="the calls that show it, by commas")
     args = top.parse_args()
-    root = args.root.expanduser()
+    root = args.root.expanduser().resolve()
     folder = root / str(getattr(args, "name", ""))
     signal.signal(signal.SIGTERM, _interrupted)
     try:

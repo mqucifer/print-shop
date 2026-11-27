@@ -272,8 +272,10 @@ def _orders(args: argparse.Namespace) -> int:
         except (Refused, ValueError) as exc:
             print(exc, file=sys.stderr)
             return 2
-        print(f"queued {len(made)} settings studies of {folder.name}: "
-              + ", ".join(f"order {n}" for n in made))
+        for _, said in made:
+            print(said)
+        if any(n is not None for n, _ in made):
+            print(study_orders.start_worker(folder.parent, load_env(SETTINGS_PATH)))
         return 0
     root = args.root.expanduser().resolve()
     design = DesignLedger(root / "ledger.sqlite")
@@ -297,8 +299,26 @@ def work(root: Path, design: DesignLedger, once: bool = False, ledger: Path | No
     except BlockingIOError:
         print(f"another worker runs {root}'s studies", file=sys.stderr)
         return 3
+    held = True
     try:
-        while (order := study_orders.claim(design)) is not None:
+        # Holding the lock, no other worker runs: what's still running died with its worker.
+        for stale in study_orders.orphaned(design):
+            print(f"order {stale}: its worker ended before it did, so it's failed", flush=True)
+        while True:
+            order = study_orders.claim(design)
+            if order is None:
+                # Released, then looked at once more: an order queued as this worker was ending
+                # found the lock held, and started none of its own.
+                fcntl.flock(lock, fcntl.LOCK_UN)
+                held = False
+                if once or not study_orders.queued(design):
+                    break
+                try:
+                    fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                except BlockingIOError:
+                    break  # another worker has them
+                held = True
+                continue
             folder = root / order.run
             print(f"order {order.id}: studying {order.run} {order.part}", flush=True)
             try:
@@ -315,10 +335,16 @@ def work(root: Path, design: DesignLedger, once: bool = False, ledger: Path | No
                                         f"the study exited {code}: see {out}", out)
             except Exception as exc:  # noqa: BLE001 - a study failing is its order's answer
                 study_orders.finish(design, order, "failed", f"{type(exc).__name__}: {exc}")
+            except BaseException as exc:
+                # Stopped mid-study, as by an interrupt: said in its order, then raised.
+                study_orders.finish(design, order, "failed",
+                                    f"stopped by {type(exc).__name__} as it was studied")
+                raise
             if once:
                 break
     finally:
-        fcntl.flock(lock, fcntl.LOCK_UN)
+        if held:
+            fcntl.flock(lock, fcntl.LOCK_UN)
         lock.close()
     return 0
 

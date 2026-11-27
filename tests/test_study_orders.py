@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 import shutil
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
@@ -176,6 +177,27 @@ def test_a_study_with_no_load_cases_is_of_time_grams_and_finish(
 # --------------------------------------------------------------------------
 
 
+def test_a_setting_a_candidate_leaves_unset_is_held_to_the_limits_as_the_profile_gives_it(
+    part: StudyPart,  # noqa: F811
+) -> None:
+    """mqucifer/print-shop#372's review: with walls at most 1 and gyroid only, a candidate asking
+    only infill would be sliced with the profile's 2 walls and rectilinear, and recommended."""
+    limits = Limits.of({"most_walls": 1, "patterns": ["gyroid"]})
+    with pytest.raises(OutOfLimits, match="rectilinear infill, the profile's, is past"):
+        limits.check(Candidate("c1", Settings(infill=30.0)), part.defaults)
+    with pytest.raises(OutOfLimits, match="2 walls, the profile's, are past the Sponsor's most"):
+        limits.check(Candidate("c1", Settings(pattern="gyroid", infill=30.0)), part.defaults)
+    limits.check(Candidate("c1", Settings(pattern="gyroid", walls=1)), part.defaults)
+    with pytest.raises(OutOfLimits, match="walls laid inner wall/outer wall, the profile's,"):
+        Limits.of({"wall_sequences": ["outer wall/inner wall"]}).check(
+            Candidate("c1", Settings()), part.defaults, "inner wall/outer wall")
+    part.limits = Limits.of({"patterns": ["gyroid"]})
+    model = Model([("read", {"why": "w", "settings": {"infill": 30}})])
+    result = run(StudyLoop(chat=model, max_calls=1), part)
+    assert result.calls[0].result.startswith("refused: the part's rectilinear infill, the "
+                                             "profile's, is past")
+
+
 def _bar(path: Path, length: float, depth: float = 20.0) -> None:
     body = trimesh.creation.box((length, depth, 10))
     body.apply_translation((length / 2, depth / 2, 5))
@@ -184,8 +206,9 @@ def _bar(path: Path, length: float, depth: float = 20.0) -> None:
 
 def _furniture_run(root: Path, name: str = "table-1", load: bool = True) -> tuple[Path, Any]:
     """An approved run delivering two parts of a made-up table, an upper and a lower leg, each a
-    bar in its own file, with an assembly in its work folder, its load needs read on it, and a
-    bed need laying the lower one on its +z face."""
+    bar in its own file, with an assembly in its work folder naming a third part, a band and a
+    `with` beside them, its load needs read on it, and a bed need laying the lower one on its +z
+    face."""
     folder = root / name
     judged = folder / "rounds" / "001" / "judged"
     judged.mkdir(parents=True)
@@ -199,12 +222,13 @@ def _furniture_run(root: Path, name: str = "table-1", load: bool = True) -> tupl
     work.mkdir(exist_ok=True)
     for f in ("leg_upper.stl", "leg_lower.stl"):
         shutil.copyfile(judged / f, work / f)
-    (work / "post.stl").write_text("solid post\nendsolid post\n")
+    for f in ("post.stl", "skin.stl", "bolt.stl"):
+        (work / f).write_text(f"solid {f}\nendsolid {f}\n")
     (work / "assembly.json").write_text(json.dumps({"parts": [
         {"name": "upper", "file": "leg_upper.stl", "at": [0, 0, 140], "layers": "z",
-         "material": "petg"},
+         "material": "petg", "with": ["bolt.stl"]},
         {"name": "lower", "file": "leg_lower.stl", "at": [0, 0, 0], "layers": "z",
-         "material": "petg"},
+         "material": "petg", "band": "skin.stl"},
         {"name": "post", "file": "post.stl", "at": [0, 0, -50], "layers": "z"},
     ]}))
     needs: list[dict[str, Any]] = [
@@ -221,23 +245,50 @@ def _furniture_run(root: Path, name: str = "table-1", load: bool = True) -> tupl
     return folder, ledger
 
 
+ENV = {"STUDY_NOZZLE": "0.4", "STUDY_FILAMENTS": "petg=Elegoo PETG; pla=Elegoo PLA"}
+
+
 def test_an_approved_run_with_a_load_need_has_each_part_it_delivers_queued(
     tmp_path: Path,
 ) -> None:
     folder, ledger = _furniture_run(tmp_path)
     made, said = orders.on_approval(folder, ledger, "on approval by sponsor",
                                     Limits.of({"most_grams": 90}))
-    assert len(made) == 2 and said.startswith("a settings study of each part queued, 2")
+    assert len(made) == 2 and said == "order 1 queued for upper; order 2 queued for lower"
     queued = orders.orders(ledger)
-    assert [(o.part, o.kind, o.side, o.status) for o in queued] == [
-        ("upper", "load", "", "queued"), ("lower", "load", "+z", "queued")]
+    assert [(o.part, o.kind, o.side, o.status, o.material) for o in queued] == [
+        ("upper", "load", "", "queued", "petg"), ("lower", "load", "+z", "queued", "petg")]
     upper = queued[0]
     assert upper.file == folder / "approvals" / "1" / "review" / "A-with-pause" / "leg_upper.stl"
-    assert upper.assembly == folder / "work" / "assembly.json"
-    assert upper.needs == folder / "needs.json"
+    assert upper.assembly == Path("assembly.json") and upper.needs == folder / "needs.json"
     assert upper.limits == Limits.of({"most_grams": 90})
-    again, _ = orders.on_approval(folder, ledger, "on approval by sponsor")
-    assert again == made and len(orders.orders(ledger)) == 2, "never queued twice"
+    again, said = orders.on_approval(folder, ledger, "on approval by sponsor")
+    assert again == [] and len(orders.orders(ledger)) == 2, "never queued twice"
+    assert said == "order 1 is queued already, for upper; order 2 is queued already, for lower"
+
+
+def test_what_a_study_reads_is_copied_as_its_queued_with_every_file_its_assembly_names(
+    tmp_path: Path,
+) -> None:
+    """mqucifer/print-shop#372's review: hours later the work folder may have changed, and a
+    part's `with` and band files were never copied."""
+    folder, ledger = _furniture_run(tmp_path)
+    orders.on_approval(folder, ledger, "on approval by sponsor")
+    lower = orders.orders(ledger)[1]
+    assert lower.inputs == folder / "studies" / "2-lower" / "inputs"
+    assert set(lower.manifest or {}) == {"leg_lower.stl", "assembly.json", "leg_upper.stl",
+                                         "bolt.stl", "skin.stl", "post.stl"}
+    assert (lower.inputs / "leg_lower.stl").read_bytes() == lower.file.read_bytes()
+    _bar(folder / "work" / "leg_lower.stl", 150.0)
+    (folder / "work" / "skin.stl").write_text("changed")
+    assert (lower.inputs / "skin.stl").read_text().startswith("solid skin.stl")
+    (folder / "work" / "bolt.stl").unlink()
+    other, other_ledger = _furniture_run(tmp_path, "table-2")
+    (other / "work" / "bolt.stl").unlink()
+    with pytest.raises(ValueError, match="bolt.stl, which assembly.json names, isn't in"):
+        orders.on_approval(other, other_ledger, "on approval by sponsor")
+    assert [o for o in orders.orders(other_ledger) if o.run == "table-2"] == [], \
+        "refused, never queued without it"
 
 
 def test_a_run_with_no_load_need_queues_nothing_by_itself(tmp_path: Path) -> None:
@@ -257,17 +308,19 @@ def test_a_run_that_isnt_approved_queues_nothing(tmp_path: Path) -> None:
 
 def test_a_flagged_design_is_studied_with_no_cases_or_those_named(tmp_path: Path) -> None:
     folder, ledger = _furniture_run(tmp_path, load=False)
-    made = orders.flag(folder, ledger, "Sponsor: M", files=["leg_lower"])
+    ((made, said),) = orders.flag(folder, ledger, "Sponsor: M", files=["leg_lower"])
     (lower,) = orders.orders(ledger)
     # With no load need, no assembly is named: the part is its file's.
-    assert made == [lower.id] and (lower.kind, lower.part, lower.cases) == (
-        "flagged", "leg_lower", ())
-    named = orders.flag(folder, ledger, "Sponsor: M", files=["leg_upper.stl"],
-                        cases=["hang=--weight 5 --at 0,0,200"], assembly=Path("assembly.json"))
+    assert made == lower.id and said == f"order {made} queued for leg_lower"
+    assert (lower.kind, lower.part, lower.cases, lower.material) == (
+        "flagged", "leg_lower", (), None)
+    ((named, _),) = orders.flag(folder, ledger, "Sponsor: M", files=["leg_upper.stl"],
+                                cases=["hang=--weight 5 --at 0,0,200"],
+                                assembly=Path("assembly.json"))
     upper = orders.orders(ledger)[-1]
-    assert named == [upper.id] and upper.cases == ("hang=--weight 5 --at 0,0,200",)
-    assert upper.part == "upper", "named in the assembly the Sponsor gave"
-    assert upper.assembly == folder / "work" / "assembly.json"
+    assert named == upper.id and upper.cases == ("hang=--weight 5 --at 0,0,200",)
+    assert (upper.part, upper.material, upper.assembly) == ("upper", "petg",
+                                                            Path("assembly.json"))
     with pytest.raises(ValueError, match="not among table-1's approved files: shelf"):
         orders.flag(folder, ledger, "Sponsor: M", files=["shelf"])
 
@@ -277,6 +330,51 @@ def test_named_cases_need_an_assembly(tmp_path: Path) -> None:
     (folder / "work" / "assembly.json").unlink()
     with pytest.raises(ValueError, match="cases are read on an assembly"):
         orders.flag(folder, ledger, "Sponsor: M", cases=["hang=--weight 5"])
+
+
+def test_a_failed_or_done_order_is_queued_again_as_its_next_attempt(tmp_path: Path) -> None:
+    """mqucifer/print-shop#372's review: queued again, a failed order stayed failed, and new
+    cases and limits were dropped, while it said it was queued."""
+    folder, ledger = _furniture_run(tmp_path)
+    orders.on_approval(folder, ledger, "on approval by sponsor")
+    upper, lower = orders.orders(ledger)
+    orders.finish(ledger, orders.claim(ledger) or upper, "failed", "Orca refused it")
+    orders.finish(ledger, orders.claim(ledger) or lower, "done", "its table is x")
+    made, said = orders.on_approval(folder, ledger, "on approval by sponsor")
+    assert said == "order 3 queued for upper, its attempt 2; order 2 studied lower already"
+    assert made == [3] and orders.orders(ledger)[-1].attempt == 2
+    ((again, words),) = orders.flag(folder, ledger, "Sponsor: M", files=["leg_lower"],
+                                    cases=["hang=--weight 5"], limits=Limits.of({"most_grams": 50}))
+    assert words == f"order {again} queued for lower" and again == 4
+    newest = orders.orders(ledger)[-1]
+    assert newest.cases == ("hang=--weight 5",) and newest.limits == Limits.of({"most_grams": 50})
+    ((none, words),) = orders.flag(folder, ledger, "Sponsor: M", files=["leg_lower"])
+    assert none is None and words == "order 4 is queued already, for lower"
+
+
+def test_a_file_shared_or_renamed_at_review_is_one_part_matched_by_its_own_name(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """mqucifer/print-shop#372's review: a file shared by two groups is renamed at review, and
+    was skipped as no part of the assembly, or queued and said twice."""
+    from print_shop.refine import approved as approved_mod  # noqa: PLC0415
+
+    folder, ledger = _furniture_run(tmp_path)
+    real = approved_mod.read(folder, ledger)
+    group = real.groups[0]
+    renamed = [replace(f, name=f"01-{f.name}") for f in group.files]
+    for f, was in zip(renamed, group.files, strict=True):
+        shutil.copyfile(was.path, was.path.with_name(f.name))
+    renamed = [replace(f, path=f.path.with_name(f.name)) for f in renamed]
+    shared = replace(real, groups=[replace(group, files=renamed),
+                                   replace(group, folder="B", files=renamed[:1])])
+    monkeypatch.setattr(approved_mod, "read", lambda _folder, _ledger: shared)
+    made, said = orders.on_approval(folder, ledger, "on approval by sponsor")
+    assert said == "order 1 queued for upper; order 2 queued for lower", "once each"
+    lower = orders.orders(ledger)[1]
+    assert lower.side == "+z", "its bed need names its own name"
+    assert lower.inputs is not None
+    assert (lower.inputs / "leg_lower.stl").read_bytes() == lower.file.read_bytes()
 
 
 def test_orders_are_claimed_one_at_a_time_oldest_first(tmp_path: Path) -> None:
@@ -303,47 +401,80 @@ def test_each_side_on_the_bed_is_a_pose_that_turns_it_straight_down(side: str) -
         orders.laid_for("up")
 
 
-def test_a_queued_study_is_made_of_the_runs_own_files(tmp_path: Path) -> None:
-    """The approved file in the assembly's place, its own mesh, the run's needs as its cases,
-    the side its bed need lays it on, turned by fit-bed's own turn, and the Sponsor's limits."""
+def test_a_queued_study_is_made_of_what_was_copied_as_it_was_queued(tmp_path: Path) -> None:
     folder, ledger = _furniture_run(tmp_path)
     orders.on_approval(folder, ledger, "on approval by sponsor", Limits.of({"most_grams": 90}))
     order = orders.orders(ledger)[1]
-    # The work folder's lower leg has changed since it was approved: the approved one is read.
-    _bar(folder / "work" / "leg_lower.stl", 150.0)
-    words = orders.prepare(order, folder, {"STUDY_NOZZLE": "0.4",
-                                           "STUDY_FILAMENTS": "petg=Elegoo PETG; pla=Elegoo PLA"})
-    out = folder / "studies" / f"{order.id}-lower"
-    inputs = out / "inputs"
+    words = orders.prepare(order, folder, ENV)
+    inputs = folder / "studies" / f"{order.id}-lower" / "inputs"
     assert words[:2] == ["run", str(inputs / "mesh" / "leg_lower.stl")]
     pairs = dict(zip(words[2::2], words[3::2], strict=False))
     assert pairs["--part"] == "lower" and pairs["--turn"] == "180,0,fit"
     assert pairs["--filament"] == "Elegoo PETG" and pairs["--nozzle"] == "0.4"
     assert pairs["--assembly"] == str(inputs / "assembly.json")
-    assert pairs["--needs"] == str(folder / "needs.json") and pairs["--out"] == str(out)
+    assert pairs["--needs"] == str(folder / "needs.json")
+    assert pairs["--out"] == str(inputs.parent)
     assert json.loads((inputs / "limits.json").read_text()) == {"most_grams": 90.0}
-    assert (inputs / "leg_lower.stl").read_bytes() == order.file.read_bytes()
-    assert (inputs / "post.stl").is_file(), "the assembly's other parts are beside it"
+    (inputs / "skin.stl").write_text("tampered")
+    with pytest.raises(ValueError, match="skin.stl has changed since it was queued"):
+        orders.prepare(order, folder, ENV)
 
 
-def test_a_queued_study_with_no_filament_or_a_changed_file_is_refused(tmp_path: Path) -> None:
+def test_no_nozzle_or_filament_is_refused_before_anything_is_meshed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    meshed: list[Path] = []
+
+    def mesh(step: Path, work: Path) -> Path:
+        meshed.append(step)
+        return step
+
+    monkeypatch.setattr(orders, "mesh", mesh)
     folder, ledger = _furniture_run(tmp_path)
     orders.on_approval(folder, ledger, "on approval by sponsor")
-    order = orders.orders(ledger)[0]
     with pytest.raises(ValueError, match="no nozzle or filament for upper"):
-        orders.prepare(order, folder, {})
-    _bar(order.file, 99.0)
-    with pytest.raises(ValueError, match="has changed since it was approved"):
-        orders.prepare(order, folder, {"STUDY_NOZZLE": "0.4", "STUDY_FILAMENTS": "Elegoo PETG"})
+        orders.prepare(orders.orders(ledger)[0], folder, {})
+    assert meshed == []
 
 
-def test_a_flagged_study_with_no_cases_says_so(tmp_path: Path) -> None:
+def test_a_flagged_part_of_no_material_takes_the_settings_default_filament(
+    tmp_path: Path,
+) -> None:
+    """mqucifer/print-shop#372's review: with STUDY_FILAMENTS by material, a flagged part with
+    no assembly has none, and every such study failed."""
     folder, ledger = _furniture_run(tmp_path, load=False)
-    orders.flag(folder, ledger, "Sponsor: M", files=["leg_upper"],
-                limits=Limits.of({"nozzle": 0.4, "filament": "Elegoo PLA"}))
-    words = orders.prepare(orders.orders(ledger)[0], folder, {})
-    assert words[-1] == "--no-cases" and "--needs" not in words and "--assembly" not in words
+    orders.flag(folder, ledger, "Sponsor: M", files=["leg_upper"])
+    order = orders.orders(ledger)[0]
+    with pytest.raises(ValueError, match="for a part of no material \\(`\\*=NAME`"):
+        orders.prepare(order, folder, ENV)
+    words = orders.prepare(order, folder, {**ENV, "STUDY_FILAMENTS": ENV["STUDY_FILAMENTS"]
+                                           + "; *=Elegoo PLA"})
     assert words[words.index("--filament") + 1] == "Elegoo PLA"
+    assert words[-1] == "--no-cases" and "--needs" not in words and "--assembly" not in words
+
+
+def test_a_mesh_past_its_time_has_its_container_stopped(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import subprocess  # noqa: PLC0415
+
+    ran: list[list[str]] = []
+
+    def docker(argv: list[str], **kwargs: Any) -> Any:
+        ran.append(argv)
+        if argv[:2] == ["docker", "run"]:
+            raise subprocess.TimeoutExpired(argv, kwargs.get("timeout", 0))
+        return subprocess.CompletedProcess(argv, 0, "", "")
+
+    monkeypatch.setattr(subprocess, "run", docker)
+    from print_shop.bench import host  # noqa: PLC0415
+
+    monkeypatch.setattr(host, "image_id", lambda image=None: "sha256:x")
+    (tmp_path / "part.step").write_text("ISO-10303-21;")
+    with pytest.raises(RuntimeError, match="meshing part.step took past 600 s"):
+        orders.mesh(tmp_path / "part.step", tmp_path / "work")
+    started = next(argv for argv in ran if argv[:2] == ["docker", "run"])
+    assert ran[-1] == ["docker", "kill", started[started.index("--name") + 1]]
 
 
 # --------------------------------------------------------------------------
@@ -362,14 +493,18 @@ def _script(name: str) -> Any:
     return module
 
 
+def _worker(monkeypatch: pytest.MonkeyPatch) -> Any:
+    script = _script("settings_study.py")
+    monkeypatch.setattr(script, "load_env", lambda _path=None: dict(ENV))
+    return script
+
+
 def test_the_worker_runs_each_order_one_at_a_time_and_says_what_came_of_it(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     folder, ledger = _furniture_run(tmp_path)
     orders.on_approval(folder, ledger, "on approval by sponsor")
-    script = _script("settings_study.py")
-    monkeypatch.setattr(script, "load_env", lambda _path=None: {
-        "STUDY_NOZZLE": "0.4", "STUDY_FILAMENTS": "petg=Elegoo PETG"})
+    script = _worker(monkeypatch)
     ran: list[list[str]] = []
 
     def study(words: list[str]) -> int:
@@ -386,13 +521,63 @@ def test_the_worker_runs_each_order_one_at_a_time_and_says_what_came_of_it(
     assert failed.said.startswith("the study exited 2")
 
 
+def test_an_order_whose_worker_died_is_failed_by_the_next_and_an_interrupt_is_said(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """mqucifer/print-shop#372's review: an order whose worker died stayed running for ever,
+    and an interrupt left its order running."""
+    folder, ledger = _furniture_run(tmp_path)
+    orders.on_approval(folder, ledger, "on approval by sponsor")
+    orders.claim(ledger)  # a worker that died with it
+    script = _worker(monkeypatch)
+
+    def stopped(words: list[str]) -> int:
+        raise KeyboardInterrupt
+
+    with pytest.raises(KeyboardInterrupt):
+        script.work(tmp_path, DesignLedger(tmp_path / "ledger.sqlite"), run_study=stopped)
+    died, interrupted = orders.orders(ledger)
+    assert (died.status, died.said) == ("failed", "its worker ended before it did: queue it "
+                                                  "again to study it")
+    assert (interrupted.status, interrupted.said) == (
+        "failed", "stopped by KeyboardInterrupt as it was studied")
+    assert not orders.worker_running(tmp_path), "its lock let go"
+
+
+def test_an_order_queued_as_the_worker_ends_isnt_stranded(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """mqucifer/print-shop#372's review: queued as the worker found nothing, an approval saw its
+    lock held and started no worker, and the worker ended."""
+    folder, ledger = _furniture_run(tmp_path)
+    script = _worker(monkeypatch)
+    real = orders.claim
+    queued_late = {"done": False}
+
+    def claim(design: DesignLedger) -> Any:
+        found = real(design)
+        if found is None and not queued_late["done"]:
+            queued_late["done"] = True
+            orders.on_approval(folder, ledger, "on approval by sponsor")
+        return found
+
+    monkeypatch.setattr(script.study_orders, "claim", claim)
+    ran: list[list[str]] = []
+
+    def study(words: list[str]) -> int:
+        ran.append(words)
+        return 0
+
+    script.work(tmp_path, DesignLedger(tmp_path / "ledger.sqlite"), run_study=study)
+    assert len(ran) == 2 and [o.status for o in orders.orders(ledger)] == ["done", "done"]
+
+
 def test_only_one_worker_runs_a_roots_studies(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     import fcntl  # noqa: PLC0415
 
-    script = _script("settings_study.py")
-    monkeypatch.setattr(script, "load_env", lambda _path=None: {})
+    script = _worker(monkeypatch)
     held = (tmp_path / "studies.lock").open("w")
     fcntl.flock(held, fcntl.LOCK_EX | fcntl.LOCK_NB)
     try:
@@ -406,42 +591,103 @@ def test_only_one_worker_runs_a_roots_studies(
 def test_queueing_on_approval_never_holds_it_up(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """What goes wrong with a study is said, and the run stays approved: here its assembly is
-    gone, and the limits given aren't limits. A worker is started for what's queued."""
+    """What goes wrong with a study is said, and the run stays approved. A worker is started for
+    what's queued, and a study queued with no limits says so."""
     import argparse  # noqa: PLC0415
 
     started: list[Path] = []
 
-    def start(root: Path) -> str:
+    def start(root: Path, env: dict[str, str] | None = None) -> str:
         started.append(root)
         return f"a worker started for them, in {root.name}"
 
     monkeypatch.setattr(orders, "start_worker", start)
+    import print_shop.env  # noqa: PLC0415
+
+    monkeypatch.setattr(print_shop.env, "load_env", lambda _path=None: dict(ENV))
     folder, _ = _furniture_run(tmp_path)
     rounds = _script("rounds.py")
     said = rounds._studies(folder, tmp_path, argparse.Namespace(by="sponsor",
                                                                  study_limits=None))
-    assert said.startswith("a settings study of each part queued, 2")
-    assert said.endswith("; a worker started for them, in " + tmp_path.name)
+    assert said == ("order 1 queued for upper; order 2 queued for lower; with no limits of the "
+                    "Sponsor's (--study-limits FILE gives them); a worker started for them, in "
+                    + tmp_path.name)
     assert started == [tmp_path]
+    (tmp_path / "limits.json").write_text('{"most_grams": 80}')
+    other, _ = _furniture_run(tmp_path, "table-3")
+    said = rounds._studies(other, tmp_path, argparse.Namespace(
+        by="sponsor", study_limits=tmp_path / "limits.json"))
+    assert "with no limits" not in said
 
-    def broken(root: Path) -> str:
+    def broken(root: Path, env: dict[str, str] | None = None) -> str:
         raise OSError("no room")
 
     monkeypatch.setattr(orders, "start_worker", broken)
-    other, _ = _furniture_run(tmp_path, "table-3")
-    said = rounds._studies(other, tmp_path, argparse.Namespace(by="sponsor", study_limits=None))
+    another, _ = _furniture_run(tmp_path, "table-4")
+    said = rounds._studies(another, tmp_path, argparse.Namespace(by="sponsor",
+                                                                  study_limits=None))
     assert "no worker could start (OSError: no room)" in said and "work --root" in said
     (tmp_path / "bad.json").write_text('{"fastest": true}')
     said = rounds._studies(folder, tmp_path, argparse.Namespace(
         by="sponsor", study_limits=tmp_path / "bad.json"))
     assert said.startswith("no settings study queued: ValueError: the study's limits are")
-    (folder / "work" / "assembly.json").unlink()
-    other, _ = _furniture_run(tmp_path, "table-2")
-    (other / "work" / "assembly.json").unlink()
-    said = rounds._studies(other, tmp_path, argparse.Namespace(by="sponsor", study_limits=None))
-    assert said.startswith("no settings study queued: ValueError: table-2's load needs read no "
-                           "assembly file there is")
+    gone, _ = _furniture_run(tmp_path, "table-2")
+    (gone / "work" / "assembly.json").unlink()
+    said = rounds._studies(gone, tmp_path, argparse.Namespace(by="sponsor", study_limits=None))
+    assert said.startswith("no settings study queued: ValueError: the assembly ")
+
+
+def test_a_relative_root_is_stored_whole(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    folder, ledger = _furniture_run(tmp_path)
+    monkeypatch.chdir(tmp_path)
+    orders.on_approval(Path(folder.name), ledger, "on approval by sponsor")
+    order = orders.orders(ledger)[0]
+    assert order.file.is_absolute() and order.inputs is not None and order.inputs.is_absolute()
+    assert order.needs is not None and order.needs.is_absolute()
+
+
+def test_a_worker_starts_detached_from_a_stated_checkout_never_a_worktree(
+    tmp_path: Path,
+) -> None:
+    import fcntl  # noqa: PLC0415
+
+    spawned: list[tuple[list[str], dict[str, Any]]] = []
+
+    def spawn(argv: list[str], **kwargs: Any) -> None:
+        spawned.append((argv, kwargs))
+
+    home = tmp_path / "checkout"
+    (home / "scripts").mkdir(parents=True)
+    (home / "scripts" / "settings_study.py").write_text("")
+    (home / ".venv" / "bin").mkdir(parents=True)
+    (home / ".venv" / "bin" / "python").write_text("")
+    (home / ".git").mkdir()
+    root = tmp_path / "root"
+    root.mkdir()
+    said = orders.start_worker(root, {"STUDY_CHECKOUT": str(home)}, spawn)
+    ((argv, kwargs),) = spawned
+    assert argv == [str(home / ".venv" / "bin" / "python"),
+                    str(home / "scripts" / "settings_study.py"), "work", "--root", str(root)]
+    assert kwargs["start_new_session"] is True and kwargs["cwd"] == str(home)
+    assert said.endswith(f"it writes to {root / 'studies.log'}")
+    held = (root / "studies.lock").open("a")
+    fcntl.flock(held, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    try:
+        assert orders.start_worker(root, {"STUDY_CHECKOUT": str(home)}, spawn).startswith(
+            "a worker already runs")
+    finally:
+        fcntl.flock(held, fcntl.LOCK_UN)
+        held.close()
+    worktree = tmp_path / "worktree"
+    shutil.copytree(home, worktree)
+    shutil.rmtree(worktree / ".git")
+    (worktree / ".git").write_text("gitdir: elsewhere\n")
+    said = orders.start_worker(root, {"STUDY_CHECKOUT": str(worktree)}, spawn)
+    assert said.startswith(f"no worker started: {worktree} is a worktree") and len(spawned) == 1
+    assert orders.checkout({}).joinpath("scripts", "settings_study.py").is_file()
+    assert not (orders.checkout({}) / ".git").is_file(), "this checkout's main one"
 
 
 def test_a_study_needs_cases_or_says_it_has_none(
@@ -494,28 +740,3 @@ def test_a_flagged_study_with_real_slices_keeps_to_the_grams_allowed(tmp_path: P
     assert c2.passes and result.recommended == "c2"
     text = table(result, "bar", [])
     assert "## Ruled out by the Sponsor's limits" in text and "- c1:" in text
-
-
-def test_a_worker_starts_detached_where_none_runs(tmp_path: Path) -> None:
-    import fcntl  # noqa: PLC0415
-    import sys  # noqa: PLC0415
-
-    spawned: list[tuple[list[str], dict[str, Any]]] = []
-
-    def spawn(argv: list[str], **kwargs: Any) -> None:
-        spawned.append((argv, kwargs))
-
-    said = orders.start_worker(tmp_path, spawn)
-    ((argv, kwargs),) = spawned
-    assert argv == [sys.executable, str(orders.SCRIPT), "work", "--root", str(tmp_path)]
-    assert kwargs["start_new_session"] is True and kwargs["stdin"] is not None
-    assert said.endswith(f"it writes to {tmp_path / 'studies.log'}")
-    held = (tmp_path / "studies.lock").open("a")
-    fcntl.flock(held, fcntl.LOCK_EX | fcntl.LOCK_NB)
-    try:
-        assert orders.start_worker(tmp_path, spawn).startswith("a worker already runs")
-        assert len(spawned) == 1
-    finally:
-        fcntl.flock(held, fcntl.LOCK_UN)
-        held.close()
-    assert orders.SCRIPT.is_file()

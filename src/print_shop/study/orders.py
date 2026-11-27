@@ -29,7 +29,6 @@ import json
 import shlex
 import shutil
 import subprocess
-import sys
 import uuid
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -46,9 +45,10 @@ from print_shop.rounds.ledger import DesignLedger
 from print_shop.rounds.paths import content_hash
 from print_shop.slicer.regions import Pose
 from print_shop.study.limits import Limits
+from print_shop.study.reading import _files
 
-__all__ = ["Order", "claim", "finish", "flag", "laid_for", "listing", "on_approval",
-           "orders", "prepare", "start_worker"]
+__all__ = ["Order", "checkout", "claim", "finish", "flag", "laid_for", "listing", "on_approval",
+           "orders", "orphaned", "prepare", "queued", "start_worker"]
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS study_orders (
@@ -60,17 +60,24 @@ CREATE TABLE IF NOT EXISTS study_orders (
     part TEXT NOT NULL,
     -- 'load', queued on approval with the run's load cases; 'flagged', queued by the Sponsor.
     kind TEXT NOT NULL,
+    -- Each study of one part of one approval, 1 on: a failed or done one queued again is the next.
+    attempt INTEGER NOT NULL DEFAULT 1,
     -- The approved file, held to its hash.
     file TEXT NOT NULL,
     sha256 TEXT NOT NULL,
     -- The side it lies on the bed, as the run's bed need or `done` named it: -z to +y.
     side TEXT NOT NULL DEFAULT '',
-    -- The assembly its load needs read, in the run's work folder, and its needs file.
+    -- The part's material as the assembly gives it, where it does.
+    material TEXT,
+    -- The assembly its cases are read on, by name in `inputs`, and the run's needs file.
     assembly TEXT,
     needs TEXT,
     -- The cases the Sponsor named, each NAME=LOAD ARGS, as JSON; and the Sponsor's limits.
     cases TEXT NOT NULL DEFAULT '[]',
     limits TEXT NOT NULL DEFAULT '{}',
+    -- What the study reads, copied as it was queued: the folder, and each file's hash in it.
+    inputs TEXT,
+    manifest TEXT NOT NULL DEFAULT '{}',
     by TEXT NOT NULL,
     queued_at TEXT NOT NULL,
     -- queued, running, done or failed: what came of it, and where it's written.
@@ -80,17 +87,28 @@ CREATE TABLE IF NOT EXISTS study_orders (
     ended_at TEXT,
     out TEXT,
     said TEXT,
-    UNIQUE (run, approval, part, kind)
+    UNIQUE (run, approval, part, kind, attempt)
 )
 """
 #: The settings that give a queued study its nozzle and its filament where its limits don't:
-#: `STUDY_NOZZLE` in mm, and `STUDY_FILAMENTS` as `petg=Elegoo PETG; pla=Elegoo PLA`, by the
-#: material the assembly gives the part, or one name for every part.
+#: `STUDY_NOZZLE` in mm, and `STUDY_FILAMENTS` as `petg=Elegoo PETG; pla=Elegoo PLA; *=Elegoo
+#: PLA`, by the material the assembly gives the part, `*` for one it gives none; or one name
+#: for every part. And the checkout the worker runs from: `STUDY_CHECKOUT`, else this one's
+#: main checkout, never a worktree, which a builder may remove.
 NOZZLE_KEY = "STUDY_NOZZLE"
 FILAMENTS_KEY = "STUDY_FILAMENTS"
+CHECKOUT_KEY = "STUDY_CHECKOUT"
 #: The meshing a STEP file is given for the study, as the refinement pass gives it Orca's own
-#: defaults (`bench/refine.py`).
+#: defaults (`bench/refine.py`), and how long it may take, in s.
 MESH_ANSWER = "mesh-answer.json"
+MESH_TIMEOUT = 600
+#: The lock one worker per root holds while it runs that root's studies, and its log.
+LOCK = "studies.lock"
+LOG = "studies.log"
+#: The study's own script, which runs the worker.
+SCRIPT = Path(__file__).resolve().parents[3] / "scripts" / "settings_study.py"
+#: An order not yet ended: one of these isn't queued again.
+OPEN = ("queued", "running")
 
 
 def _now() -> str:
@@ -121,6 +139,10 @@ class Order:
     status: str
     out: Path | None = None
     said: str = ""
+    attempt: int = 1
+    material: str | None = None
+    inputs: Path | None = None
+    manifest: dict[str, str] | None = None
 
     @classmethod
     def of(cls, row: Any) -> Order:
@@ -130,7 +152,10 @@ class Order:
                    Path(row["needs"]) if row["needs"] else None,
                    tuple(json.loads(row["cases"] or "[]")),
                    Limits.of(json.loads(row["limits"] or "{}")), row["by"], row["status"],
-                   Path(row["out"]) if row["out"] else None, row["said"] or "")
+                   Path(row["out"]) if row["out"] else None, row["said"] or "",
+                   int(row["attempt"]), row["material"] or None,
+                   Path(row["inputs"]) if row["inputs"] else None,
+                   json.loads(row["manifest"] or "{}"))
 
 
 def _load_needs(approved: approved_mod.Approved) -> list[Any]:
@@ -148,118 +173,208 @@ def _assembly_of(folder: Path, needs: list[Any]) -> Path | None:
     return None
 
 
+def _named(f: approved_mod.File) -> str:
+    """A file by the name the run gave it, as its assembly and needs name it: a file shared by
+    several groups is renamed at review (`review.shared_names`), and `was` keeps its own."""
+    return Path(f.was or f.name).name
+
+
 def _sides(approved: approved_mod.Approved) -> dict[str, str]:
-    """Each file's side on the bed, by its name: its bed need's, else what `done` named."""
-    sides = {f.name: f.on_bed for g in approved.groups for f in g.files if f.on_bed}
+    """Each file's side on the bed, by its own name: its bed need's, else what `done` named."""
+    sides = {_named(f): f.on_bed for g in approved.groups for f in g.files if f.on_bed}
     sides.update({Path(n.file).name: n.side for n in approved.needs
                   if n.by == "bed" and n.file and n.side})
     return sides
 
 
-def _insert(ledger: DesignLedger, **row: Any) -> int | None:
-    names = ", ".join(row)
-    marks = ", ".join("?" for _ in row)
-    ledger.change(f"INSERT OR IGNORE INTO study_orders ({names}) VALUES ({marks})",  # noqa: S608
-                  *row.values())
-    found = ledger.rows("SELECT id FROM study_orders WHERE run=? AND approval=? AND part=? "
-                        "AND kind=?", row["run"], row["approval"], row["part"], row["kind"])
-    return int(found[0]["id"]) if found else None
+def _delivered(approved: approved_mod.Approved) -> list[approved_mod.File]:
+    """Each file the run delivers, once: a file shared by several groups is one part."""
+    seen: set[str] = set()
+    found = []
+    for group in approved.groups:
+        for f in group.files:
+            if _named(f) not in seen:
+                seen.add(_named(f))
+                found.append(f)
+    return found
+
+
+@dataclass(frozen=True)
+class _Assembly:
+    """An assembly as the study reads it: its file, its parts by their files' names, and every
+    file it names, each where it is in the run's work folder."""
+
+    path: Path
+    raw: dict[str, Any]
+    parts: dict[str, dict[str, Any]]
+    files: list[str]
+
+    @classmethod
+    def read(cls, path: Path) -> _Assembly:
+        """Raises:
+            ValueError: If it isn't there, or a file it names isn't beside it.
+        """
+        if not path.is_file():
+            raise ValueError(f"the assembly {path} isn't there")
+        raw = json.loads(path.read_text(encoding="utf-8"))
+        parts = {Path(str(p["file"])).name: p for p in raw.get("parts") or ()
+                 if isinstance(p, dict) and p.get("name") and p.get("file")}
+        files = _files(raw)
+        if missing := [n for n in files if not (path.parent / n).is_file()]:
+            raise ValueError(f"{', '.join(missing)}, which {path.name} names, "
+                             f"{'isn' if len(missing) == 1 else 'aren'}'t in {path.parent}: its "
+                             "study would read another assembly than the one approved")
+        return cls(path, raw, parts, files)
+
+
+def _snapshot(inputs: Path, f: approved_mod.File, assembly: _Assembly | None) -> dict[str, str]:
+    """What the study reads, copied into `inputs` as it's queued, and each file's hash: the
+    approved file, and the assembly with every file it names, the part's own the approved copy.
+    Hours later the work folder may have changed; what was approved hasn't."""
+    inputs.mkdir(parents=True, exist_ok=True)
+    copied: dict[str, Path] = {f.name: f.path}
+    if assembly is not None:
+        copied[assembly.path.name] = assembly.path
+        for name in assembly.files:
+            copied[name] = f.path if Path(name).name == _named(f) else assembly.path.parent / name
+    manifest = {}
+    for name, source in copied.items():
+        target = inputs / name
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(source, target)
+        manifest[name] = content_hash(Path(name).name, target.read_bytes())
+    return manifest
+
+
+def _queue(ledger: DesignLedger, folder: Path, approved: approved_mod.Approved,
+           f: approved_mod.File, part: str, kind: str, assembly: _Assembly | None,
+           sides: dict[str, str], cases: list[str], limits: Limits | None, by: str,
+           again_done: bool) -> tuple[int | None, str]:
+    """One order, and what was done in words: queued, or the order it already is. One still
+    queued or running isn't queued again; one failed is, as its next attempt; one done is where
+    `again_done`, as the Sponsor's own flag asks it."""
+    last = ledger.rows("SELECT id, attempt, status FROM study_orders WHERE run=? AND approval=? "
+                       "AND part=? AND kind=? ORDER BY attempt DESC LIMIT 1",
+                       approved.run, approved.approval, part, kind)
+    attempt = 1
+    if last:
+        row = last[0]
+        if row["status"] in OPEN:
+            return None, f"order {row['id']} is {row['status']} already, for {part}"
+        if row["status"] == "done" and not again_done:
+            return None, f"order {row['id']} studied {part} already"
+        attempt = int(row["attempt"]) + 1
+    material = (str(assembly.parts.get(_named(f), {}).get("material") or "") or None
+                if assembly is not None else None)
+    ledger.change(
+        "INSERT INTO study_orders (run, approval, part, kind, attempt, file, sha256, side, "
+        "material, assembly, needs, cases, limits, by, queued_at, status) VALUES "
+        "(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'queued')",
+        approved.run, approved.approval, part, kind, attempt, str(f.path), f.sha256,
+        sides.get(_named(f), ""), material, assembly.path.name if assembly else None,
+        str(folder / "needs.json") if kind == "load" else None, json.dumps(list(cases)),
+        json.dumps((limits or Limits()).plain()), by, _now())
+    found = ledger.rows("SELECT id FROM study_orders WHERE run=? AND approval=? AND part=? AND "
+                        "kind=? AND attempt=?", approved.run, approved.approval, part, kind,
+                        attempt)
+    order = int(found[0]["id"])
+    inputs = folder / "studies" / f"{order}-{part}" / "inputs"
+    try:
+        manifest = _snapshot(inputs, f, assembly)
+    except OSError as exc:
+        ledger.change("UPDATE study_orders SET status='failed', said=?, ended_at=? WHERE id=?",
+                      f"its inputs couldn't be copied: {exc}", _now(), order)
+        return None, f"order {order} failed: its inputs couldn't be copied: {exc}"
+    ledger.change("UPDATE study_orders SET inputs=?, manifest=? WHERE id=?", str(inputs),
+                  json.dumps(manifest), order)
+    again = f", its attempt {attempt}" if attempt > 1 else ""
+    return order, f"order {order} queued for {part}{again}"
 
 
 def on_approval(folder: Path, ledger: DesignLedger, by: str,
                 limits: Limits | None = None) -> tuple[list[int], str]:
     """A study queued for each part an approved run delivers, where any of its needs is a `load`
-    need: the orders' ids, and what was done in words. Nothing is queued twice for one approval.
+    need: the orders' ids, and what was done in words. Its assembly and every file that names
+    are copied as they're queued, the part's own the approved copy. An order still queued or
+    running, or done, for this approval isn't queued again; one failed is.
 
     Raises:
         Refused: If the run isn't approved, or its approved folder isn't as approved.
-        ValueError: If its load needs name no assembly the study can read.
+        ValueError: If its load needs name no assembly there is, or a file it names isn't there.
     """
     ensure(ledger)
+    folder = folder.resolve()
     approved = approved_mod.read(folder, ledger)
     needs = _load_needs(approved)
     if not needs:
         return [], (f"{approved.run} has no load need, so no settings study is queued by "
                     "itself: `scripts/settings_study.py queue` flags it for one")
-    assembly = _assembly_of(folder, needs)
-    if assembly is None or not assembly.is_file():
-        raise ValueError(f"{approved.run}'s load needs read no assembly file there is "
-                         f"({assembly or 'none named'})")
-    parts = {Path(str(p.get("file", ""))).name: str(p["name"])
-             for p in json.loads(assembly.read_text(encoding="utf-8")).get("parts") or ()
-             if isinstance(p, dict) and p.get("name")}
+    where = _assembly_of(folder, needs)
+    if where is None:
+        raise ValueError(f"{approved.run}'s load needs name no assembly file")
+    assembly = _Assembly.read(where)
     sides = _sides(approved)
-    made, skipped = [], []
-    # In the assembly's own order of its parts.
-    order = list(parts)
-    files = sorted((f for g in approved.groups for f in g.files),
-                   key=lambda f: order.index(f.name) if f.name in parts else len(order))
+    order = list(assembly.parts)
+    files = sorted(_delivered(approved), key=lambda f: order.index(_named(f))
+                   if _named(f) in assembly.parts else len(order))
+    made, said, skipped = [], [], []
     for f in files:
-        part = parts.get(f.name)
+        part = assembly.parts.get(_named(f))
         if part is None:
-            skipped.append(f.name)
+            skipped.append(_named(f))
             continue
-        found = _insert(ledger, run=approved.run, approval=approved.approval, part=part,
-                        kind="load", file=str(f.path), sha256=f.sha256,
-                        side=sides.get(f.name, ""), assembly=str(assembly),
-                        needs=str(folder / "needs.json"),
-                        limits=json.dumps((limits or Limits()).plain()), by=by,
-                        queued_at=_now())
+        found, words = _queue(ledger, folder, approved, f, str(part["name"]), "load", assembly,
+                              sides, [], limits, by, again_done=False)
+        said.append(words)
         if found is not None:
             made.append(found)
-    said = (f"a settings study of each part queued, {len(made)}: "
-            + ", ".join(f"order {n}" for n in made) if made
+    text = ("; ".join(said) if said
             else "no part of the assembly is among its approved files: no study queued")
     if skipped:
-        said += f"; not a part of its assembly, so not studied: {', '.join(skipped)}"
-    return made, said
+        text += f"; not a part of its assembly, so not studied: {', '.join(skipped)}"
+    return made, text
 
 
 def flag(folder: Path, ledger: DesignLedger, by: str, files: list[str] | None = None,
          cases: list[str] | None = None, limits: Limits | None = None,
-         assembly: Path | None = None) -> list[int]:
+         assembly: Path | None = None) -> list[tuple[int | None, str]]:
     """A study queued for each approved file of a run the Sponsor flags, or those named: with no
     load cases, or `cases` the Sponsor names, each `NAME=LOAD ARGS` read on the assembly its
-    `load` needs read, or `assembly`, one of its work folder's, where it has none.
+    `load` needs read, or `assembly`, one of its work folder's, where it has none. A part done or
+    failed is queued again, with these cases and limits, as its next attempt: each order and
+    what was done, in words.
 
     Raises:
         Refused: If the run isn't approved, or its approved folder isn't as approved.
-        ValueError: If a file named isn't approved, or cases are named and there's no assembly.
+        ValueError: If a file named isn't approved, or cases are named and there's no assembly,
+            or a file the assembly names isn't there.
     """
     ensure(ledger)
+    folder = folder.resolve()
     approved = approved_mod.read(folder, ledger)
-    every = [f for g in approved.groups for f in g.files]
+    every = _delivered(approved)
     if files:
-        names = {f.name for f in every} | {Path(f.name).stem for f in every}
+        names = {_named(f) for f in every} | {Path(_named(f)).stem for f in every}
         if missing := [n for n in files if n not in names]:
             raise ValueError(f"not among {approved.run}'s approved files: {', '.join(missing)}")
-        every = [f for f in every if f.name in files or Path(f.name).stem in files]
+        every = [f for f in every if _named(f) in files or Path(_named(f)).stem in files]
     if assembly is not None:
-        assembly = assembly if assembly.is_absolute() else folder / "work" / assembly
+        where: Path | None = assembly if assembly.is_absolute() else folder / "work" / assembly
     else:
-        assembly = _assembly_of(folder, _load_needs(approved))
-    if cases and (assembly is None or not assembly.is_file()):
+        where = _assembly_of(folder, _load_needs(approved))
+    if cases and (where is None or not where.is_file()):
         raise ValueError(f"cases are read on an assembly, and {approved.run}'s load needs name "
                          "none there is")
-    parts: dict[str, str] = {}
-    if assembly is not None and assembly.is_file():
-        parts = {Path(str(p.get("file", ""))).name: str(p["name"])
-                 for p in json.loads(assembly.read_text(encoding="utf-8")).get("parts") or ()
-                 if isinstance(p, dict) and p.get("name")}
+    read = _Assembly.read(where) if where is not None and where.is_file() else None
     sides = _sides(approved)
-    made = []
+    done = []
     for f in every:
-        part = parts.get(f.name) or Path(f.name).stem
-        found = _insert(ledger, run=approved.run, approval=approved.approval, part=part,
-                        kind="flagged", file=str(f.path), sha256=f.sha256,
-                        side=sides.get(f.name, ""),
-                        assembly=str(assembly) if cases and assembly else None,
-                        needs=None, cases=json.dumps(list(cases or [])),
-                        limits=json.dumps((limits or Limits()).plain()), by=by,
-                        queued_at=_now())
-        if found is not None:
-            made.append(found)
-    return made
+        named = read.parts.get(_named(f)) if read is not None else None
+        part = str(named["name"]) if named else Path(_named(f)).stem
+        done.append(_queue(ledger, folder, approved, f, part, "flagged",
+                           read if cases else None, sides, list(cases or []), limits, by,
+                           again_done=True))
+    return done
 
 
 def orders(ledger: DesignLedger, status: str | None = None) -> list[Order]:
@@ -281,17 +396,28 @@ def claim(ledger: DesignLedger) -> Order | None:
     return Order.of(found[0]) if found else None
 
 
+def queued(ledger: DesignLedger) -> bool:
+    """Whether any order is queued."""
+    ensure(ledger)
+    return bool(ledger.rows("SELECT 1 FROM study_orders WHERE status='queued' LIMIT 1"))
+
+
+def orphaned(ledger: DesignLedger) -> list[int]:
+    """Each order still running when a worker takes the root's lock, failed: holding the lock,
+    no other worker is alive, so the one that was running it died with it unended."""
+    ensure(ledger)
+    found = [int(r["id"]) for r in
+             ledger.rows("SELECT id FROM study_orders WHERE status='running'")]
+    for order in found:
+        ledger.change("UPDATE study_orders SET status='failed', said=?, ended_at=? WHERE id=?",
+                      "its worker ended before it did: queue it again to study it", _now(), order)
+    return found
+
+
 def finish(ledger: DesignLedger, order: Order, status: str, said: str,
            out: Path | None = None) -> None:
     ledger.change("UPDATE study_orders SET status=?, said=?, out=?, ended_at=? WHERE id=?",
                   status, said[:2000], str(out) if out else None, _now(), order.id)
-
-
-#: The lock one worker per root holds while it runs that root's studies, and its log.
-LOCK = "studies.lock"
-LOG = "studies.log"
-#: The study's own script, which runs the worker.
-SCRIPT = Path(__file__).resolve().parents[3] / "scripts" / "settings_study.py"
 
 
 def worker_running(root: Path) -> bool:
@@ -308,21 +434,45 @@ def worker_running(root: Path) -> bool:
     return False
 
 
-def start_worker(root: Path, spawn: Callable[..., Any] = subprocess.Popen) -> str:
+def checkout(env: dict[str, str]) -> Path:
+    """The checkout the worker runs from: `STUDY_CHECKOUT`, else this checkout's main one."""
+    if env.get(CHECKOUT_KEY):
+        return Path(env[CHECKOUT_KEY]).expanduser().resolve()
+    here = SCRIPT.parents[1]
+    done = subprocess.run(["git", "-C", str(here), "rev-parse", "--path-format=absolute",
+                           "--git-common-dir"], capture_output=True, text=True, check=False,
+                          timeout=30)
+    common = done.stdout.strip()
+    return Path(common).parent if done.returncode == 0 and common else here
+
+
+def start_worker(root: Path, env: dict[str, str] | None = None,
+                 spawn: Callable[..., Any] = subprocess.Popen) -> str:
     """A worker for `root`'s queued studies, started detached where none runs: so a study runs
     by itself after the approval that queued it, and the approval doesn't wait for it. It runs
-    until nothing is queued, writing to `root/studies.log`. Two started at once leave one: the
-    other finds the lock held and ends (`work`)."""
+    until nothing is queued, writing to `root/studies.log`, from a stated checkout (`checkout`)
+    with that checkout's own Python, never a worktree, which a builder may remove mid-study.
+    Two started at once leave one: the other finds the lock held and ends (`work`)."""
     if worker_running(root):
         return f"a worker already runs {root.name}'s studies: they're queued for it"
+    home = checkout(env or {})
+    script = home / "scripts" / "settings_study.py"
+    python = home / ".venv" / "bin" / "python"
+    if (home / ".git").is_file():
+        return (f"no worker started: {home} is a worktree, which may be removed: set "
+                f"{CHECKOUT_KEY} to a checkout, or run `scripts/settings_study.py work --root "
+                f"{root}` from one")
+    if not script.is_file() or not python.is_file():
+        return (f"no worker started: {home} has no {script.name} or no .venv: set "
+                f"{CHECKOUT_KEY}, or run `scripts/settings_study.py work --root {root}`")
     log = (root / LOG).open("a")
     try:
-        spawn([sys.executable, str(SCRIPT), "work", "--root", str(root)], stdout=log,
+        spawn([str(python), str(script), "work", "--root", str(root)], stdout=log,
               stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL, start_new_session=True,
-              cwd=str(SCRIPT.parents[1]))
+              cwd=str(home))
     finally:
         log.close()
-    return f"a worker started for them, one at a time; it writes to {root / LOG}"
+    return f"a worker started for them from {home}, one at a time; it writes to {root / LOG}"
 
 
 def listing(ledger: DesignLedger) -> str:
@@ -332,7 +482,8 @@ def listing(ledger: DesignLedger) -> str:
     lines = []
     for o in found:
         where = f", in {o.out}" if o.out else ""
-        lines.append(f"order {o.id}: {o.run} {o.part} ({o.kind}), {o.status}{where}"
+        again = f", attempt {o.attempt}" if o.attempt > 1 else ""
+        lines.append(f"order {o.id}: {o.run} {o.part} ({o.kind}{again}), {o.status}{where}"
                      + (f": {o.said}" if o.said else ""))
     return "\n".join(lines) + "\n"
 
@@ -367,7 +518,7 @@ def _filament(env: dict[str, str], material: str | None) -> str | None:
         return said
     by = {k.strip().lower(): v.strip() for k, _, v in
           (item.partition("=") for item in said.split(";")) if k.strip() and v.strip()}
-    return by.get((material or "").lower())
+    return by.get((material or "").lower()) or by.get("*")
 
 
 def mesh(step: Path, work: Path) -> Path:
@@ -387,7 +538,13 @@ def mesh(step: Path, work: Path) -> Path:
     name = f"print-bench-{uuid.uuid4().hex[:12]}"
     argv = host.container(work, host.helper("refine", [json.dumps(request)]), name,
                           image=host.helper_image("refine"))
-    done = subprocess.run(argv, capture_output=True, text=True, timeout=600, check=False)
+    try:
+        done = subprocess.run(argv, capture_output=True, text=True, timeout=MESH_TIMEOUT,
+                              check=False)
+    except subprocess.TimeoutExpired as exc:
+        # Its container goes on without its client: stopped, by its name.
+        subprocess.run(["docker", "kill", name], capture_output=True, check=False, timeout=60)
+        raise RuntimeError(f"meshing {step.name} took past {MESH_TIMEOUT} s") from exc
     answer_path = work / MESH_ANSWER
     if not answer_path.is_file():
         tail = (done.stdout + done.stderr).strip().splitlines()[-3:]
@@ -399,45 +556,37 @@ def mesh(step: Path, work: Path) -> Path:
 
 
 def prepare(order: Order, folder: Path, env: dict[str, str]) -> list[str]:
-    """The study's inputs, made in the run's own folder (`RUN/studies/N-PART/inputs/`), and the
-    words `scripts/settings_study.py` runs it with: the approved file meshed in its own axes;
-    the run's assembly with the approved file in place of the work folder's; the run's load
-    needs as its cases, or those the Sponsor named, or none; the side it lies on, turned about
-    its up axis by fit-bed's own turn; and the Sponsor's limits.
+    """The words `scripts/settings_study.py` runs a queued study with, from what was copied as it
+    was queued (`RUN/studies/N-PART/inputs/`), each file held to its hash: the approved file
+    meshed in its own axes; the assembly as approved; the run's load needs as its cases, or those
+    the Sponsor named, or none; the side it lies on, turned about its up axis by fit-bed's own
+    turn; and the Sponsor's limits. The nozzle and filament are found first, so a study with
+    none costs no meshing.
 
     Raises:
-        ValueError: If the approved file isn't as approved, or no nozzle or filament is given.
+        ValueError: If no nozzle or filament is given, or what was copied has changed.
         RuntimeError: If it couldn't be meshed.
     """
-    out = folder / "studies" / f"{order.id}-{order.part}"
-    inputs = out / "inputs"
-    inputs.mkdir(parents=True, exist_ok=True)
-    if content_hash(order.file.name, order.file.read_bytes()) != order.sha256:
-        raise ValueError(f"{order.file} has changed since it was approved")
-    material: str | None = None
-    words: list[str] = []
-    if order.assembly is not None:
-        raw = json.loads(order.assembly.read_text(encoding="utf-8"))
-        for part in raw.get("parts") or ():
-            if not isinstance(part, dict) or not part.get("file"):
-                continue
-            target = inputs / str(part["file"])
-            target.parent.mkdir(parents=True, exist_ok=True)
-            source = (order.file if part.get("name") == order.part
-                      else order.assembly.parent / str(part["file"]))
-            if source.is_file():
-                shutil.copyfile(source, target)
-            if part.get("name") == order.part:
-                material = str(part.get("material") or "") or None
-        shutil.copyfile(order.assembly, inputs / order.assembly.name)
-        words += ["--assembly", str(inputs / order.assembly.name)]
-    stl = mesh(order.file, inputs / "mesh")
     limits = order.limits
     nozzle = limits.nozzle or (float(env[NOZZLE_KEY]) if env.get(NOZZLE_KEY) else None)
-    filament = limits.filament or _filament(env, material)
+    filament = limits.filament or _filament(env, order.material)
     if nozzle is None or filament is None:
+        kind = f"its {order.material}" if order.material else "a part of no material"
         raise ValueError(f"no nozzle or filament for {order.part}: give them in its limits, or "
-                         f"{NOZZLE_KEY} and {FILAMENTS_KEY} in the Mac's settings")
+                         f"{NOZZLE_KEY} and {FILAMENTS_KEY} in the Mac's settings, for {kind} "
+                         "(`*=NAME` for a part of none)")
+    if order.inputs is None:
+        raise ValueError(f"order {order.id} has no inputs copied as it was queued")
+    inputs = order.inputs
+    for name, sha in (order.manifest or {}).items():
+        path = inputs / name
+        if not path.is_file() or content_hash(Path(name).name, path.read_bytes()) != sha:
+            raise ValueError(f"{path} has changed since it was queued")
+    out = inputs.parent
+    words: list[str] = []
+    if order.assembly is not None:
+        words += ["--assembly", str(inputs / order.assembly)]
+    stl = mesh(inputs / order.file.name, inputs / "mesh")
     (inputs / "limits.json").write_text(json.dumps(limits.plain(), indent=1))
     rx, ry = laid_for(order.side)
     words = ["run", str(stl), "--part", order.part, "--nozzle", f"{nozzle:g}",

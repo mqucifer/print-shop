@@ -133,36 +133,46 @@ class Limits:
             said.append("walls laid " + " or ".join(self.wall_sequences))
         return "; ".join(said)
 
-    def check(self, candidate: Candidate) -> None:
+    def check(self, candidate: Candidate, defaults: Settings | None = None,
+              wall_sequence: str = "") -> None:
         """Refuse a candidate past what's known before it's sliced: its pattern, wall order,
-        infill and walls, the part's and each region's.
+        infill and walls, the part's and each region's, as it would be sliced: what it asks over
+        the profile's own `defaults` and `wall_sequence`, so a setting it leaves unset is held to
+        the limits as the profile gives it.
 
         Raises:
-            OutOfLimits: Saying which limit and what was asked.
+            OutOfLimits: Saying which limit and what was asked, or the profile gives.
         """
-        if (candidate.wall_sequence and self.wall_sequences
-                and candidate.wall_sequence not in self.wall_sequences):
-            raise OutOfLimits(f"walls laid {candidate.wall_sequence} are past the Sponsor's "
-                              f"limit: {' or '.join(self.wall_sequences)} only")
-        for where, settings in (("the part", candidate.settings),
-                                *((f"region {r.name}", r.settings) for r in candidate.regions)):
-            self._settings(where, settings)
+        sequence = candidate.wall_sequence or wall_sequence
+        if sequence and self.wall_sequences and sequence not in self.wall_sequences:
+            whose = "" if candidate.wall_sequence else ", the profile's,"
+            raise OutOfLimits(f"walls laid {sequence}{whose} are past the Sponsor's limit: "
+                              f"{' or '.join(self.wall_sequences)} only")
+        part = candidate.settings.over(defaults) if defaults is not None else candidate.settings
+        self._settings("the part", part, candidate.settings, defaults is not None)
+        for r in candidate.regions:
+            self._settings(f"region {r.name}", r.settings.over(part), r.settings,
+                           defaults is not None)
 
-    def _settings(self, where: str, settings: Settings) -> None:
+    def _settings(self, where: str, settings: Settings, asked: Settings,
+                  merged: bool) -> None:
+        def whose(name: str) -> str:
+            return ", the profile's," if merged and getattr(asked, name) is None else ""
+
         if settings.pattern and self.patterns and settings.pattern not in self.patterns:
-            raise OutOfLimits(f"{where}'s {settings.pattern} infill is past the Sponsor's limit: "
-                              f"{' or '.join(self.patterns)} only")
+            raise OutOfLimits(f"{where}'s {settings.pattern} infill{whose('pattern')} is past "
+                              f"the Sponsor's limit: {' or '.join(self.patterns)} only")
         if settings.infill is not None:
             if self.least_infill is not None and settings.infill < self.least_infill:
-                raise OutOfLimits(f"{where}'s {settings.infill:g}% infill is under the Sponsor's "
-                                  f"least, {self.least_infill:g}%")
+                raise OutOfLimits(f"{where}'s {settings.infill:g}% infill{whose('infill')} is "
+                                  f"under the Sponsor's least, {self.least_infill:g}%")
             if self.most_infill is not None and settings.infill > self.most_infill:
-                raise OutOfLimits(f"{where}'s {settings.infill:g}% infill is past the Sponsor's "
-                                  f"most, {self.most_infill:g}%")
+                raise OutOfLimits(f"{where}'s {settings.infill:g}% infill{whose('infill')} is "
+                                  f"past the Sponsor's most, {self.most_infill:g}%")
         if (settings.walls is not None and self.most_walls is not None
                 and settings.walls > self.most_walls):
-            raise OutOfLimits(f"{where}'s {settings.walls} walls are past the Sponsor's most, "
-                              f"{self.most_walls}")
+            raise OutOfLimits(f"{where}'s {settings.walls} walls{whose('walls')} are past the "
+                              f"Sponsor's most, {self.most_walls}")
 
     def sliced_past(self, time_s: int | None, grams: float | None) -> str:
         """What a slice is past of the time and grams allowed, in words; "" where nothing."""

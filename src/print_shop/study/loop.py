@@ -523,7 +523,7 @@ def run(loop: StudyLoop, part: StudyPart, stop: threading.Event | None = None,
         return outcome(why, **done)
 
     try:
-        part.limits.check(Candidate(DEFAULTS, part.defaults))
+        part.limits.check(Candidate(DEFAULTS, part.defaults), part.defaults, part.wall_sequence)
     except OutOfLimits as exc:
         base.ruled_out = "; ".join(w for w in (base.ruled_out, f"the profile's own: {exc}") if w)
     if base.error:
@@ -648,7 +648,7 @@ def _read(loop: StudyLoop, part: StudyPart, state: _State, args: dict[str, Any])
                 "those read.")
     candidate = part.shaper.candidate(f"c{state.own + 1}", args)
     try:
-        part.limits.check(candidate)
+        part.limits.check(candidate, part.defaults, part.wall_sequence)
     except OutOfLimits as exc:
         # Kept for the table: what was asked, and the limit that ruled it out.
         state.ruled_out.append(f"{candidate.said()}: {exc}")
