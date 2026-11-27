@@ -290,14 +290,16 @@ def run(
     python: bool = False,
     image: str | None = None,
     trace: list[str] | None = None,
+    name: str | None = None,
 ) -> subprocess.CompletedProcess[str]:
     """Run a bench command, or a script with `python=True`, in a container over `work`. A command
     runs in its own image; a script in the first, or in `image`, where `CAE_IMAGE`'s Python has
     FreeCAD's modules on its path. A `timeout` given is the limit, and nothing is offered past
     it; otherwise a command has its own (`timeout_for`), and `load` may take up a longer one
     (`offered`). What it says as it goes (`STEP_LINE`, `MEMORY_LINE`) isn't passed on, but put
-    in `trace` where one's given."""
-    name = f"print-bench-{uuid.uuid4().hex[:12]}"
+    in `trace` where one's given. Its container is `name`, or a new one's: a caller that names it
+    can stop it (`job.stop_here`)."""
+    name = name or f"print-bench-{uuid.uuid4().hex[:12]}"
     longer = None
     if timeout is None:
         timeout = TIMEOUT if python else timeout_for(args)

@@ -65,6 +65,11 @@ is drawn flat, as printed, and placed by a turn about x and then about z, its `a
 decimals, as an assembly's file gives it, so it sits a hair, 0.26 µm, off the blocks; and drawn
 standing and placed by the one turn about z, exactly where it is, and by its `at` to six decimals.
 
+`load/bowed*` (mqucifer/print-shop#356): a leg 20 x 10, straight for 40 mm and then curving
+25 mm over 80 on a B-spline tangent to it, bowing at 45° to its layers; a bar 120 x 20 x 10
+lofted through 9 sections bowing 25 mm along its layers, its flat sides B-spline as a loft makes
+them; and the leg bowing along its layers with a notch 6 x 4 in its flat side.
+
 `capped/` (mqucifer/print-shop#346): a top 40 x 40 and 6 thick with a counterbore 10 across and
 2 deep at its middle, and a cap 2 tall standing on the counterbore's floor with play round it,
 turned 15° about its axis so its seam isn't the counterbore's: 0.15 mm of play, a fit's, and
@@ -1140,6 +1145,96 @@ def printed() -> None:
         assembly(out / f"printed-lines-{angle}.json", [row], held=wall)
 
 
+#: The bowed bars (mqucifer/print-shop#356): a leg straight for 40 mm along x and then curving
+#: 25 mm over 80 on a B-spline tangent to it, 20 across in the plane it bows in and 10 thick
+#: square to it; and a bar 120 x 20 x 10 lofted through 9 square sections bowed 25 mm, in mm.
+LEG_STRAIGHT, LEG_RISE, LEG_RUN, BOW = 40.0, 25.0, 80.0, 25.0
+#: The notch in the leg bowed along its layers: 6 along x from x 77, 4 into its flat side.
+NOTCH_AT, NOTCH_LONG, NOTCH_DEEP = 77.0, 6.0, 4.0
+#: Where each bowed bar is loaded: along x, over the middle of its section there.
+BOWED_AT = 110.0
+
+
+def bowed_leg(tilt: float) -> Part.Shape:
+    """The leg, bowing in the plane turned `tilt` degrees about x from its layers' plane: its
+    sides flat along the straight and B-spline along the curve, tangent where they meet, made
+    by interpolating points offset square to its middle line; flat across its thickness."""
+    turn = math.radians(tilt)
+    up = App.Vector(0, math.cos(turn), math.sin(turn))
+    across = App.Vector(0, -math.sin(turn), math.cos(turn))
+
+    def middle(s: float) -> tuple[App.Vector, App.Vector]:
+        point = App.Vector(LEG_STRAIGHT + LEG_RUN * s, 0, 0) + up * (LEG_RISE * s * s)
+        return point, (App.Vector(LEG_RUN, 0, 0) + up * (2 * LEG_RISE * s)).normalize()
+
+    sides = []
+    for k in (-1, 1):
+        points = []
+        for i in range(13):
+            point, way = middle(i / 12)
+            points.append(point + across.cross(way).normalize() * (k * BEAM_W / 2))
+        curve = Part.BSplineCurve()
+        curve.interpolate(points, InitialTangent=middle(0)[1], FinalTangent=middle(1)[1])
+        root = across.cross(middle(0)[1]).normalize() * (k * BEAM_W / 2)
+        sides.append((Part.makeLine(root, points[0]), curve.toShape()))
+    (line1, curve1), (line2, curve2) = sides
+    ends = [Part.makeLine(line1.Vertexes[0].Point, line2.Vertexes[0].Point),
+            Part.makeLine(curve1.Vertexes[-1].Point, curve2.Vertexes[-1].Point)]  # fmt: skip
+    face = Part.Face(Part.Wire(Part.__sortEdges__([line1, curve1, line2, curve2, *ends])))
+    face.translate(across * (-BEAM_T / 2))
+    solid = face.extrude(across * BEAM_T)
+    faces = [f.toNurbs().Faces[0] if type(f.Surface).__name__ == "SurfaceOfExtrusion" else f
+             for f in solid.Faces]  # fmt: skip
+    shell = Part.Shell(faces)
+    shell.sewShape()
+    solid = Part.Solid(shell)
+    if solid.Volume < 0:
+        solid.reverse()
+    solid.translate(App.Vector(0, -solid.BoundBox.YMin, -solid.BoundBox.ZMin))
+    return solid
+
+
+def lofted(tilt: float) -> Part.Shape:
+    """The bar lofted through 9 square sections, each moved `BOW` × sin(πx/120) in the plane
+    turned `tilt` degrees about x from its layers' plane: every face B-spline but its ends,
+    its flat sides too, as a loft makes them."""
+    turn = math.radians(tilt)
+    up = App.Vector(0, math.cos(turn), math.sin(turn))
+    wires = []
+    for i in range(9):
+        x = BEAM_L * i / 8
+        at = App.Vector(x, 0, 0) + up * (BOW * math.sin(math.pi * i / 8))
+        wires.append(Part.makePolygon([at + App.Vector(0, a, b) for a, b in
+                                       ((0, 0), (BEAM_W, 0), (BEAM_W, BEAM_T), (0, BEAM_T),
+                                        (0, 0))]))  # fmt: skip
+    return Part.makeLoft(wires, True, False)
+
+
+def bowed() -> None:
+    """The bowed bars (mqucifer/print-shop#356), each held at x 0 and loaded at x 110, read
+    solid and as printed: the leg bowing at 45° to its layers; the lofted bar bowing along its
+    layers, whose flat B-spline sides made main's common of 16 copies empty, so it read solid
+    and said nothing; and the leg bowing along its layers with a notch in its flat side, whose
+    concave edges run between its B-spline faces, where main's copies left 16 steps of core
+    under a bead's width by them. Where each is loaded is in `bowed-at.json`."""
+    out = Path("load")
+    wall = [{"plane": "x=0", "how": "fixed"}]
+    notch = box((NOTCH_AT, -1, -50), (NOTCH_AT + NOTCH_LONG, NOTCH_DEEP, 100))
+    shapes = {"bowed": bowed_leg(45), "bowed-up": lofted(90),
+              "bowed-notched": bowed_leg(90).cut(notch)}  # fmt: skip
+    at = {}
+    for name, shape in shapes.items():
+        save(shape, out / f"{name}.step")
+        section = shape.slice(App.Vector(1, 0, 0), BOWED_AT)[0].BoundBox
+        y = (section.YMin + section.YMax) / 2
+        line = Part.makeCylinder(0.01, 200, App.Vector(BOWED_AT, y, -100))
+        at[name] = [BOWED_AT, round(y, 4), round(shape.common(line).optimalBoundingBox().ZMax, 4)]
+        for kind, extra in (("", {}), ("printed-", {"print": {**PRINT, "walls": 2, "infill": 20}})):
+            row = {"name": "bar", "file": f"{name}.step", "layers": "z", **extra}
+            assembly(out / f"{kind}{name}.json", [row], held=wall)
+    (out / "bowed-at.json").write_text(json.dumps(at))
+
+
 #: The capped top (mqucifer/print-shop#346): its side and thickness, the counterbore's radius
 #: and depth, and the cap's play round it, a fit's and a hair's, and its turn, in mm and degrees.
 CAPPED_SIDE, CAPPED_T, CAPPED_BORE_R, CAPPED_DEEP = 40.0, 6.0, 5.0, 2.0
@@ -1176,6 +1271,7 @@ def main() -> None:
     loads()
     capped()
     printed()
+    bowed()
     throughs()
     peaks()
     shears()

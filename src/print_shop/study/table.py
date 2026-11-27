@@ -42,8 +42,17 @@ def _cell_grams(r: Reading, base: Reading | None) -> str:
     return said
 
 
+def _reading(r: Reading) -> bool:
+    """Whether it's queued or reading still: nothing landed, and nothing said against it."""
+    return r.sliced is None and not r.error and not r.cases
+
+
 def _cell_case(r: Reading, name: str) -> str:
+    if _reading(r):
+        return "reading"
     if r.error:
+        if r.error.startswith("not read"):
+            return "not read"
         return "not as sliced" if r.error.startswith("not as sliced") else "not sliced"
     case = next((c for c in r.cases if c.case == name), None)
     if case is None:
@@ -86,10 +95,19 @@ def table(result: StudyResult, part: str, cases: list[str], where: Path | None =
     `where`, the folder it's written in."""
     base = result.defaults
     rows = result.readings
+    own = rows[1:]
+    reading = sum(1 for r in own if _reading(r))
+    cut = sum(1 for r in own if not _reading(r) and r.error.startswith("not read"))
+    more = ", ".join(said for said in (f"{reading} still reading" if reading else "",
+                                       f"{cut} not read as it ended" if cut else "") if said)
     out = [f"# Settings study: {part}", "",
-           f"{len(rows) - 1} candidates of the model's own read beside the profile's defaults, "
+           f"{len(own) - reading - cut} candidates of the model's own read"
+           + (f" ({more})" if more else "") + " beside the profile's defaults, "
            f"under {len(cases)} load case{'s' if len(cases) != 1 else ''}, by {result.model}, "
            f"in {result.seconds / 60:.0f} min: {result.ended}. Nothing was printed or armed.",
+           "", f"Read within the host's budget, {result.budget or 'one job at a time'}: at most "
+           f"{result.most_at_once or 1} slices and reads at once, each single-threaded, so each "
+           "figure is what it is read alone.",
            "", "Each case's cell is its worst figure as a share of its limit, and the margin "
            "left. Every figure of a printed part rests on the infill model's published tests, "
            "which no print has checked yet (mqucifer/print-shop#340); * is a figure whose core, "
@@ -101,7 +119,8 @@ def table(result: StudyResult, part: str, cases: list[str], where: Path | None =
            + " | Passes | Orca project |",
            "|---|---|---|---|" + "---|" * len(cases) + "---|---|"]
     for r in rows:
-        passes = "yes" if r.passes else "no"
+        passes = ("reading" if _reading(r) else "not read" if r.error.startswith("not read")
+                  else "yes" if r.passes else "no")
         out.append(f"| {r.candidate.name} | {_escape(r.candidate.said())} | "
                    f"{_cell_time(r, base)} | {_cell_grams(r, base)} | "
                    + " | ".join(_cell_case(r, c) for c in cases)
@@ -126,10 +145,15 @@ def table(result: StudyResult, part: str, cases: list[str], where: Path | None =
         out += ["", "The trade-off: no other passing candidate beats "
                 + ", ".join(r.candidate.name for r in best)
                 + " on time, grams and margin at once."]
-    failing = [r for r in rows if not r.passes]
+    # Those that fail: never one still reading, nor one the study's end cut off.
+    failing = [r for r in rows if not r.passes and not _reading(r)
+               and not r.error.startswith("not read")]
+    unread = [r.candidate.name for r in rows if not _reading(r) and r.error.startswith("not read")]
     if failing:
         out += ["", "## Those that fail, and why", ""]
         out += [f"- {r.candidate.name}: {_escape(r.why_not())}" for r in failing]
+    if unread:
+        out += ["", f"Not read, as the study ended first: {', '.join(unread)}."]
     out += ["", "## Each candidate's figures", ""]
     for r in rows:
         why = f" ({r.candidate.why})" if r.candidate.why else ""
@@ -210,6 +234,7 @@ def as_plain(result: StudyResult, part: str) -> dict[str, Any]:
         "part": part, "ended": result.ended, "model": result.model,
         "model_calls": result.model_calls, "seconds": result.seconds,
         "recommended": result.recommended, "reason": result.reason,
+        "budget": result.budget, "most_at_once": result.most_at_once,
         "lessons": result.lessons,
         "readings": [r.plain() for r in result.readings],
         "front": [r.candidate.name for r in front(result.readings)],

@@ -49,6 +49,9 @@ from pathlib import Path
 import trimesh
 
 from print_shop.bench.assembly import read as read_assembly
+from print_shop.bench.budget import Budget, Slots, megabytes, others_mb, reserved
+from print_shop.bench.host import memory_for
+from print_shop.bench.job import running_here
 from print_shop.bench.report import NoAnswer
 from print_shop.env import SETTINGS_PATH, load_env
 from print_shop.expert.client import LLMConfig
@@ -62,7 +65,7 @@ from print_shop.slicer.regions import Bed, Pose, degrees_said, turned_to_fit
 from print_shop.slicer.store import NoChoice
 from print_shop.study import lessons
 from print_shop.study.candidate import Shaper, study_poses, unfit
-from print_shop.study.loop import StudyLoop, StudyPart, llm_chat, run
+from print_shop.study.loop import StudyLoop, StudyPart, StudyResult, llm_chat, run
 from print_shop.study.reading import (
     BenchLoad,
     Case,
@@ -72,6 +75,10 @@ from print_shop.study.reading import (
     defaults,
 )
 from print_shop.study.table import as_plain, table
+
+
+def _load_mb(case: Case) -> int:
+    return megabytes(memory_for(["load", "-", *case.args]))
 
 
 def _case(text: str) -> Case:
@@ -153,6 +160,18 @@ def study(args: argparse.Namespace) -> int:
     features = lessons.measured(stl, turn, out / "laid", kept.bed_contact_area_mm2)
     keys = lessons.keys(features, assembly, args.part, context)
     process = json.loads(Path(profiles.process).read_text())
+    try:
+        # What the host runs at once: Docker's memory and CPUs, less what's kept for other
+        # work, as the settings or the options state it (`bench.budget`).
+        kept_mb, kept_cpus = reserved(env, args.reserve_memory, args.reserve_cpus)
+        budget = Budget.serial() if args.serial else Budget.docker(kept_mb, kept_cpus)
+        heaviest = max(_load_mb(c) for c in cases)
+        if budget.at_once(heaviest) < 1:
+            raise ValueError(f"the host's budget, {budget.said()}, holds no load of "
+                             f"{heaviest} MiB: keep less for other work")
+    except (ValueError, RuntimeError) as exc:
+        print(exc, file=sys.stderr)
+        return 2
     config = setup_llm(LLMConfig.from_settings(), env)
     loop = StudyLoop(chat=llm_chat(config), model=config.model,
                      max_candidates=args.max_candidates, max_seconds=args.max_hours * 3600)
@@ -176,11 +195,18 @@ def study(args: argparse.Namespace) -> int:
         poses=poses,
         lessons=tuple(kept_lessons), earlier=tuple(studied_before),
         wall_sequence=str(process.get("wall_sequence", "")), filament=args.filament,
+        # Other processes' bench and rounds containers are counted as each read takes its slot.
+        slots=Slots(budget, None if args.serial else (lambda: others_mb(running_here()))),
     )
     print(f"studying {args.part} turned {degrees_said(turn)} under {len(cases)} load cases, "
-          f"in {out}", flush=True)
-    result = run(loop, part)
+          f"in {out}, within {budget.said()}", flush=True)
     names = [c.name for c in cases]
+
+    def landed(so_far: StudyResult) -> None:
+        # The table as it fills in, each reading as it lands.
+        (out / "study.md").write_text(table(so_far, args.part, names, where=out))
+
+    result = run(loop, part, progress=landed)
     (out / "study.md").write_text(table(result, args.part, names, where=out))
     (out / "study.json").write_text(json.dumps(as_plain(result, args.part), indent=1))
     with Ledger(where) as ledger:
@@ -218,6 +244,14 @@ def main(argv: list[str] | None = None) -> int:
     go.add_argument("--need", action="append", metavar="ID", help="only these needs")
     go.add_argument("--out", type=Path, help="where the study is written")
     go.add_argument("--ledger", type=Path, help="the ledger: the Mac's unless given")
+    go.add_argument("--reserve-memory", metavar="SIZE",
+                    help="Docker memory kept for other work, as 4g: else BENCH_RESERVE_MEMORY "
+                         "in the settings, else one bench command's 3g")
+    go.add_argument("--reserve-cpus", type=int, metavar="N",
+                    help="Docker CPUs kept for other work: else BENCH_RESERVE_CPUS in the "
+                         "settings, else one bench command's 2")
+    go.add_argument("--serial", action="store_true",
+                    help="read one slice or load at a time, as before")
     go.add_argument("--max-candidates", type=int, default=10)
     go.add_argument("--max-hours", type=float, default=6.0)
     listing = sub.add_parser("lessons", help="every study lesson, or one study's")
