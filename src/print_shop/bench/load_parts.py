@@ -358,7 +358,8 @@ class _Alone(load._Model):
         self.feature.Shape = self.solid
         self.shape = self.feature.Shape
         self.solids = [self.shape]
-        self.between = [f for f in self.shape.Faces if any(f.isSame(g) for g in self.met_faces)]
+        met = load.Faces(self.met_faces)
+        self.between = [f for f in self.shape.Faces if met.has(f)]
         if len(self.between) != len(self.met_faces):
             raise NoAnswer(
                 f"the part {self.part.name} on its own doesn't have the {len(self.met_faces)} "
@@ -375,10 +376,9 @@ class _Alone(load._Model):
             if one.part is not None and one.part != self.part.name:
                 continue
             axis = AXES.index(one.axis)
+            between = load.Faces(self.between)
             faces = [
-                f
-                for f in self.shape.Faces
-                if load._flat(f, axis, one.at) and not any(f.isSame(b) for b in self.between)
+                f for f in self.shape.Faces if load._flat(f, axis, one.at) and not between.has(f)
             ]
             if not faces:
                 continue
@@ -636,6 +636,7 @@ def first(
     began = time.time()
     with load._quiet(), load.step("the first pass's squaring of each bolt's bore"):
         square, count, kept = squared(assembly, placed)
+    load.keep(square)
     clock.check("whole", f"the first pass's whole at {size:g} mm")
     fine = load._solved(
         assembly, square, args, size, two_pass=True, weighed=placed, spread=False
@@ -646,6 +647,8 @@ def first(
         assembly, square, args, round(size * load.COARSER, 3), two_pass=True, weighed=placed,
         spread=False,
     )
+    # Nothing more is read from the parts with their bores squared.
+    load.unjoined(square)
     said = {
         "squared_bores": count,
         "round_kept": kept,
@@ -686,17 +689,14 @@ def second(
             joined = load._Model(assembly, placed, args, size)
             joined.join(doc)
             solids = joined.solids
+            theirs = {
+                part.name: load.Faces(
+                    [f for pair, faces in joined.met.items() if part.name in pair for f in faces]
+                )
+                for part in assembly.parts
+            }
             met = {
-                part.name: [
-                    g
-                    for g in solids[k].Faces
-                    if any(
-                        g.isSame(f)
-                        for pair, faces in joined.met.items()
-                        if part.name in pair
-                        for f in faces
-                    )
-                ]
+                part.name: [g for g in solids[k].Faces if theirs[part.name].has(g)]
                 for k, part in enumerate(assembly.parts)
             }
     finally:

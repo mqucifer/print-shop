@@ -874,3 +874,71 @@ def test_a_part_that_meets_others_but_was_given_nothing_by_them_isn_t_read() -> 
     with pytest.raises(NoAnswer, match="the first pass gave it nothing they put on it"):
         alone._joined()
 
+
+
+def test_one_load_joins_each_set_of_parts_once(monkeypatch: pytest.MonkeyPatch) -> None:
+    """mqucifer/print-shop#336: two passes join the parts as placed twice and with their bores
+    squared twice, each join up to 1,200 s on a design run's table. The same shapes are joined
+    once a read, and let go once nothing more is read from them."""
+    joins: list[int] = []
+
+    class Shape:
+        def generalFuse(self, others: list[Any]) -> tuple[str, list[Any]]:  # noqa: N802
+            joins.append(len(others))
+            return f"joined {len(joins)}", []
+
+    monkeypatch.setattr(load, "_joined", {})
+    monkeypatch.setattr(load, "_kept", [])
+    placed = [Shape(), Shape(), Shape()]
+    assert load.fused(placed) == load.fused(placed) == "joined 1"
+    square = [Shape(), Shape(), Shape()]
+    assert load.fused(square) == "joined 2" and load.fused(placed) == "joined 1"
+    load.unjoined(square)
+    assert load.fused(square) == "joined 3"
+    assert load.fused(placed[:1]) is placed[0], "one part is itself, unjoined"
+    assert joins == [2, 2, 2]
+
+
+class _Face:
+    """A face as OCC's hash and `isSame` see it: its own shape, `which`, and a hash that more
+    than one shape may share."""
+
+    def __init__(self, which: int, hashed: int) -> None:
+        self.which, self.hashed = which, hashed
+
+    def hashCode(self) -> int:  # noqa: N802
+        return self.hashed
+
+    def isSame(self, other: _Face) -> bool:  # noqa: N802
+        return self.which == other.which
+
+
+def test_faces_by_their_hash_say_what_asking_each_in_turn_says() -> None:
+    """mqucifer/print-shop#336: whether a face is one of a part's is asked of those with its hash
+    alone, and `isSame` still says. Shapes that share a hash aren't taken for each other."""
+    mine = [_Face(k, k % 3) for k in range(10)]
+    theirs = [_Face(k, k % 3) for k in (2, 5, 11, 14)]
+    index = load.Faces(theirs)
+    assert [f.which for f in mine if index.has(f)] == [
+        f.which for f in mine if any(f.isSame(g) for g in theirs)
+    ] == [2, 5]
+
+
+def test_what_freecad_caches_of_the_kept_shapes_faces_is_let_go_as_each_step_ends(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    cleared: list[str] = []
+
+    class Kept:
+        def __init__(self, name: str) -> None:
+            self.name = name
+
+        def clearCache(self) -> None:  # noqa: N802
+            cleared.append(self.name)
+
+    monkeypatch.setattr(load, "_kept", [])
+    monkeypatch.setattr(load, "give_back", lambda: cleared.append("given back"))
+    load.keep([Kept("a"), Kept("b"), "no cache of its own"])
+    with load.step("reading the faces"):
+        pass
+    assert cleared == ["a", "b", "given back"]

@@ -454,7 +454,7 @@ class _Model:
     def join(self, doc: Any) -> None:
         """The parts as one body with the faces that meet shared, and each joint's faces."""
         placed = self.placed
-        whole = placed[0] if len(placed) == 1 else placed[0].generalFuse(placed[1:])[0]
+        whole = fused(placed)
         self.feature = doc.addObject("Part::Feature", "Parts")
         self.feature.Shape = whole
         self.shape = shape = self.feature.Shape
@@ -472,10 +472,12 @@ class _Model:
             self.solids.append(near)
         names = [p.name for p in self.assembly.parts]
         self.met: dict[frozenset[str], list[Any]] = {}
-        for i, first in enumerate(self.solids):
+        faces = [solid.Faces for solid in self.solids]
+        indexed = [Faces(each) for each in faces]
+        for i, first in enumerate(faces):
             for j in range(i + 1, len(self.solids)):
-                theirs = self.solids[j].Faces
-                shared = [f for f in first.Faces if any(f.isSame(g) for g in theirs)]
+                theirs = indexed[j]
+                shared = [f for f in first if theirs.has(f)]
                 if shared:
                     self.met[frozenset((names[i], names[j]))] = shared
         named = {frozenset(j.between): j for j in self.assembly.joints}
@@ -504,7 +506,12 @@ class _Model:
         self.between = [f for faces in self.met.values() for f in faces]
 
     def _face_name(self, face: Any) -> str:
-        for number, other in enumerate(self.shape.Faces, 1):
+        if getattr(self, "_numbers", None) is None:
+            self._numbers: dict[int, list[tuple[int, Any]]] = {}
+            for number, other in enumerate(self.shape.Faces, 1):
+                self._numbers.setdefault(other.hashCode(), []).append((number, other))
+        # The first of the joined parts' faces it's the same as, as by asking each in turn.
+        for number, other in self._numbers.get(face.hashCode(), ()):
             if face.isSame(other):
                 return f"Face{number}"
         raise NoAnswer("a face of the joined parts couldn't be found again")
@@ -528,6 +535,7 @@ class _Model:
         self.standing: dict[int, list[Any]] = {}
         self.held_parts: set[str] = set()
         self.held_said = []
+        between = Faces(self.between)
         for one in held:
             axis = AXES.index(one.axis)
             faces = []
@@ -535,7 +543,7 @@ class _Model:
                 if one.part is not None and name != one.part:
                     continue
                 for face in solid.Faces:
-                    if _flat(face, axis, one.at) and not any(face.isSame(b) for b in self.between):
+                    if _flat(face, axis, one.at) and not between.has(face):
                         faces.append(face)
                         self.held_parts.add(name)
             if not faces and self.args.lift is not None:
@@ -954,8 +962,8 @@ class _Model:
             for node, push in load["pushes"].items():
                 self.outside[load["part"]][self.row[node]] += push
         for name, solid in zip(names, self.solids, strict=True):
-            mine = [f for f in [*self.fixed, *sum(self.standing.values(), [])]
-                    if any(f.isSame(g) for g in solid.Faces)]  # fmt: skip
+            own = Faces(solid.Faces)
+            mine = [f for f in [*self.fixed, *sum(self.standing.values(), [])] if own.has(f)]
             # The held faces' nodes as FreeCAD holds them, and as CalculiX sums their reaction.
             for node in {n for f in mine for n in self.fem.getNodesByFace(f)}:
                 if node in self.held_force:
@@ -1121,7 +1129,8 @@ class _Model:
         import Part
 
         names = [p.name for p in self.assembly.parts]
-        outer = [f for f in self.shape.Faces if not any(f.isSame(b) for b in self.between)]
+        between = Faces(self.between)
+        outer = [f for f in self.shape.Faces if not between.has(f)]
         self.loads: list[dict[str, Any]] = []
         self.pushed: dict[int, np.ndarray] = {}
         for place, each in places:
@@ -1157,9 +1166,7 @@ class _Model:
             for node, push in pushes.items():
                 self.pushed[node] = self.pushed.get(node, 0) + push
             part = next(
-                n
-                for n, s in zip(names, self.solids, strict=True)
-                if any(faces[0].isSame(f) for f in s.Faces)
+                n for n, s in zip(names, self.solids, strict=True) if Faces(s.Faces).has(faces[0])
             )
             self.loads.append(
                 {
@@ -1580,8 +1587,9 @@ def step(what: str) -> Iterator[None]:
     a reason it gives itself is said as it is, and anything else as `NoAnswer` naming the step,
     and the part or the joint, where it stopped. Never a traceback's last line alone. And said
     as it begins, with the container's memory, so a command killed for memory says where it was
-    (`progress`, mqucifer/print-shop#336). As it ends, what it freed is given back to the kernel,
-    for the steps after it and the solvers they start (`cae.give_back`)."""
+    (`progress`, mqucifer/print-shop#336). As it ends, what FreeCAD cached of the faces it read
+    is let go (`forget`), and what was freed is given back to the kernel, for the steps after it
+    and the solvers they start (`cae.give_back`)."""
     try:
         with progress.step(what):
             yield
@@ -1590,6 +1598,7 @@ def step(what: str) -> Iterator[None]:
     except Exception as exc:  # noqa: BLE001 - whatever stops a step is said with the step
         raise NoAnswer(f"load stopped {what}: {type(exc).__name__}: {exc}"[:500]) from exc
     finally:
+        forget()
         give_back()
 
 
@@ -1762,6 +1771,70 @@ def _ccx(fea: Any, size: float) -> None:
     clock.ccx_ended = time.time()
 
 
+#: The shapes one `load` keeps while it reads, as the parts as placed and joined
+#: (mqucifer/print-shop#336). FreeCAD caches what it reads of each face of a shape on the shape:
+#: on a design run's whole table, reading the faces of its 37 parts once, as the bolts' ways
+#: do, took 1.6 GiB, held until the parts were.
+_kept: list[Any] = []
+
+
+def keep(shapes: list[Any]) -> None:
+    """Shapes this `load` keeps while it reads, whose faces' cache `forget` lets go."""
+    _kept.extend(shapes)
+
+
+def forget() -> None:
+    """What FreeCAD cached of the kept shapes' faces, let go: it's read again as it's asked."""
+    for shape in _kept:
+        clear = getattr(shape, "clearCache", None)
+        if clear is not None:
+            clear()
+
+
+#: The parts joined, by the shapes joined, while one `load` runs (mqucifer/print-shop#336): each
+#: key the shapes' own ids, and each entry the shapes, held so no id is used again, and the join.
+_joined: dict[tuple[int, ...], tuple[list[Any], Any]] = {}
+
+
+def fused(placed: list[Any]) -> Any:
+    """The parts as one body, the faces that meet shared: OCC's general fuse of them. The same
+    shapes join to the same body, so one `load` joins each set of them once, and reads each
+    mesh of it from that: on a design run's whole table each join took 1,000 to 1,200 s of the
+    hour, and two passes join the parts as placed twice, for the way in and the second pass,
+    and with their bores squared twice, at the mesh and the coarser one. Six plates of 2,310
+    faces each took 340 s to join, and 9 s again."""
+    if len(placed) == 1:
+        return placed[0]
+    key = tuple(id(s) for s in placed)
+    if key not in _joined:
+        _joined[key] = (list(placed), placed[0].generalFuse(placed[1:])[0])
+        keep([_joined[key][1]])
+    return _joined[key][1]
+
+
+def unjoined(placed: list[Any]) -> None:
+    """The join of `placed` let go, once nothing more is read from it."""
+    let_go = _joined.pop(tuple(id(s) for s in placed), None)
+    if let_go is not None:
+        _kept[:] = [s for s in _kept if all(s is not t for t in (*let_go[0], let_go[1]))]
+
+
+class Faces:
+    """Faces by their hash, so whether a face is one of them is asked, by `isSame`, of the few
+    with its hash and not of every one (mqucifer/print-shop#336). OCC's hash of a shape is its
+    own and its place's, as `isSame` compares them, so the answer is the same: on a design run's
+    whole table, of 37 parts and up to 2,565 faces each, asking every face of each part of
+    every face of each other is some 250 million asks, at 2.6 µs each in the image."""
+
+    def __init__(self, faces: list[Any]) -> None:
+        self.by: dict[int, list[Any]] = {}
+        for face in faces:
+            self.by.setdefault(face.hashCode(), []).append(face)
+
+    def has(self, face: Any) -> bool:
+        return any(face.isSame(f) for f in self.by.get(face.hashCode(), ()))
+
+
 class _Curved(NoAnswer):
     """The mesh with its elements' sides curved onto the parts' faces has an element turned
     inside out, or none at all: it's meshed again with them straight."""
@@ -1881,6 +1954,8 @@ def run(args: Any, report: Report) -> None:
         _read(args, report)
     finally:
         _clock["now"] = None
+        _joined.clear()
+        _kept.clear()
         progress.stop()
 
 
@@ -2014,6 +2089,9 @@ def _run(
     tried: float = 0.0,
 ) -> None:
     freecad("load")
+    # Each read places its parts afresh: what an earlier one joined isn't read again.
+    _joined.clear()
+    _kept.clear()
     args.lift = getattr(args, "lift", None)
     if args.lift is not None and (args.weight is not None or args.at):
         raise NoAnswer(
@@ -2041,6 +2119,7 @@ def _run(
     # The one pass, timed where two passes could go on from it (mqucifer/print-shop#331).
     _one_pass(assembly, report.started, two_pass, without_bands)
     placed = _placed(assembly, without_bands)
+    keep(placed)
     # Each through-bolt's way through both parts, before anything is solved.
     with step("finding each through joint's bolts' way through its parts"):
         ways = load_through.ways(assembly, placed)
