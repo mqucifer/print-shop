@@ -38,6 +38,10 @@ faces, how far apart they are and how far apart they'd mesh: that's the parts, t
 meeting or further apart. One elsewhere is left as gmsh meshed it. Where gmsh still refuses
 them, the faces nearest where it says they cross are named.
 
+Of a solve's two meshes, the finer is meshed on those faces at `1 / COARSER` of the size that
+meshes them, and the coarser, from the finer's pairs, at that size: so on them too the coarser
+mesh is coarser, and its second check reads them.
+
 Meshed again, no element anywhere is finer than `LEAST`, a quarter of a nozzle's line, and the
 reply counts the faces curved tighter than gmsh's own sizing would mesh at it: a curve no print
 has, such as a traced frame's micro-arc, is read as the corner it prints as.
@@ -342,19 +346,22 @@ def apart_for(face: Any, least: float = LEAST, per_turn: int = PER_TURN) -> floa
     return sag(surface_bend(face), least, per_turn) / SHARE
 
 
-def fields(closes: list[Close], size: float) -> str:
+def fields(closes: list[Close], size: float, scale: float = 1.0) -> str:
     """gmsh's input for the local sizes: for each step of size, a constant field on its faces
     and their edges, and a threshold that grows it away from them by one mm in `GRADE` to the
     mesh's own; the least of them all as the background field; and no element anywhere finer
-    than `LEAST`. Nothing where nothing is close."""
+    than `LEAST`. Each face's size is `scale` times the size that meshes it: less than one on
+    the finer of a solve's two meshes, so the coarser one, on the same faces at their own
+    size, is coarser there too and its second check reads them. Nothing where nothing is
+    close."""
     faces: dict[int, float] = {}
     for close in closes:
         for n, h in close.faces.items():
             faces[n] = min(faces.get(n, math.inf), h)
     steps: dict[float, list[int]] = {}
     for n, h in faces.items():
-        if h < size:
-            steps.setdefault(stepped(h), []).append(n)
+        if h * scale < size:
+            steps.setdefault(stepped(h * scale), []).append(n)
     if not steps:
         return ""
     lines = ["// faces closer than the mesh's sag (mqucifer/print-shop#346)"]

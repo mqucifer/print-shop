@@ -19,6 +19,10 @@ Nothing here changes how the bench reads anything else.
   if an element were inside out, so the straight one starts from the pairs it found;
 - `inverted`: CalculiX's words for the first element of its input turned inside out, so the
   curved and the straight try both fail on it;
+- `unplaceable`: `inverted`, with placing the element failing;
+- `alone-inverted`: the same element turned inside out in a part on its own's curved try in
+  the second pass, and nowhere else;
+- `search-fails`: the search for faces closer than the mesh's sag failing;
 - `unsized`: the faces found close where gmsh's triangles cross given no local size, so gmsh
   refuses them as it did (mqucifer/print-shop#346).
 """
@@ -150,9 +154,10 @@ elif mode == "turned-away":
                                f"({FORCED})", self.closes)  # fmt: skip
 
     load._Model.solve = turned_away
-elif mode == "inverted":
+elif mode in ("inverted", "unplaceable", "alone-inverted"):
     # CalculiX's words for an element turned inside out, the first of its input, as on a
-    # design run's table, curved and straight (mqucifer/print-shop#346).
+    # design run's table (mqucifer/print-shop#346): every try, curved and straight; the same
+    # with placing it failing; or a part on its own's curved try in the second pass alone.
     import re
 
     ccx = load._ccx
@@ -164,11 +169,39 @@ elif mode == "inverted":
         fea.ccx_stdout += (" *ERROR in e_c3d: nonpositive jacobian\n        determinant in "
                            f"element {first.group(1) if first else 1}\n")  # fmt: skip
 
-    load._ccx = inverted
+    if mode == "alone-inverted":
+        alone = importlib.import_module("bench.load_parts")._Alone
+        solve = alone.solve
+
+        def curved_inverted(self: Any, doc: Any) -> None:
+            if self.straight:
+                solve(self, doc)
+                return
+            load._ccx = inverted
+            try:
+                solve(self, doc)
+            finally:
+                load._ccx = ccx
+
+        alone.solve = curved_inverted
+    else:
+        load._ccx = inverted
+    if mode == "unplaceable":
+
+        def unplaceable(self: Any, point: Any) -> str:
+            raise RuntimeError("forced by the test")
+
+        load._Model._faces_near = unplaceable
+elif mode == "search-fails":
+    # The search for faces closer than the mesh's sag itself failing (mqucifer/print-shop#346).
+    def search_fails(*given: Any, **more: Any) -> Any:
+        raise ValueError("forced by the test")
+
+    load.close_faces.found = search_fails
 elif mode == "unsized":
     # Faces that meet nowhere found close where gmsh's triangles cross, but given no local size
     # (mqucifer/print-shop#346), as where the sizes don't part them.
-    load.close_faces.fields = lambda closes, size: ""
+    load.close_faces.fields = lambda closes, size, scale=1.0: ""
 else:
     raise SystemExit(f"no such mode: {mode}")
 sys.exit(main(given))

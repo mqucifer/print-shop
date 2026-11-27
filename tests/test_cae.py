@@ -1709,6 +1709,13 @@ def test_a_cap_in_its_counterbore_with_play_round_it_meshes_curved_and_straight(
         ), answer.text
         assert "a mesh of at most 4.5 mm (" in answer.text and answer.text.count(", finer,") >= 2
         assert "DISAGREE" not in answer.text
+        # The coarser mesh is coarser on the faces meshed finer too, on the same pairs, so its
+        # second check reads them (the cold review): a step or three of a quarter doubling.
+        fine, coarse = (float(x) for x in re.findall(r"finer, to at most ([\d.]+) mm, on 2 face",
+                                                       answer.text)[:2])  # fmt: skip
+        assert 1.3 < coarse / fine < 1.8, (fine, coarse)
+        pairs = re.findall(r"where (\d+) pair\(s\) of faces that meet nowhere", answer.text)
+        assert len(set(pairs[:2])) == 1, pairs
 
 
 def test_meshed_again_no_element_is_finer_than_a_quarter_of_a_nozzle_s_line(cae: Any) -> None:
@@ -1765,9 +1772,10 @@ def test_a_straight_try_after_a_curved_one_is_meshed_finer_from_the_start(cae: A
     steps = [line for line in said if line.startswith(host.STEP_LINE)]
     assert any("meshing again straight-sided, as the curved mesh didn't stand: CalculiX found "
                "an element turned inside out" in line for line in steps), steps  # fmt: skip
-    # The curved try's search, once on each mesh, and none in the straight try.
+    # The curved try's search on the mesh, and no other: the coarser mesh starts from its
+    # pairs, and each straight try from its curved one's.
     searches = [line for line in steps if "closer than the mesh's sag" in line]
-    assert len(searches) == 2, steps
+    assert len(searches) == 1, steps
 
 
 def test_an_element_turned_inside_out_is_placed_and_the_curved_try_s_words_kept(cae: Any) -> None:
@@ -1786,6 +1794,57 @@ def test_an_element_turned_inside_out_is_placed_and_the_curved_try_s_words_kept(
     assert len(curved) == 2, why
     assert curved[1].startswith("CalculiX found an element of the curved mesh"), why
     assert ": 1 element(s), the first in" in curved[1], why
+
+
+def _forced_traced(cae: Any, mode: str, *args: str) -> tuple[int, dict[str, Any], list[str]]:
+    """`load` with one step forced, as `forced`, and the steps it said as it went."""
+    shutil.copy(CASES / "load_forced.py", cae.work / "load_forced.py")
+    said: list[str] = []
+    done = host.run(["load_forced.py", mode, *args], cae.work, python=True,
+                    image=host.CAE_IMAGE, trace=said)  # fmt: skip
+    found = re.search(r"saved: (\S+)\.txt and \.json", done.stdout)
+    assert found, done.stdout + done.stderr
+    record = json.loads((cae.work / f"{found.group(1)}.json").read_text())
+    return done.returncode, record, [line for line in said if line.startswith(host.STEP_LINE)]
+
+
+def test_a_part_on_its_own_turned_inside_out_curved_is_read_straight_in_two_passes(
+    cae: Any,
+) -> None:
+    """mqucifer/print-shop#346, the cold review: a part on its own in the second pass whose
+    curved mesh CalculiX finds an element of turned inside out was read straight on main; the
+    words placing it read the joined shape's faces, which a part on its own hadn't, and the
+    whole --parts was NO ANSWER. It's read straight again, and says why."""
+    code, record, steps = _forced_traced(
+        cae, "alone-inverted", "load", "capped/capped.json", *CAPPED, "--parts"
+    )
+    assert code == 0 and record["verdict"] == "OK", record["why"]
+    assert any("meshing again straight-sided, as the curved mesh didn't stand: CalculiX found "
+               "an element turned inside out" in line for line in steps), steps  # fmt: skip
+
+
+def test_placing_an_element_turned_inside_out_never_stops_the_straight_try(cae: Any) -> None:
+    """mqucifer/print-shop#346, the cold review: placing an element turned inside out is only
+    words, so where it fails the curved try is still turned away, the straight one still runs,
+    and both say how many there were."""
+    answer = forced(cae, "unplaceable", "load", "capped/capped.json", *CAPPED)
+    assert answer.verdict == "NO ANSWER" and answer.code == 2, answer.text
+    why = answer.record["why"]
+    assert why.startswith("CalculiX solved nothing: an element of the mesh, at most 3 mm, is "
+                          "turned inside out: 1 element(s). "), why  # fmt: skip
+    assert why.endswith("; before it, the curved mesh: CalculiX found an element of the curved "
+                        "mesh, at most 3 mm, turned inside out: 1 element(s)"), why  # fmt: skip
+
+
+def test_where_the_search_itself_fails_gmsh_s_words_are_said_with_it(cae: Any) -> None:
+    """mqucifer/print-shop#346, the cold review: where the search for faces closer than the
+    mesh's sag stops on an error of its own, the reply says it and what gmsh had said."""
+    answer = forced(cae, "search-fails", "load", "capped/capped.json", *CAPPED)
+    assert answer.verdict == "NO ANSWER" and answer.code == 2, answer.text
+    why = answer.record["why"]
+    assert why.startswith("load stopped finding faces closer than the mesh's sag, where gmsh "
+                          "refused them: ValueError: forced by the test"), why  # fmt: skip
+    assert "; gmsh had refused the mesh: PLC Error" in why, why
 
 
 def test_where_gmsh_still_refuses_the_faces_nearest_its_crossing_are_named(cae: Any) -> None:

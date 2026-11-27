@@ -78,6 +78,16 @@ def test_each_face_has_its_least_size_graded_to_the_mesh_s_and_nothing_where_non
     assert f"VIn = {close_faces.LEAST:.6g};" in fields([Close(1, 2, 0.0, faces={1: 0.0})], 3.0)
 
 
+def test_the_finer_mesh_s_faces_are_its_share_of_the_size_that_meshes_them() -> None:
+    """mqucifer/print-shop#346, the cold review: on the finer of a solve's two meshes, each
+    close pair's face is meshed at `scale` of its size, and the coarser at all of it."""
+    pair = [Close(7, 11, 0.15, faces={7: 0.9})]
+    assert f"VIn = {stepped(0.9):.6g};" in fields(pair, 3.0)
+    assert f"VIn = {stepped(0.9 / 1.5):.6g};" in fields(pair, 3.0, 1 / 1.5)
+    assert f"VIn = {close_faces.LEAST:g};" in fields([Close(1, 2, 0.01, faces={1: 0.12})], 3.0,
+                                                      1 / 1.5)  # fmt: skip
+
+
 def test_a_pair_that_would_need_elements_finer_than_the_least_is_the_parts_to_fix() -> None:
     fine = Close(1, 2, 0.15, faces={1: 0.7})
     hair = Close(3, 4, 2e-4, faces={3: 0.03})
