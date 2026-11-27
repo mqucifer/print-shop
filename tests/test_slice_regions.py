@@ -111,6 +111,31 @@ def test_stood_on_its_side_the_layers_run_along_another_own_axis() -> None:
     assert pose.plate_angle(90.0) == pytest.approx(0.0)
 
 
+@pytest.mark.parametrize("turn,heights", [
+    ((0.0, 0.0, 0.0), (0.0, 2.0)),
+    # Upside down: own z 0 to 2 is the top 2 mm as it prints (mqucifer/print-shop#341's review).
+    ((180.0, 0.0, 0.0), (8.0, 10.0)),
+])
+def test_a_band_of_layers_in_the_parts_own_axes_is_placed_either_way_up(
+    turn: tuple[float, float, float], heights: tuple[float, float]
+) -> None:
+    box = trimesh.creation.box((80, 20, 10))
+    box.apply_translation((40, 10, 5))
+    assert Pose.of(box, turn).heights(Layers(0.0, 2.0)) == pytest.approx(heights)
+
+
+def test_a_pose_that_stands_another_axis_up_than_the_parts_layers_is_refused(
+    tmp_path: Path,
+) -> None:
+    """The part's layers are along z in its assembly; stood on its side, they'd run along y, and
+    its infill angle and bands would mean other ways to the slice than to `load`."""
+    with pytest.raises(ValueError, match="stands its own y up, but its layers are along z"):
+        slice_regions(bar(tmp_path), read({"regions": [{"name": "r", "layers": [0, 2],
+                                                        "infill": 40}]}),
+                      STORE_PROFILES, tmp_path / "out", (90.0, 0.0, 0.0), layers="z",
+                      binary=tmp_path / "no-orca")
+
+
 def test_a_part_orca_turned_on_the_plate_isnt_read_against_its_turn() -> None:
     assert _item_shift('<build><item objectid="2" transform="1 0 0 0 1 0 0 0 1 88 118 0"/>'
                        "</build>") == (88.0, 118.0)
@@ -154,7 +179,7 @@ def test_each_region_is_added_to_orcas_project_as_orca_stores_a_modifier(tmp_pat
     out = tmp_path / "regions.3mf"
     _add_regions(_exported(tmp_path / "part.3mf"), out,
                  [(dense, box, {"sparse_infill_density": "60%"})],
-                 [(band, {"extruder": "0", "layer_height": "0.2", "wall_loops": "4"})])
+                 [(band, {"extruder": "0", "layer_height": "0.2", "wall_loops": "4"}, (3.0, 5.0))])
     with zipfile.ZipFile(out) as z:
         model = z.read("3D/3dmodel.model").decode()
         settings = z.read("Metadata/model_settings.config").decode()

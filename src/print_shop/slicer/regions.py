@@ -261,6 +261,18 @@ class Pose:
         own = np.asarray(self.matrix)[:3, :3].T @ way
         return round(math.degrees(math.atan2(own[(a + 2) % 3], own[(a + 1) % 3])), 6) % 360
 
+    def heights(self, band: Layers) -> tuple[float, float]:
+        """A `layers` region, in the part's own coordinates along its layers axis, as heights
+        above the bed in this pose, either way up."""
+        layers = self.layers()
+        if layers is None:
+            raise ValueError("the pose doesn't stand one of the part's own axes up, so a band "
+                             "of its layers isn't whole layers")
+        a = "xyz".index(layers)
+        matrix = np.asarray(self.matrix)
+        ends = sorted(float(matrix[2, a] * v + matrix[2, 3]) for v in (band.low, band.high))
+        return round(ends[0], 6), round(ends[1], 6)
+
     def to_plate(self, points: np.ndarray) -> np.ndarray:
         """Points of the part's own file on the plate."""
         at = np.asarray(points, dtype=float)
@@ -318,6 +330,8 @@ class Project:
     regions: tuple[Region, ...] = ()
     #: Each region's settings on the plate, as written into the project.
     written: dict[str, dict[str, str]] = field(default_factory=dict)
+    #: Each `layers` region's heights above the bed, in this pose.
+    bands: dict[str, tuple[float, float]] = field(default_factory=dict)
 
 
 def _run(cmd: list[str], cwd: str, timeout_s: float) -> tuple[int, str, str]:
@@ -384,7 +398,8 @@ def _item_shift(model: str) -> tuple[float, float]:
 
 
 def _add_regions(src: Path, out: Path, volumes: list[tuple[Region, trimesh.Trimesh,
-                 dict[str, str]]], ranges: list[tuple[Region, dict[str, str]]]) -> None:
+                 dict[str, str]]],
+                 ranges: list[tuple[Region, dict[str, str], tuple[float, float]]]) -> None:
     """Orca's project `src` with the regions added, as Orca 2.4.2 stores them, written to
     `out`. Only the project's own XML is added to: nothing Orca wrote is rewritten."""
     with zipfile.ZipFile(src) as z:
@@ -435,12 +450,10 @@ def _add_regions(src: Path, out: Path, volumes: list[tuple[Region, trimesh.Trime
             "</Relationships>", ours + "</Relationships>").encode()
     if ranges:
         lines = []
-        for region, own in ranges:
-            assert isinstance(region.shape, Layers)
+        for _, own, (low, high) in ranges:
             options = "".join(f'<option opt_key="{_attr(k)}">{_attr(v)}</option>'
                               for k, v in own.items())
-            lines.append(f' <range min_z="{region.shape.low:g}" max_z="{region.shape.high:g}">'
-                         f"{options}</range>")
+            lines.append(f' <range min_z="{low:g}" max_z="{high:g}">{options}</range>')
         files["Metadata/layer_config_ranges.xml"] = (
             '<?xml version="1.0" encoding="utf-8"?>\n<objects>\n'
             f'<object id="{_OBJECT}">\n' + "\n".join(lines) + "\n</object>\n</objects>\n"
@@ -456,12 +469,17 @@ def _add_regions(src: Path, out: Path, volumes: list[tuple[Region, trimesh.Trime
 def write_project(
     stl: Path, printed: Printed, profiles: SlicerProfiles, outdir: Path,
     rotation_deg: tuple[float, float, float] = AXIS_ALIGNED[0], base: Path | None = None,
-    binary: Path | str | None = None, timeout_s: float = 600.0,
+    binary: Path | str | None = None, timeout_s: float = 600.0, layers: str | None = None,
 ) -> tuple[Project, Project]:
     """The part posed, as Orca's own project with its regions, and the same without them.
 
     `stl` is the part in its own file's axes, as the regions are; `base` is where a mesh region's
-    file is named from (the assembly or job file's folder).
+    file is named from (the assembly or job file's folder). `layers`, where the part's assembly
+    gives it, is the own axis its layers run along: a pose that stands another up is refused, as
+    its infill angle and bands would mean other ways to the slice than to `load`.
+
+    Raises:
+        ValueError: If the pose doesn't stand `layers` up, or a region can't be placed.
     """
     binary_path = Path(binary) if binary is not None else _DEFAULT_BINARY
     outdir.mkdir(parents=True, exist_ok=True)
@@ -469,6 +487,12 @@ def write_project(
     if not isinstance(loaded, trimesh.Trimesh):
         raise ValueError(f"{stl.name} isn't one mesh")
     pose = Pose.of(loaded, rotation_deg)
+    if layers is not None and pose.layers() != layers:
+        raise ValueError(f"the pose {rotation_deg} stands its own {pose.layers() or 'none'} up, "
+                         f"but its layers are along {layers}: its infill angle and bands would "
+                         "mean other ways to the slice than to load")
+    bands = {r.name: pose.heights(r.shape) for r in printed.regions
+             if isinstance(r.shape, Layers)}
     posed = loaded.copy()
     posed.apply_transform(pose.matrix)
     posed_path = outdir / f"{stl.stem}_posed.stl"
@@ -500,7 +524,7 @@ def write_project(
     pose = Pose(pose.rotation_deg, pose.matrix, shift)
 
     volumes: list[tuple[Region, trimesh.Trimesh, dict[str, str]]] = []
-    ranges: list[tuple[Region, dict[str, str]]] = []
+    ranges: list[tuple[Region, dict[str, str], tuple[float, float]]] = []
     shapes: dict[str, trimesh.Trimesh] = {}
     written: dict[str, dict[str, str]] = {}
     for region in printed.regions:
@@ -514,7 +538,7 @@ def write_project(
         if isinstance(region.shape, Layers):
             # Orca 2.4.2 crashes on a range without its own layer height (exit 139).
             keys = {"extruder": "0", "layer_height": f"{settings.layer_height:g}", **keys}
-            ranges.append((region, keys))
+            ranges.append((region, keys, bands[region.name]))
         else:
             mesh = _shape_mesh(region, base)
             mesh.apply_transform(pose.matrix)
@@ -527,8 +551,9 @@ def write_project(
     without = outdir / "part.3mf"
     without.write_bytes(orca_own.read_bytes())
     return (Project(with_regions, pose, shapes, settings, part_profiles, posed,
-                    printed.regions, written),
-            Project(without, pose, shapes, settings, part_profiles, posed, printed.regions))
+                    printed.regions, written, bands),
+            Project(without, pose, shapes, settings, part_profiles, posed, printed.regions,
+                    bands=bands))
 
 
 def slice_project(project: Project, outdir: Path, binary: Path | str | None = None,
@@ -692,7 +717,8 @@ def _masks(project: Project, regions: tuple[Region, ...], k: int, layer: gcode.L
     def holds(r: Region) -> np.ndarray:
         if isinstance(r.shape, Layers):
             mask = grid.empty()
-            if r.shape.low <= mid <= r.shape.high:
+            low, high = project.bands[r.name]
+            if low <= mid <= high:
                 mask[:] = True
             return mask
         return _section_mask(project.shapes[r.name], mid, grid, project.pose.shift)
@@ -916,7 +942,7 @@ def _round(value: float | None) -> float | None:
 def slice_regions(
     stl: Path, printed: Printed, profiles: SlicerProfiles, outdir: Path,
     rotation_deg: tuple[float, float, float] = AXIS_ALIGNED[0], base: Path | None = None,
-    binary: Path | str | None = None, timeout_s: float = 600.0,
+    binary: Path | str | None = None, timeout_s: float = 600.0, layers: str | None = None,
 ) -> RegionsSlice:
     """The part sliced by Orca with its regions as Orca's own modifiers, and without them, and
     each region read from the layers.
@@ -928,7 +954,7 @@ def slice_regions(
         ValueError: If a region can't be put into the project, saying which and why.
     """
     with_regions, without = write_project(stl, printed, profiles, outdir, rotation_deg, base,
-                                          binary, timeout_s)
+                                          binary, timeout_s, layers)
     sliced_path = slice_project(with_regions, outdir / "with", binary, timeout_s)
     base_path = slice_project(without, outdir / "without", binary, timeout_s)
     sliced = gcode.read(sliced_path, keep_lines=True)
