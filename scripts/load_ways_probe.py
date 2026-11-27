@@ -62,7 +62,7 @@ def inner(assembly_file: str) -> None:  # pragma: no cover - runs in the image
         )
     said("faces counted")
     # Each part's faces read as the ways read them, twice: whether reading them keeps anything.
-    for k, solid in enumerate(placed, 1):
+    for solid in placed:
         found = load_through.rows(solid)
         del found
     said("each part's faces read once, as `rows` reads them")
