@@ -331,6 +331,8 @@ def work(root: Path, design: DesignLedger, once: bool = False, ledger: Path | No
         # Holding the lock, no other worker runs: what's still running died with its worker.
         for stale in study_orders.orphaned(design):
             print(f"order {stale}: its worker ended before it did, so it's failed", flush=True)
+        for line in study_orders.unstick(design):
+            print(line, flush=True)
         while True:
             order = study_orders.claim(design)
             if order is None:
@@ -441,6 +443,7 @@ def main(argv: list[str] | None = None) -> int:
     again.add_argument("order", type=int, help="the order, as `queued` lists it")
     again.add_argument("--root", type=Path, required=True, help="the design runs' root")
     again.add_argument("--by", required=True, help='"Sponsor: WHO" or "operator: WHO"')
+    sub.add_parser("orders-format", help="the queued orders' format this code reads")
     queued = sub.add_parser("queued", help="each queued study, and what came of it")
     queued.add_argument("--root", type=Path, required=True, help="the design runs' root")
     work = sub.add_parser("work", help="run the queued studies, one at a time")
@@ -450,6 +453,10 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     if args.command == "run":
         return study(args)
+    if args.command == "orders-format":
+        # What a worker started from this checkout can run (`orders.start_worker`).
+        print(study_orders.ORDERS_FORMAT)
+        return 0
     if args.command in ("queue", "retry", "queued", "work"):
         return _orders(args)
     with Ledger(args.ledger or ledger_path()) as ledger:

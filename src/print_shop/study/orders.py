@@ -24,9 +24,9 @@ follow. Nothing here reads or writes the shop's ledger: the study does, as it al
 
 from __future__ import annotations
 
+import contextlib
 import fcntl
 import json
-import re
 import shlex
 import shutil
 import sqlite3
@@ -316,6 +316,13 @@ def _ready(ledger: DesignLedger, order: int, part: str, copy: Callable[[Path], d
         ledger.change("UPDATE study_orders SET status='failed', said=?, ended_at=? WHERE id=?",
                       f"its inputs couldn't be copied: {exc}", _now(), order)
         return None, f"order {order} failed: its inputs couldn't be copied: {exc}"
+    except BaseException as exc:
+        # Stopped mid-copy, as by Ctrl-C or SIGTERM: never left `copying`, which nothing claims.
+        with contextlib.suppress(Exception):
+            ledger.change("UPDATE study_orders SET status='failed', said=?, ended_at=? WHERE "
+                          "id=?", f"stopped by {type(exc).__name__} as its inputs were copied",
+                          _now(), order)
+        raise
     ledger.change("UPDATE study_orders SET inputs=?, manifest=?, status='queued' WHERE id=? AND "
                   "status='copying'", str(inputs), json.dumps(manifest), order)
     return order, ""
@@ -356,6 +363,7 @@ def retry(ledger: DesignLedger, order_id: int, by: str) -> tuple[int | None, str
         ValueError: If there's no such order, or its inputs aren't as they were copied.
     """
     ensure(ledger)
+    unstick(ledger)
     rows = ledger.rows("SELECT * FROM study_orders WHERE id=?", order_id)
     if not rows:
         raise ValueError(f"no order {order_id}")
@@ -404,6 +412,7 @@ def on_approval(folder: Path, ledger: DesignLedger, by: str,
         ValueError: If its load needs name no assembly there is, or a file it names isn't there.
     """
     ensure(ledger)
+    stuck = unstick(ledger)
     folder = folder.resolve()
     approved = approved_mod.read(folder, ledger)
     needs = _load_needs(approved)
@@ -430,6 +439,7 @@ def on_approval(folder: Path, ledger: DesignLedger, by: str,
         said.append(words)
         if found is not None:
             made.append(found)
+    said = [*stuck, *said]
     text = ("; ".join(said) if said
             else "no part of the assembly is among its approved files: no study queued")
     if skipped:
@@ -452,6 +462,7 @@ def flag(folder: Path, ledger: DesignLedger, by: str, files: list[str] | None = 
             or a file the assembly names isn't there.
     """
     ensure(ledger)
+    stuck = unstick(ledger)
     folder = folder.resolve()
     approved = approved_mod.read(folder, ledger)
     every = _delivered(approved)
@@ -469,7 +480,7 @@ def flag(folder: Path, ledger: DesignLedger, by: str, files: list[str] | None = 
                          "none there is")
     read = _Assembly.read(where) if where is not None and where.is_file() else None
     sides = _sides(approved)
-    done = []
+    done: list[tuple[int | None, str]] = [(None, line) for line in stuck]
     for f in every:
         named = read.part_of(f) if read is not None else None
         part = str(named["name"]) if named else Path(_named(f)).stem
@@ -504,6 +515,33 @@ def queued(ledger: DesignLedger) -> bool:
     """Whether any order is queued."""
     ensure(ledger)
     return bool(ledger.rows("SELECT 1 FROM study_orders WHERE status='queued' LIMIT 1"))
+
+
+#: A row still `copying` this long after it was queued, in s, was left so by a queuing that
+#: died mid-copy (a kill, a ledger locked past its timeout): it's failed wherever a queue or a
+#: worker looks, saying so. A copy takes seconds.
+COPYING_STALE = 30 * 60
+
+
+def unstick(ledger: DesignLedger, now: datetime | None = None) -> list[str]:
+    """Each order left `copying` past `COPYING_STALE`, failed, and a line for each saying so."""
+    ensure(ledger)
+    when = now or datetime.now(UTC)
+    said = []
+    for row in ledger.rows("SELECT id, part, queued_at FROM study_orders WHERE status='copying'"):
+        try:
+            queued_at = datetime.fromisoformat(row["queued_at"])
+        except ValueError:
+            continue
+        if (when - queued_at).total_seconds() < COPYING_STALE:
+            continue
+        ledger.change("UPDATE study_orders SET status='failed', said=?, ended_at=? WHERE id=? AND "
+                      "status='copying'", "left copying by a queuing that ended mid-copy: "
+                      f"`settings_study.py queue` or the approval queues {row['part']} again",
+                      _now(), row["id"])
+        said.append(f"order {row['id']} was left copying since {row['queued_at']}, so it's "
+                    "failed")
+    return said
 
 
 def orphaned(ledger: DesignLedger) -> list[int]:
@@ -555,18 +593,21 @@ def checkout(env: dict[str, str]) -> Path:
 WATCH = 2.0
 
 
-def format_of(home: Path) -> int | None:
-    """The orders' format a checkout's code reads (`ORDERS_FORMAT`), or None where it reads
-    none: one from before these orders."""
-    path = home / "src" / "print_shop" / "study" / "orders.py"
-    if not path.is_file():
+def format_of(python: Path, script: Path) -> int | None:
+    """The orders' format a checkout's script reads, as it answers `orders-format` itself, or
+    None where it doesn't: a script from before these orders has no such command."""
+    try:
+        done = subprocess.run([str(python), str(script), "orders-format"], capture_output=True,
+                              text=True, timeout=120, check=False, stdin=subprocess.DEVNULL)
+    except (OSError, subprocess.TimeoutExpired):
         return None
-    found = re.search(r"^ORDERS_FORMAT = (\d+)$", path.read_text(encoding="utf-8"), re.MULTILINE)
-    return int(found.group(1)) if found else None
+    words = done.stdout.split()
+    return int(words[-1]) if done.returncode == 0 and words and words[-1].isdigit() else None
 
 
 def start_worker(root: Path, env: dict[str, str] | None = None,
-                 spawn: Callable[..., Any] = subprocess.Popen, watch: float = WATCH) -> str:
+                 spawn: Callable[..., Any] = subprocess.Popen, watch: float = WATCH,
+                 asked: Callable[[Path, Path], int | None] = format_of) -> str:
     """A worker for `root`'s queued studies, started detached where none runs: so a study runs
     by itself after the approval that queued it, and the approval doesn't wait for it. It runs
     until nothing is queued, writing to `root/studies.log`, from a stated checkout (`checkout`)
@@ -586,7 +627,7 @@ def start_worker(root: Path, env: dict[str, str] | None = None,
     if not script.is_file() or not python.is_file():
         return (f"no worker started: {home} has no {script.name} or no .venv: set "
                 f"{CHECKOUT_KEY}, or run `scripts/settings_study.py work --root {root}`")
-    found = format_of(home)
+    found = asked(python, script)
     if found is None or found < ORDERS_FORMAT:
         return (f"no worker started: the checkout at {home} is older than these orders (it reads "
                 f"{'none' if found is None else f'format {found}'}, these are {ORDERS_FORMAT}); "

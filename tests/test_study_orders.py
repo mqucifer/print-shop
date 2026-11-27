@@ -649,6 +649,17 @@ def test_a_relative_root_is_stored_whole(
     assert order.needs is not None and order.needs.is_absolute()
 
 
+def _answers(python: Path, script: Path) -> int | None:
+    """A made-up checkout's `orders-format`, as its own code would answer it."""
+    del python
+    source = script.parents[1] / "src" / "print_shop" / "study" / "orders.py"
+    if not source.is_file():
+        return None
+    found = [line.split("=")[1].strip() for line in source.read_text().splitlines()
+             if line.startswith("ORDERS_FORMAT")]
+    return int(found[0]) if found else None
+
+
 def test_a_worker_starts_detached_from_a_stated_checkout_never_a_worktree(
     tmp_path: Path,
 ) -> None:
@@ -670,7 +681,7 @@ def test_a_worker_starts_detached_from_a_stated_checkout_never_a_worktree(
     (home / ".git").mkdir()
     root = tmp_path / "root"
     root.mkdir()
-    said = orders.start_worker(root, {"STUDY_CHECKOUT": str(home)}, spawn)
+    said = orders.start_worker(root, {"STUDY_CHECKOUT": str(home)}, spawn, asked=_answers)
     ((argv, kwargs),) = spawned
     assert argv == [str(home / ".venv" / "bin" / "python"),
                     str(home / "scripts" / "settings_study.py"), "work", "--root", str(root)]
@@ -679,7 +690,8 @@ def test_a_worker_starts_detached_from_a_stated_checkout_never_a_worktree(
     held = (root / "studies.lock").open("a")
     fcntl.flock(held, fcntl.LOCK_EX | fcntl.LOCK_NB)
     try:
-        assert orders.start_worker(root, {"STUDY_CHECKOUT": str(home)}, spawn).startswith(
+        assert orders.start_worker(root, {"STUDY_CHECKOUT": str(home)}, spawn,
+                                   asked=_answers).startswith(
             "a worker already runs")
     finally:
         fcntl.flock(held, fcntl.LOCK_UN)
@@ -688,7 +700,8 @@ def test_a_worker_starts_detached_from_a_stated_checkout_never_a_worktree(
     shutil.copytree(home, worktree)
     shutil.rmtree(worktree / ".git")
     (worktree / ".git").write_text("gitdir: elsewhere\n")
-    said = orders.start_worker(root, {"STUDY_CHECKOUT": str(worktree)}, spawn)
+    said = orders.start_worker(root, {"STUDY_CHECKOUT": str(worktree)}, spawn,
+                               asked=_answers)
     assert said.startswith(f"no worker started: {worktree} is a worktree") and len(spawned) == 1
     assert orders.checkout({}).joinpath("scripts", "settings_study.py").is_file()
     assert not (orders.checkout({}) / ".git").is_file(), "this checkout's main one"
@@ -806,21 +819,33 @@ def test_no_worker_is_said_to_start_from_a_checkout_older_than_the_orders_or_tha
         return made
 
     old = _checkout(tmp_path / "old", None)
-    said = orders.start_worker(root, {"STUDY_CHECKOUT": str(old)}, spawn(None), watch=0.2)
+    said = orders.start_worker(root, {"STUDY_CHECKOUT": str(old)}, spawn(None), watch=0.2,
+                               asked=_answers)
     assert said.startswith(f"no worker started: the checkout at {old} is older than these "
                            "orders (it reads none") and "pull it" in said and spawned == []
     behind = _checkout(tmp_path / "behind", orders.ORDERS_FORMAT - 1)
-    said = orders.start_worker(root, {"STUDY_CHECKOUT": str(behind)}, spawn(None), watch=0.2)
+    said = orders.start_worker(root, {"STUDY_CHECKOUT": str(behind)}, spawn(None), watch=0.2,
+                               asked=_answers)
     assert f"reads format {orders.ORDERS_FORMAT - 1}" in said and spawned == []
     home = _checkout(tmp_path / "home", orders.ORDERS_FORMAT)
-    said = orders.start_worker(root, {"STUDY_CHECKOUT": str(home)}, spawn(2), watch=0.2)
+    said = orders.start_worker(root, {"STUDY_CHECKOUT": str(home)}, spawn(2), watch=0.2,
+                               asked=_answers)
     assert said == (f"no worker started: the one started from {home} ended at once, exit 2: "
                     f"see {root / 'studies.log'}")
-    said = orders.start_worker(root, {"STUDY_CHECKOUT": str(home)}, spawn(3), watch=0.2)
+    said = orders.start_worker(root, {"STUDY_CHECKOUT": str(home)}, spawn(3), watch=0.2,
+                               asked=_answers)
     assert said.startswith("a worker already runs")
-    said = orders.start_worker(root, {"STUDY_CHECKOUT": str(home)}, spawn(None), watch=0.2)
+    said = orders.start_worker(root, {"STUDY_CHECKOUT": str(home)}, spawn(None), watch=0.2,
+                               asked=_answers)
     assert said.startswith(f"a worker started for them from {home}")
-    assert orders.format_of(Path(__file__).resolve().parents[1]) == orders.ORDERS_FORMAT
+    # Asked of a real script: this checkout's answers, and one from before the orders doesn't.
+    import sys  # noqa: PLC0415
+
+    here = Path(__file__).resolve().parents[1] / "scripts" / "settings_study.py"
+    assert orders.format_of(Path(sys.executable), here) == orders.ORDERS_FORMAT
+    before = tmp_path / "before.py"
+    before.write_text("import sys\nsys.exit('usage: no orders-format')\n")
+    assert orders.format_of(Path(sys.executable), before) is None
 
 
 def test_a_flagged_order_with_no_cases_takes_its_material_from_the_assembly(
@@ -954,3 +979,54 @@ def test_the_copy_is_held_to_the_approvals_own_hash(
     assert "its inputs couldn't be copied:" in said and "isn't as it was approved" in said
     tampered = next(o for o in orders.orders(ledger) if o.file == group.files[0].path)
     assert tampered.status == "failed"
+
+
+# --------------------------------------------------------------------------
+# mqucifer/print-shop#372's second re-review
+# --------------------------------------------------------------------------
+
+
+def test_a_copy_stopped_midway_leaves_its_order_failed_never_copying(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Ctrl-C, or SIGTERM as rounds.py turns it into one, as an order's inputs are copied."""
+    folder, ledger = _furniture_run(tmp_path)
+
+    def stopped(inputs: Path, f: Any, assembly: Any) -> dict[str, str]:
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(orders, "_snapshot", stopped)
+    with pytest.raises(KeyboardInterrupt):
+        orders.on_approval(folder, ledger, "on approval by sponsor")
+    (order,) = orders.orders(ledger)
+    assert (order.status, order.said) == (
+        "failed", "stopped by KeyboardInterrupt as its inputs were copied")
+
+
+def test_a_row_left_copying_too_long_is_failed_wherever_a_queue_or_a_worker_looks(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str],
+) -> None:
+    """A kill mid-copy leaves a row `copying`: past COPYING_STALE it's failed, said, and its part
+    queued again; one copying now is left alone."""
+    from datetime import UTC, datetime, timedelta  # noqa: PLC0415
+
+    folder, ledger = _furniture_run(tmp_path)
+    old = (datetime.now(UTC) - timedelta(seconds=orders.COPYING_STALE + 60)).isoformat(
+        timespec="seconds")
+    orders.ensure(ledger)
+    for name, when in (("upper", old), ("lower", datetime.now(UTC).isoformat())):
+        ledger.change("INSERT INTO study_orders (run, approval, part, kind, attempt, file, "
+                      "sha256, by, queued_at, status) VALUES ('table-1', 1, ?, 'load', 1, 'f', "
+                      "'s', 'a test', ?, 'copying')", name, when)
+    made, said = orders.on_approval(folder, ledger, "on approval by sponsor")
+    assert said.startswith(f"order 1 was left copying since {old}, so it's failed; order 3 "
+                           "queued for upper, its attempt 2; order 2 is copying already, for "
+                           "lower")
+    stuck = orders.orders(ledger)[0]
+    assert stuck.status == "failed" and stuck.said.startswith("left copying by a queuing that")
+    assert made == [3]
+    ledger.change("UPDATE study_orders SET queued_at=? WHERE id=2", old)
+    script = _worker(monkeypatch)
+    script.work(tmp_path, DesignLedger(tmp_path / "ledger.sqlite"), run_study=lambda w: 0)
+    assert f"order 2 was left copying since {old}, so it's failed" in capsys.readouterr().out
+    assert orders.orders(ledger)[1].status == "failed"
