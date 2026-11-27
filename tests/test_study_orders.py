@@ -537,8 +537,9 @@ def test_an_order_whose_worker_died_is_failed_by_the_next_and_an_interrupt_is_sa
     with pytest.raises(KeyboardInterrupt):
         script.work(tmp_path, DesignLedger(tmp_path / "ledger.sqlite"), run_study=stopped)
     died, interrupted = orders.orders(ledger)
-    assert (died.status, died.said) == ("failed", "its worker ended before it did: queue it "
-                                                  "again to study it")
+    assert (died.status, died.said) == ("failed", "its worker ended before it did: "
+                                                  "`settings_study.py retry 1 --root ROOT --by "
+                                                  "WHO` queues it again")
     assert (interrupted.status, interrupted.said) == (
         "failed", "stopped by KeyboardInterrupt as it was studied")
     assert not orders.worker_running(tmp_path), "its lock let go"
@@ -661,6 +662,9 @@ def test_a_worker_starts_detached_from_a_stated_checkout_never_a_worktree(
     home = tmp_path / "checkout"
     (home / "scripts").mkdir(parents=True)
     (home / "scripts" / "settings_study.py").write_text("")
+    (home / "src" / "print_shop" / "study").mkdir(parents=True)
+    (home / "src" / "print_shop" / "study" / "orders.py").write_text(
+        f"ORDERS_FORMAT = {orders.ORDERS_FORMAT}\n")
     (home / ".venv" / "bin").mkdir(parents=True)
     (home / ".venv" / "bin" / "python").write_text("")
     (home / ".git").mkdir()
@@ -740,3 +744,213 @@ def test_a_flagged_study_with_real_slices_keeps_to_the_grams_allowed(tmp_path: P
     assert c2.passes and result.recommended == "c2"
     text = table(result, "bar", [])
     assert "## Ruled out by the Sponsor's limits" in text and "- c1:" in text
+
+
+# --------------------------------------------------------------------------
+# mqucifer/print-shop#372's re-review
+# --------------------------------------------------------------------------
+
+
+def test_an_order_cant_be_claimed_until_its_inputs_are_copied(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    folder, ledger = _furniture_run(tmp_path)
+    real = orders._snapshot
+    seen: list[Any] = []
+
+    def snapshot(inputs: Path, f: Any, assembly: Any) -> dict[str, str]:
+        seen.append(orders.claim(ledger))  # a worker rechecking as it's copied
+        return real(inputs, f, assembly)
+
+    monkeypatch.setattr(orders, "_snapshot", snapshot)
+    orders.on_approval(folder, ledger, "on approval by sponsor")
+    assert seen[0] is None, "copying, not claimable"
+    claimed = orders.claim(ledger)
+    assert claimed is not None and claimed.inputs is not None and claimed.manifest
+
+
+def _checkout(where: Path, orders_format: int | None) -> Path:
+    (where / "scripts").mkdir(parents=True)
+    (where / "scripts" / "settings_study.py").write_text("")
+    (where / ".venv" / "bin").mkdir(parents=True)
+    (where / ".venv" / "bin" / "python").write_text("")
+    (where / ".git").mkdir()
+    if orders_format is not None:
+        (where / "src" / "print_shop" / "study").mkdir(parents=True)
+        (where / "src" / "print_shop" / "study" / "orders.py").write_text(
+            f"ORDERS_FORMAT = {orders_format}\n")
+    return where
+
+
+class _Child:
+    def __init__(self, code: int | None) -> None:
+        self.code = code
+
+    def poll(self) -> int | None:
+        return self.code
+
+
+def test_no_worker_is_said_to_start_from_a_checkout_older_than_the_orders_or_that_ends_at_once(
+    tmp_path: Path,
+) -> None:
+    """mqucifer/print-shop#372's re-review: main's settings_study.py had no `work`, so the child
+    exited 2 into the log while the approval said a worker started."""
+    root = tmp_path / "root"
+    root.mkdir()
+    spawned: list[list[str]] = []
+
+    def spawn(code: int | None) -> Any:
+        def made(argv: list[str], **_: Any) -> _Child:
+            spawned.append(argv)
+            return _Child(code)
+        return made
+
+    old = _checkout(tmp_path / "old", None)
+    said = orders.start_worker(root, {"STUDY_CHECKOUT": str(old)}, spawn(None), watch=0.2)
+    assert said.startswith(f"no worker started: the checkout at {old} is older than these "
+                           "orders (it reads none") and "pull it" in said and spawned == []
+    behind = _checkout(tmp_path / "behind", orders.ORDERS_FORMAT - 1)
+    said = orders.start_worker(root, {"STUDY_CHECKOUT": str(behind)}, spawn(None), watch=0.2)
+    assert f"reads format {orders.ORDERS_FORMAT - 1}" in said and spawned == []
+    home = _checkout(tmp_path / "home", orders.ORDERS_FORMAT)
+    said = orders.start_worker(root, {"STUDY_CHECKOUT": str(home)}, spawn(2), watch=0.2)
+    assert said == (f"no worker started: the one started from {home} ended at once, exit 2: "
+                    f"see {root / 'studies.log'}")
+    said = orders.start_worker(root, {"STUDY_CHECKOUT": str(home)}, spawn(3), watch=0.2)
+    assert said.startswith("a worker already runs")
+    said = orders.start_worker(root, {"STUDY_CHECKOUT": str(home)}, spawn(None), watch=0.2)
+    assert said.startswith(f"a worker started for them from {home}")
+    assert orders.format_of(Path(__file__).resolve().parents[1]) == orders.ORDERS_FORMAT
+
+
+def test_a_flagged_order_with_no_cases_takes_its_material_from_the_assembly(
+    tmp_path: Path,
+) -> None:
+    """mqucifer/print-shop#372's re-review: a PETG part flagged with no cases was studied in
+    `*`'s filament."""
+    folder, ledger = _furniture_run(tmp_path)
+    orders.flag(folder, ledger, "Sponsor: M", files=["leg_lower"])
+    order = orders.orders(ledger)[-1]
+    assert (order.kind, order.material, order.cases) == ("flagged", "petg", ())
+    words = orders.prepare(order, folder, {**ENV, "STUDY_FILAMENTS": "petg=Elegoo PETG; "
+                                                                      "*=Elegoo PLA"})
+    assert words[words.index("--filament") + 1] == "Elegoo PETG"
+
+
+def test_an_order_is_retried_as_it_was(tmp_path: Path) -> None:
+    """mqucifer/print-shop#372's re-review: a failed load order could be queued again only as
+    flagged, without its load cases."""
+    folder, ledger = _furniture_run(tmp_path)
+    orders.on_approval(folder, ledger, "on approval by sponsor", Limits.of({"most_grams": 90}))
+    first = orders.claim(ledger)
+    assert first is not None
+    orders.finish(ledger, first, "failed", "Orca refused it")
+    made, said = orders.retry(ledger, first.id, "operator: a test")
+    assert made == 3 and said == "order 3 queued for upper as order 1 was, its attempt 2"
+    again = orders.orders(ledger)[-1]
+    assert (again.kind, again.needs, again.cases, again.limits, again.attempt) == (
+        "load", first.needs, first.cases, first.limits, 2)
+    assert again.manifest == first.manifest and again.inputs != first.inputs
+    assert again.inputs is not None and (again.inputs / "skin.stl").is_file()
+    none, said = orders.retry(ledger, again.id, "operator: a test")
+    assert none is None and said == "order 3 is queued already, for upper"
+    assert first.inputs is not None
+    (first.inputs / "bolt.stl").write_text("changed")
+    orders.finish(ledger, again, "failed", "again")
+    with pytest.raises(ValueError, match="bolt.stl has changed since order 1 was queued"):
+        orders.retry(ledger, first.id, "operator: a test")
+    with pytest.raises(ValueError, match="no order 99"):
+        orders.retry(ledger, 99, "operator: a test")
+    assert "settings_study.py retry" in orders.listing(ledger)
+
+
+def test_two_queuings_at_once_take_attempts_of_their_own(tmp_path: Path) -> None:
+    import threading  # noqa: PLC0415
+
+    folder, ledger = _furniture_run(tmp_path, load=False)
+    found: list[Any] = []
+    errors: list[BaseException] = []
+
+    def flag() -> None:
+        try:
+            found.extend(orders.flag(folder, ledger, "Sponsor: M", files=["leg_upper"]))
+        except BaseException as exc:  # noqa: BLE001 - what one raised, asserted below
+            errors.append(exc)
+
+    threads = [threading.Thread(target=flag) for _ in range(4)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    assert errors == []
+    queued = [o for o in orders.orders(ledger) if o.status == "queued"]
+    assert len(queued) == 1, "one queued; the others said it's queued already"
+
+
+def test_an_integrity_clash_is_said_never_a_traceback(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import sqlite3  # noqa: PLC0415
+
+    folder, ledger = _furniture_run(tmp_path, load=False)
+
+    def clash(*_: Any, **__: Any) -> Any:
+        raise sqlite3.IntegrityError("UNIQUE constraint failed")
+
+    monkeypatch.setattr(orders, "_insert", clash)
+    ((made, said),) = orders.flag(folder, ledger, "Sponsor: M", files=["leg_upper"])
+    assert made is None
+    assert said == "leg_upper was queued meanwhile, by another: `queued` lists it"
+
+
+def test_the_queue_command_starts_no_worker_on_another_ledger_and_never_raises(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str],
+) -> None:
+    folder, _ = _furniture_run(tmp_path, load=False)
+    script = _worker(monkeypatch)
+    elsewhere = tmp_path / "elsewhere.sqlite"
+    shutil.copyfile(tmp_path / "ledger.sqlite", elsewhere)
+    assert script.main(["queue", str(folder), "--by", "Sponsor: M", "--file", "leg_upper",
+                        "--design-ledger", str(elsewhere)]) == 0
+    assert "no worker started, as these orders are in another ledger" in capsys.readouterr().out
+
+    def broken(root: Path, env: Any = None) -> str:
+        raise OSError("no room")
+
+    monkeypatch.setattr(script.study_orders, "start_worker", broken)
+    assert script.main(["queue", str(folder), "--by", "Sponsor: M", "--file", "leg_lower"]) == 0
+    assert "no worker could start (OSError: no room)" in capsys.readouterr().out
+
+
+def test_parts_whose_files_share_a_name_are_told_apart_by_their_paths(tmp_path: Path) -> None:
+    from print_shop.refine.approved import File  # noqa: PLC0415
+
+    assembly_path = tmp_path / "assembly.json"
+    for sub in ("a", "b"):
+        (tmp_path / sub).mkdir()
+        (tmp_path / sub / "leg.stl").write_text("solid\nendsolid\n")
+    assembly_path.write_text(json.dumps({"parts": [
+        {"name": "front", "file": "a/leg.stl"}, {"name": "back", "file": "b/leg.stl"}]}))
+    read = orders._Assembly.read(assembly_path)
+    back = File("G", "leg.stl", "b/leg.stl", tmp_path / "b" / "leg.stl", "x")
+    alone = File("G", "leg.stl", "leg.stl", tmp_path / "b" / "leg.stl", "x")
+    found = read.part_of(back)
+    assert found is not None and found["name"] == "back"
+    assert read.part_of(alone) is None, "two parts' files share the name: not guessed"
+
+
+def test_the_copy_is_held_to_the_approvals_own_hash(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from print_shop.refine import approved as approved_mod  # noqa: PLC0415
+
+    folder, ledger = _furniture_run(tmp_path)
+    real = approved_mod.read(folder, ledger)
+    group = real.groups[0]
+    wrong = replace(real, groups=[replace(group, files=[replace(group.files[0], sha256="0" * 64),
+                                                        *group.files[1:]])])
+    monkeypatch.setattr(approved_mod, "read", lambda _folder, _ledger: wrong)
+    _, said = orders.on_approval(folder, ledger, "on approval by sponsor")
+    assert "its inputs couldn't be copied:" in said and "isn't as it was approved" in said
+    tampered = next(o for o in orders.orders(ledger) if o.file == group.files[0].path)
+    assert tampered.status == "failed"

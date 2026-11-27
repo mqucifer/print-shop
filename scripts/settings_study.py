@@ -10,6 +10,7 @@ mqucifer/print-shop#339. On the Mac, with Orca installed and the bench's second 
         [--max-hours H] [--reserve-memory SIZE] [--reserve-cpus N] [--serial]
     uv run python scripts/settings_study.py queue RUN --by WHO [--file NAME]... \\
         [--case 'NAME=ARGS']... [--assembly FILE] [--limits FILE]
+    uv run python scripts/settings_study.py retry ORDER --root ROOT --by WHO
     uv run python scripts/settings_study.py queued --root ROOT
     uv run python scripts/settings_study.py work --root ROOT [--once] [--ledger PATH]
     uv run python scripts/settings_study.py lessons [STUDY]
@@ -47,6 +48,7 @@ import hashlib
 import json
 import math
 import shlex
+import sqlite3
 import sys
 import tempfile
 from collections.abc import Callable
@@ -264,25 +266,50 @@ def _orders(args: argparse.Namespace) -> int:
     """The studies queued by themselves: a flag, the list, or the worker (`study.orders`)."""
     if args.command == "queue":
         folder = args.run.resolve()
-        design = DesignLedger(args.design_ledger or folder.parent / "ledger.sqlite")
+        own = folder.parent / "ledger.sqlite"
+        given = args.design_ledger.resolve() if args.design_ledger else own
+        design = DesignLedger(given)
         try:
             limits = Limits.read(args.limits) if args.limits else None
             made = study_orders.flag(folder, design, args.by, args.file, args.case, limits,
                                      args.assembly)
-        except (Refused, ValueError) as exc:
+        except (Refused, ValueError, sqlite3.Error) as exc:
             print(exc, file=sys.stderr)
             return 2
         for _, said in made:
             print(said)
         if any(n is not None for n, _ in made):
-            print(study_orders.start_worker(folder.parent, load_env(SETTINGS_PATH)))
+            print(_start(folder.parent, given == own))
         return 0
     root = args.root.expanduser().resolve()
     design = DesignLedger(root / "ledger.sqlite")
+    if args.command == "retry":
+        try:
+            order, said = study_orders.retry(design, args.order, args.by)
+        except (ValueError, sqlite3.Error) as exc:
+            print(exc, file=sys.stderr)
+            return 2
+        print(said)
+        if order is not None:
+            print(_start(root, True))
+        return 0
     if args.command == "queued":
         print(study_orders.listing(design), end="")
         return 0
     return work(root, design, args.once, args.ledger)
+
+
+def _start(root: Path, own_ledger: bool) -> str:
+    """The worker for a root's studies, where none runs: said, never raised, as the orders are
+    queued whatever comes of it. A worker reads its root's own ledger only."""
+    if not own_ledger:
+        return (f"no worker started, as these orders are in another ledger than {root}'s own: "
+                "a worker reads its root's ledger")
+    try:
+        return study_orders.start_worker(root, load_env(SETTINGS_PATH))
+    except Exception as exc:  # noqa: BLE001 - the orders stand
+        return (f"no worker could start ({type(exc).__name__}: {exc}): "
+                f"`scripts/settings_study.py work --root {root}` runs them")
 
 
 def work(root: Path, design: DesignLedger, once: bool = False, ledger: Path | None = None,
@@ -410,6 +437,10 @@ def main(argv: list[str] | None = None) -> int:
                             "its load needs' own, unless given")
     queue.add_argument("--design-ledger", type=Path,
                        help="the design runs' ledger: the run's root's, unless given")
+    again = sub.add_parser("retry", help="queue a failed or done study again, as it was")
+    again.add_argument("order", type=int, help="the order, as `queued` lists it")
+    again.add_argument("--root", type=Path, required=True, help="the design runs' root")
+    again.add_argument("--by", required=True, help='"Sponsor: WHO" or "operator: WHO"')
     queued = sub.add_parser("queued", help="each queued study, and what came of it")
     queued.add_argument("--root", type=Path, required=True, help="the design runs' root")
     work = sub.add_parser("work", help="run the queued studies, one at a time")
@@ -419,7 +450,7 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     if args.command == "run":
         return study(args)
-    if args.command in ("queue", "queued", "work"):
+    if args.command in ("queue", "retry", "queued", "work"):
         return _orders(args)
     with Ledger(args.ledger or ledger_path()) as ledger:
         try:

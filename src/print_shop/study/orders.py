@@ -26,14 +26,17 @@ from __future__ import annotations
 
 import fcntl
 import json
+import re
 import shlex
 import shutil
+import sqlite3
 import subprocess
+import time
 import uuid
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any
 
 import trimesh
@@ -48,7 +51,7 @@ from print_shop.study.limits import Limits
 from print_shop.study.reading import _files
 
 __all__ = ["Order", "checkout", "claim", "finish", "flag", "laid_for", "listing", "on_approval",
-           "orders", "orphaned", "prepare", "queued", "start_worker"]
+           "orders", "orphaned", "prepare", "queued", "retry", "start_worker"]
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS study_orders (
@@ -107,8 +110,12 @@ LOCK = "studies.lock"
 LOG = "studies.log"
 #: The study's own script, which runs the worker.
 SCRIPT = Path(__file__).resolve().parents[3] / "scripts" / "settings_study.py"
-#: An order not yet ended: one of these isn't queued again.
-OPEN = ("queued", "running")
+#: An order not yet ended: one of these isn't queued again. `copying` is one whose inputs are
+#: being copied, which no worker may claim yet.
+OPEN = ("copying", "queued", "running")
+#: The orders' format, as this code writes and reads them: a worker's checkout that reads an
+#: older one can't run them (`start_worker`).
+ORDERS_FORMAT = 2
 
 
 def _now() -> str:
@@ -199,10 +206,15 @@ def _delivered(approved: approved_mod.Approved) -> list[approved_mod.File]:
     return found
 
 
+def _key(name: str) -> str:
+    """A file's name as an assembly names it, relative to its folder."""
+    return PurePosixPath(name.replace("\\", "/")).as_posix().removeprefix("./")
+
+
 @dataclass(frozen=True)
 class _Assembly:
-    """An assembly as the study reads it: its file, its parts by their files' names, and every
-    file it names, each where it is in the run's work folder."""
+    """An assembly as the study reads it: its file, its parts by their files' paths relative to
+    it, and every file it names, each where it is in the run's work folder."""
 
     path: Path
     raw: dict[str, Any]
@@ -217,7 +229,7 @@ class _Assembly:
         if not path.is_file():
             raise ValueError(f"the assembly {path} isn't there")
         raw = json.loads(path.read_text(encoding="utf-8"))
-        parts = {Path(str(p["file"])).name: p for p in raw.get("parts") or ()
+        parts = {_key(str(p["file"])): p for p in raw.get("parts") or ()
                  if isinstance(p, dict) and p.get("name") and p.get("file")}
         files = _files(raw)
         if missing := [n for n in files if not (path.parent / n).is_file()]:
@@ -226,69 +238,158 @@ class _Assembly:
                              "study would read another assembly than the one approved")
         return cls(path, raw, parts, files)
 
+    def key_of(self, f: approved_mod.File) -> str | None:
+        """The part's file as the assembly names it, for an approved file: by the path the run
+        gave it, else by its name where only one part's file has that name. Two parts in
+        different folders may share a file's name."""
+        named = _key(f.was or f.name)
+        if named in self.parts:
+            return named
+        same = [k for k in self.parts if PurePosixPath(k).name == PurePosixPath(named).name]
+        return same[0] if len(same) == 1 else None
+
+    def part_of(self, f: approved_mod.File) -> dict[str, Any] | None:
+        key = self.key_of(f)
+        return self.parts[key] if key is not None else None
+
 
 def _snapshot(inputs: Path, f: approved_mod.File, assembly: _Assembly | None) -> dict[str, str]:
     """What the study reads, copied into `inputs` as it's queued, and each file's hash: the
-    approved file, and the assembly with every file it names, the part's own the approved copy.
-    Hours later the work folder may have changed; what was approved hasn't."""
+    approved file, held to the approval's own hash, and the assembly with every file it names,
+    the part's own the approved copy. Hours later the work folder may have changed; what was
+    approved hasn't.
+
+    Raises:
+        ValueError: If the approved file isn't as approved.
+    """
     inputs.mkdir(parents=True, exist_ok=True)
     copied: dict[str, Path] = {f.name: f.path}
     if assembly is not None:
+        own = assembly.key_of(f)
         copied[assembly.path.name] = assembly.path
         for name in assembly.files:
-            copied[name] = f.path if Path(name).name == _named(f) else assembly.path.parent / name
+            copied[name] = f.path if _key(name) == own else assembly.path.parent / name
     manifest = {}
     for name, source in copied.items():
         target = inputs / name
         target.parent.mkdir(parents=True, exist_ok=True)
         shutil.copyfile(source, target)
         manifest[name] = content_hash(Path(name).name, target.read_bytes())
+    if content_hash(f.name, (inputs / f.name).read_bytes()) != f.sha256:
+        raise ValueError(f"{f.path} isn't as it was approved")
     return manifest
+
+
+def _insert(ledger: DesignLedger, run: str, approval: int, part: str, kind: str,
+            again_done: bool, **row: Any) -> tuple[int | None, str, int]:
+    """An order's row, not yet claimable (`copying`), and its attempt: the next of its part's,
+    read and written in one transaction, so two queuings can't take one attempt. Or the order
+    there is already, said: one still open isn't queued again, nor one done unless
+    `again_done`."""
+    with ledger.immediate() as db:
+        last = db.execute("SELECT id, attempt, status FROM study_orders WHERE run=? AND "
+                          "approval=? AND part=? AND kind=? ORDER BY attempt DESC LIMIT 1",
+                          (run, approval, part, kind)).fetchall()
+        attempt = 1
+        if last:
+            if last[0]["status"] in OPEN:
+                return None, f"order {last[0]['id']} is {last[0]['status']} already, for {part}", 0
+            if last[0]["status"] == "done" and not again_done:
+                return None, f"order {last[0]['id']} studied {part} already", 0
+            attempt = int(last[0]["attempt"]) + 1
+        fields = {"run": run, "approval": approval, "part": part, "kind": kind,
+                  "attempt": attempt, **row, "status": "copying", "queued_at": _now()}
+        names = ", ".join(fields)
+        marks = ", ".join("?" for _ in fields)
+        made = db.execute(f"INSERT INTO study_orders ({names}) VALUES ({marks})",  # noqa: S608
+                          tuple(fields.values()))
+        return int(made.lastrowid or 0), "", attempt
+
+
+def _ready(ledger: DesignLedger, order: int, part: str, copy: Callable[[Path], dict[str, str]],
+           folder: Path) -> tuple[int | None, str]:
+    """An order's inputs copied, and the order queued: claimable only now."""
+    inputs = folder / "studies" / f"{order}-{part}" / "inputs"
+    try:
+        manifest = copy(inputs)
+    except (OSError, ValueError) as exc:
+        ledger.change("UPDATE study_orders SET status='failed', said=?, ended_at=? WHERE id=?",
+                      f"its inputs couldn't be copied: {exc}", _now(), order)
+        return None, f"order {order} failed: its inputs couldn't be copied: {exc}"
+    ledger.change("UPDATE study_orders SET inputs=?, manifest=?, status='queued' WHERE id=? AND "
+                  "status='copying'", str(inputs), json.dumps(manifest), order)
+    return order, ""
 
 
 def _queue(ledger: DesignLedger, folder: Path, approved: approved_mod.Approved,
            f: approved_mod.File, part: str, kind: str, assembly: _Assembly | None,
-           sides: dict[str, str], cases: list[str], limits: Limits | None, by: str,
-           again_done: bool) -> tuple[int | None, str]:
+           material: str | None, sides: dict[str, str], cases: list[str],
+           limits: Limits | None, by: str, again_done: bool) -> tuple[int | None, str]:
     """One order, and what was done in words: queued, or the order it already is. One still
-    queued or running isn't queued again; one failed is, as its next attempt; one done is where
-    `again_done`, as the Sponsor's own flag asks it."""
-    last = ledger.rows("SELECT id, attempt, status FROM study_orders WHERE run=? AND approval=? "
-                       "AND part=? AND kind=? ORDER BY attempt DESC LIMIT 1",
-                       approved.run, approved.approval, part, kind)
-    attempt = 1
-    if last:
-        row = last[0]
-        if row["status"] in OPEN:
-            return None, f"order {row['id']} is {row['status']} already, for {part}"
-        if row["status"] == "done" and not again_done:
-            return None, f"order {row['id']} studied {part} already"
-        attempt = int(row["attempt"]) + 1
-    material = (str(assembly.parts.get(_named(f), {}).get("material") or "") or None
-                if assembly is not None else None)
-    ledger.change(
-        "INSERT INTO study_orders (run, approval, part, kind, attempt, file, sha256, side, "
-        "material, assembly, needs, cases, limits, by, queued_at, status) VALUES "
-        "(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'queued')",
-        approved.run, approved.approval, part, kind, attempt, str(f.path), f.sha256,
-        sides.get(_named(f), ""), material, assembly.path.name if assembly else None,
-        str(folder / "needs.json") if kind == "load" else None, json.dumps(list(cases)),
-        json.dumps((limits or Limits()).plain()), by, _now())
-    found = ledger.rows("SELECT id FROM study_orders WHERE run=? AND approval=? AND part=? AND "
-                        "kind=? AND attempt=?", approved.run, approved.approval, part, kind,
-                        attempt)
-    order = int(found[0]["id"])
-    inputs = folder / "studies" / f"{order}-{part}" / "inputs"
+    open isn't queued again; one failed is, as its next attempt; one done is where `again_done`,
+    as the Sponsor's own flag asks it."""
     try:
-        manifest = _snapshot(inputs, f, assembly)
-    except OSError as exc:
-        ledger.change("UPDATE study_orders SET status='failed', said=?, ended_at=? WHERE id=?",
-                      f"its inputs couldn't be copied: {exc}", _now(), order)
-        return None, f"order {order} failed: its inputs couldn't be copied: {exc}"
-    ledger.change("UPDATE study_orders SET inputs=?, manifest=? WHERE id=?", str(inputs),
-                  json.dumps(manifest), order)
+        order, said, attempt = _insert(
+            ledger, approved.run, approved.approval, part, kind, again_done, file=str(f.path),
+            sha256=f.sha256, side=sides.get(_named(f), ""), material=material,
+            assembly=assembly.path.name if assembly else None,
+            needs=str(folder / "needs.json") if kind == "load" else None,
+            cases=json.dumps(list(cases)), limits=json.dumps((limits or Limits()).plain()),
+            by=by)
+    except sqlite3.IntegrityError:
+        return None, f"{part} was queued meanwhile, by another: `queued` lists it"
+    if order is None:
+        return None, said
+    done, failed = _ready(ledger, order, part, lambda inputs: _snapshot(inputs, f, assembly),
+                          folder)
+    if done is None:
+        return None, failed
     again = f", its attempt {attempt}" if attempt > 1 else ""
     return order, f"order {order} queued for {part}{again}"
+
+
+def retry(ledger: DesignLedger, order_id: int, by: str) -> tuple[int | None, str]:
+    """An order failed or done, queued again as it was, as its next attempt: of its kind, with
+    its cases, needs, limits and the inputs copied as it was first queued, held to their hashes.
+
+    Raises:
+        ValueError: If there's no such order, or its inputs aren't as they were copied.
+    """
+    ensure(ledger)
+    rows = ledger.rows("SELECT * FROM study_orders WHERE id=?", order_id)
+    if not rows:
+        raise ValueError(f"no order {order_id}")
+    was = Order.of(rows[0])
+    if was.inputs is None or not was.manifest:
+        raise ValueError(f"order {order_id} has no inputs copied to queue it from again: flag "
+                         "its run again (`settings_study.py queue`)")
+    for name, sha in was.manifest.items():
+        path = was.inputs / name
+        if not path.is_file() or content_hash(Path(name).name, path.read_bytes()) != sha:
+            raise ValueError(f"{path} has changed since order {order_id} was queued")
+    try:
+        order, said, attempt = _insert(
+            ledger, was.run, was.approval, was.part, was.kind, True, file=str(was.file),
+            sha256=was.sha256, side=was.side, material=was.material,
+            assembly=str(was.assembly) if was.assembly else None,
+            needs=str(was.needs) if was.needs else None, cases=json.dumps(list(was.cases)),
+            limits=json.dumps(was.limits.plain()), by=by)
+    except sqlite3.IntegrityError:
+        return None, f"{was.part} was queued meanwhile, by another: `queued` lists it"
+    if order is None:
+        return None, said
+    inputs_from = was.inputs
+
+    def copy(inputs: Path) -> dict[str, str]:
+        shutil.copytree(inputs_from, inputs, dirs_exist_ok=True)
+        return dict(was.manifest or {})
+
+    folder = inputs_from.parent.parent.parent
+    done, failed = _ready(ledger, order, was.part, copy, folder)
+    if done is None:
+        return None, failed
+    return order, (f"order {order} queued for {was.part} as order {order_id} was, its attempt "
+                   f"{attempt}")
 
 
 def on_approval(folder: Path, ledger: DesignLedger, by: str,
@@ -315,16 +416,17 @@ def on_approval(folder: Path, ledger: DesignLedger, by: str,
     assembly = _Assembly.read(where)
     sides = _sides(approved)
     order = list(assembly.parts)
-    files = sorted(_delivered(approved), key=lambda f: order.index(_named(f))
-                   if _named(f) in assembly.parts else len(order))
+    files = sorted(_delivered(approved), key=lambda f: order.index(key)
+                   if (key := assembly.key_of(f)) is not None else len(order))
     made, said, skipped = [], [], []
     for f in files:
-        part = assembly.parts.get(_named(f))
+        part = assembly.part_of(f)
         if part is None:
             skipped.append(_named(f))
             continue
         found, words = _queue(ledger, folder, approved, f, str(part["name"]), "load", assembly,
-                              sides, [], limits, by, again_done=False)
+                              str(part.get("material") or "") or None, sides, [], limits, by,
+                              again_done=False)
         said.append(words)
         if found is not None:
             made.append(found)
@@ -369,11 +471,13 @@ def flag(folder: Path, ledger: DesignLedger, by: str, files: list[str] | None = 
     sides = _sides(approved)
     done = []
     for f in every:
-        named = read.parts.get(_named(f)) if read is not None else None
+        named = read.part_of(f) if read is not None else None
         part = str(named["name"]) if named else Path(_named(f)).stem
+        # Its material from the assembly, cases or none: its filament is the material's.
+        material = str(named.get("material") or "") or None if named else None
         done.append(_queue(ledger, folder, approved, f, part, "flagged",
-                           read if cases else None, sides, list(cases or []), limits, by,
-                           again_done=True))
+                           read if cases else None, material, sides, list(cases or []),
+                           limits, by, again_done=True))
     return done
 
 
@@ -410,7 +514,8 @@ def orphaned(ledger: DesignLedger) -> list[int]:
              ledger.rows("SELECT id FROM study_orders WHERE status='running'")]
     for order in found:
         ledger.change("UPDATE study_orders SET status='failed', said=?, ended_at=? WHERE id=?",
-                      "its worker ended before it did: queue it again to study it", _now(), order)
+                      f"its worker ended before it did: `settings_study.py retry {order} --root "
+                      "ROOT --by WHO` queues it again", _now(), order)
     return found
 
 
@@ -446,13 +551,29 @@ def checkout(env: dict[str, str]) -> Path:
     return Path(common).parent if done.returncode == 0 and common else here
 
 
+#: How long a worker just started is watched for an end at once, as an old checkout's is, in s.
+WATCH = 2.0
+
+
+def format_of(home: Path) -> int | None:
+    """The orders' format a checkout's code reads (`ORDERS_FORMAT`), or None where it reads
+    none: one from before these orders."""
+    path = home / "src" / "print_shop" / "study" / "orders.py"
+    if not path.is_file():
+        return None
+    found = re.search(r"^ORDERS_FORMAT = (\d+)$", path.read_text(encoding="utf-8"), re.MULTILINE)
+    return int(found.group(1)) if found else None
+
+
 def start_worker(root: Path, env: dict[str, str] | None = None,
-                 spawn: Callable[..., Any] = subprocess.Popen) -> str:
+                 spawn: Callable[..., Any] = subprocess.Popen, watch: float = WATCH) -> str:
     """A worker for `root`'s queued studies, started detached where none runs: so a study runs
     by itself after the approval that queued it, and the approval doesn't wait for it. It runs
     until nothing is queued, writing to `root/studies.log`, from a stated checkout (`checkout`)
-    with that checkout's own Python, never a worktree, which a builder may remove mid-study.
-    Two started at once leave one: the other finds the lock held and ends (`work`)."""
+    with that checkout's own Python, never a worktree, which a builder may remove mid-study, nor
+    one whose code reads older orders than these (`ORDERS_FORMAT`). It's watched for `watch`
+    seconds, and said to have started only if it hasn't ended in them but as a worker does.
+    Two started at once leave one: the other finds the lock held and ends (`work`, exit 3)."""
     if worker_running(root):
         return f"a worker already runs {root.name}'s studies: they're queued for it"
     home = checkout(env or {})
@@ -465,13 +586,31 @@ def start_worker(root: Path, env: dict[str, str] | None = None,
     if not script.is_file() or not python.is_file():
         return (f"no worker started: {home} has no {script.name} or no .venv: set "
                 f"{CHECKOUT_KEY}, or run `scripts/settings_study.py work --root {root}`")
+    found = format_of(home)
+    if found is None or found < ORDERS_FORMAT:
+        return (f"no worker started: the checkout at {home} is older than these orders (it reads "
+                f"{'none' if found is None else f'format {found}'}, these are {ORDERS_FORMAT}); "
+                f"pull it, or set {CHECKOUT_KEY}, then `scripts/settings_study.py work --root "
+                f"{root}`")
     log = (root / LOG).open("a")
     try:
-        spawn([str(python), str(script), "work", "--root", str(root)], stdout=log,
-              stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL, start_new_session=True,
-              cwd=str(home))
+        child = spawn([str(python), str(script), "work", "--root", str(root)], stdout=log,
+                      stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL,
+                      start_new_session=True, cwd=str(home))
     finally:
         log.close()
+    poll = getattr(child, "poll", None)
+    ends = time.monotonic() + watch
+    while callable(poll) and time.monotonic() < ends:
+        code = poll()
+        if code is not None:
+            if code == 0:
+                return f"a worker started from {home}, and ran them already; see {root / LOG}"
+            if code == 3:
+                return f"a worker already runs {root.name}'s studies: they're queued for it"
+            return (f"no worker started: the one started from {home} ended at once, exit "
+                    f"{code}: see {root / LOG}")
+        time.sleep(0.1)
     return f"a worker started for them from {home}, one at a time; it writes to {root / LOG}"
 
 
@@ -483,8 +622,10 @@ def listing(ledger: DesignLedger) -> str:
     for o in found:
         where = f", in {o.out}" if o.out else ""
         again = f", attempt {o.attempt}" if o.attempt > 1 else ""
+        retry_said = (f" (`settings_study.py retry {o.id} --root ROOT --by WHO` queues it "
+                      "again)" if o.status == "failed" and "retry" not in o.said else "")
         lines.append(f"order {o.id}: {o.run} {o.part} ({o.kind}{again}), {o.status}{where}"
-                     + (f": {o.said}" if o.said else ""))
+                     + (f": {o.said}" if o.said else "") + retry_said)
     return "\n".join(lines) + "\n"
 
 
