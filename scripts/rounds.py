@@ -11,8 +11,11 @@ scripts/rounds.py start NAME --request FILE [--reference FILE]... [--right FILE]
                                                                   parts together, making none
 scripts/rounds.py resume NAME [--note FILE] [--from WHO] [--reopen-needs] [--assembly-run]
                                                                   go on after a stop
-scripts/rounds.py resume NAME --approve --by WHO [--note FILE]      a person's yes, then the
-                                                                  model's after-action review
+scripts/rounds.py resume NAME --approve --by WHO [--note FILE] [--study-limits FILE]
+                                                                  a person's yes, a settings
+                                                                  study queued of each part
+                                                                  where it has a load need, then
+                                                                  the model's after-action review
 scripts/rounds.py resume NAME --send-back --by WHO --note FILE [--reopen-needs] [--fresh]
                                                                   a person's no, as a new round
 scripts/rounds.py resume NAME --close --by WHO --note FILE         ended without approval, then
@@ -230,6 +233,25 @@ def _lessons(args: argparse.Namespace, ledger: DesignLedger) -> str:
     return f"lesson {lesson}: {found['status']}, by {found['status_by']}"
 
 
+def _studies(folder: Path, root: Path, args: argparse.Namespace) -> str:
+    """The settings studies an approval queues by itself, where the run has a load need
+    (mqucifer/print-shop#359). It follows the approval and can't undo it: what goes wrong is
+    said, and the run is approved as it was."""
+    from print_shop.study import orders  # noqa: PLC0415 - Orca's and the study's, on approval
+    from print_shop.study.limits import Limits  # noqa: PLC0415
+
+    try:
+        limits = Limits.read(args.study_limits) if args.study_limits else None
+        _, said = orders.on_approval(
+            folder, DesignLedger(root / "ledger.sqlite"), f"on approval by {args.by}", limits
+        )
+    except Exception as exc:  # noqa: BLE001 - nothing about a study holds up an approval
+        return f"no settings study queued: {type(exc).__name__}: {exc}"
+    return said + (
+        ". `scripts/settings_study.py work --root ROOT` runs them" if "order" in said else ""
+    )
+
+
 def _refine(args: argparse.Namespace, folder: Path, ledger: DesignLedger) -> int:
     """The refinement pass, its findings, and a decision on a proposal it made."""
     from print_shop.refine import approved, proposals
@@ -399,6 +421,12 @@ def main() -> int:
     decision.add_argument("--send-back", action="store_true")
     decision.add_argument("--close", action="store_true", help="end it without approving it")
     resume.add_argument("--by", default="", help="who decided: sponsor, or stand-in: <who>")
+    resume.add_argument(
+        "--study-limits",
+        type=Path,
+        help="with --approve: the Sponsor's limits for the settings studies queued by it, as "
+        "JSON (study.limits)",
+    )
     sub.add_parser("status").add_argument("name")
     sub.add_parser("stop").add_argument("name")
     sub.add_parser("summary").add_argument("name")
@@ -505,6 +533,7 @@ def main() -> int:
                 print(f"approved, by {args.by}. The ledger holds it, in `decisions`.")
                 if ending.name != APPROVED:
                     return 20
+                print(_studies(folder, root, args))
                 print(_after_action(folder))
                 return 0
             if args.command == "resume" and args.close:

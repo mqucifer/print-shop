@@ -40,9 +40,11 @@ def _lines(pattern: str) -> str:
     return f"{sets}; {how}"
 
 
-def published(pattern: str | None, material: Material, line_width: float,
+def published(pattern: str | None, material: Material | None, line_width: float,
               layer_height: float) -> str:
-    """The figures for one pattern, or for each `load` reads; the walls; the wall orders."""
+    """The figures for one pattern, or for each `load` reads; the walls; the wall orders. With no
+    material `load` knows (a study of time, grams and finish, mqucifer/print-shop#359), each
+    pattern's lines and checked densities, without the figures of its plastic."""
     chosen = [pattern] if pattern else list(PATTERNS)
     unknown = [p for p in chosen if p not in PATTERNS]
     if unknown:
@@ -55,9 +57,13 @@ def published(pattern: str | None, material: Material, line_width: float,
         "none yet checked by a print from this printer (mqucifer/print-shop#340), so every "
         "figure that rests on them says so. A core is strongest along its lines: point them "
         "along the stretch load finds, or use walls, which run along the outline.",
-        f"The skin, the walls and shells, takes {material.along_pct:g}% in the layers' plane and "
-        f"{material.across_pct:g}% across them ({material.source}).",
     ]
+    if material is not None:
+        out.append(f"The skin, the walls and shells, takes {material.along_pct:g}% in the "
+                   f"layers' plane and {material.across_pct:g}% across them ({material.source}).")
+    else:
+        out.append("load knows no figures for this part's plastic: each pattern's lines and the "
+                   "densities its tests check are what's said of it.")
     for name in chosen:
         assert name is not None
         start = infill.checked_from(name)
@@ -66,7 +72,7 @@ def published(pattern: str | None, material: Material, line_width: float,
                    f"(set by {setter['source']}, {setter['material'].upper()} at "
                    f"{setter['density_pct']:g}%); read from {infill.LEAST:g}% to "
                    f"{infill.MOST:g}%.")
-        for density in DENSITIES:
+        for density in DENSITIES if material is not None else ():
             core = infill.core(Settings(pattern=name, infill=density, infill_angle=0.0),
                                material)
             said = core.said()

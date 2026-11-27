@@ -277,10 +277,16 @@ class Reading:
     cases: list[CaseRead] = field(default_factory=list)
     #: Why it couldn't be sliced, where it couldn't.
     error: str = ""
+    #: What of the Sponsor's limits it's past as sliced, where it is (`study.limits`): it
+    #: can't be recommended, and isn't read further.
+    ruled_out: str = ""
 
     @property
     def passes(self) -> bool:
-        return not self.error and bool(self.cases) and all(c.passes for c in self.cases)
+        """Sliced, within the Sponsor's limits, and passing every case it's read under: with
+        none, as a study of time, grams and finish is, on its slice alone."""
+        return (not self.error and not self.ruled_out and self.sliced is not None
+                and all(c.passes for c in self.cases))
 
     @property
     def answered(self) -> bool:
@@ -302,6 +308,8 @@ class Reading:
         """Why it fails, in words; "" where it passes."""
         if self.error:
             return self.error
+        if self.ruled_out:
+            return f"ruled out by the Sponsor's limits: {self.ruled_out}"
         said = []
         for case in self.cases:
             if case.verdict not in ("OK", "FAIL"):
@@ -318,6 +326,7 @@ class Reading:
         return {"candidate": self.candidate.plain(),
                 "sliced": self.sliced.plain() if self.sliced else None,
                 "cases": [c.plain() for c in self.cases], "error": self.error,
+                "ruled_out": self.ruled_out,
                 "passes": self.passes, "worst": worst.plain() if worst else None}
 
 
