@@ -80,14 +80,25 @@ def test_each_shape_places_a_point() -> None:
     assert not hole.contains((50, 6, 9))  # past its length
     turned = Region("r", Cylinder((0, 0, 0), (-1.0, 0.0, 0.0), 2.0, 10.0), Settings(walls=3))
     assert turned.contains((-5, 1, 1)) and not turned.contains((5, 0, 0))
-    assert tab.contains((0, 0, 0), height=4.0) and not tab.contains((0, 0, 0), height=7.0)
-    with pytest.raises(ValueError, match="a point's height above the bed is needed"):
+    # A layers region is in the part's own axes too, along its layers axis.
+    assert tab.contains((0, 0, 4), layers="z") and not tab.contains((0, 0, 7), layers="z")
+    assert tab.contains((4, 0, 0), layers="x") and not tab.contains((0, 0, 4), layers="x")
+    with pytest.raises(ValueError, match="the part's layers axis is needed"):
         tab.contains((0, 0, 0))
     with pytest.raises(ValueError, match="it's read with its mesh"):
         face.contains((0, 0, 0))
     assert face.contains((0, 0, 0), in_mesh=lambda p: True)
-    found = printed.at((50, 6, 4), height=4.0, in_mesh={"face": lambda p: False})
-    assert (found.walls, found.layer_height) == (4, 0.1)  # tab is later than hole
+
+
+def test_a_volume_region_wins_over_a_layers_region_whatever_their_order() -> None:
+    """mqucifer/print-shop#341's review: the hole's cylinder comes before the tab's band of
+    layers, and Orca builds the cylinder's 5 walls where they meet, as it applies a height range
+    to the object and its modifiers over it."""
+    printed = read(WHOLE)
+    found = printed.at((50, 6, 4), layers="z", in_mesh={"face": lambda p: False})
+    assert (found.walls, found.layer_height) == (5, 0.1)
+    # Outside the cylinder, the band's own.
+    assert printed.at((5, 30, 4), layers="z", in_mesh={"face": lambda p: False}).walls == 4
 
 
 def test_a_part_given_whole_misses_nothing() -> None:
@@ -121,6 +132,12 @@ def test_the_infill_angle_is_in_the_parts_own_axes_cyclic_from_its_layers(
     assert own_way(angle, layers) == pytest.approx(way, abs=1e-12)
 
 
+def test_a_layers_region_is_in_the_parts_own_coordinates_below_zero_too() -> None:
+    region = read({"regions": [{"name": "r", "layers": [-4, -1], "infill": 30}]}).regions[0]
+    assert region.shape == Layers(-4.0, -1.0)
+    assert region.contains((0, -2, 0), layers="y")
+
+
 def test_two_layers_regions_cant_overlap() -> None:
     with pytest.raises(ValueError, match="layers regions a and b overlap"):
         read({"regions": [{"name": "a", "layers": [0, 4], "infill": 30},
@@ -136,7 +153,7 @@ def test_a_region_says_where_it_is_and_what_it_sets() -> None:
     assert said == [
         "hole: a cylinder 5 mm in radius and 8 long from (50, 6, 0) along (0, 0, 1), 5 walls",
         "face: the mesh faces/leg-face.stl, 40% infill",
-        "tab: the layers from 3 to 6 mm above the bed, 4 walls, 0.1 mm layers",
+        "tab: the layers from 3 to 6 mm along the part's layers axis, 4 walls, 0.1 mm layers",
     ]
 
 
@@ -180,7 +197,7 @@ def test_each_field_is_checked_and_named(raw: dict[str, Any], said: str) -> None
     ({"name": "r", "mesh": "../face.stl", "infill": 60},
      "print's region r's mesh is named relative to the assembly or job file, inside"),
     ({"name": "r", "layers": [6, 3], "infill": 60}, "print's region r's layers run from 6 to 3"),
-    ({"name": "r", "layers": [-1, 3], "infill": 60}, "print's region r's layers run from -1"),
+    ({"name": "r", "layers": [3, 3], "infill": 60}, "print's region r's layers run from 3 to 3"),
     ({"name": "r", "layers": [1], "infill": 60}, "print's region r's layers are \\[low, high\\]"),
     ({"name": "r", "box": [[0, 0, 0], [1, 1, 1]]}, "print's region r sets nothing of its own"),
     ({"name": "r", "box": [[0, 0], [1, 1]], "infill": 60}, "print's region r's box is two"),
