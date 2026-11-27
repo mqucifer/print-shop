@@ -28,12 +28,14 @@ import sqlite3
 import uuid
 from collections.abc import Iterable
 from datetime import UTC, datetime
+from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from print_shop.bench.assembly import Assembly
+from print_shop.ingest.orientation import write_rotated
 from print_shop.rounds.lessons import ACCEPTED, CANDIDATE, EDITED, REJECTED, Refused, signed
 from print_shop.setup.context import PartContext
-from print_shop.setup.features import Feature
+from print_shop.setup.features import Feature, measure
 from print_shop.setup.traits import TRAITS, traits
 from print_shop.study.reading import margin_said
 from print_shop.study.schema import SCHEMA
@@ -51,6 +53,7 @@ __all__ = [
     "for_part",
     "keys",
     "listing",
+    "measured",
     "record",
     "reject",
 ]
@@ -66,6 +69,16 @@ KEPT = (ACCEPTED, EDITED)
 
 def _now() -> str:
     return datetime.now(UTC).isoformat(timespec="seconds")
+
+
+def measured(stl: Path, turn: tuple[float, float, float], folder: Path,
+             bed_contact_mm2: float) -> tuple[Feature, ...]:
+    """A part's features as it prints in `turn`, measured laid but not turned about its up axis
+    (mqucifer/print-shop#353's review): a turn about the plate's upright changes nothing of how
+    it prints, but its box on the plate covers its diagonal, so its narrowest width read off that
+    box would key a bar `flat_and_wide` and take `tall_and_narrow` from a fin."""
+    laid = write_rotated(stl, (turn[0], turn[1], 0.0), folder / stl.name)
+    return measure(laid, bed_contact_mm2)
 
 
 def keys(features: Iterable[Feature], assembly: Assembly | None = None,
