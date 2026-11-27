@@ -395,7 +395,8 @@ def test_the_cut_s_check_holds_it_to_each_layer_and_to_the_part(cae: Any) -> Non
     assert fin["copies"]["core_mm3"] > (10 - 2 * side) ** 2 * (40 - 1.0 - 2.6)
     for name in ("shifted", "short", "ledge"):
         assert found[name]["cut"] == "its common with 16 copies of itself", (name, found[name])
-    assert found["over"]["cut"] == "OCCT's offset of it stretched along its layers"
+    assert found["over"]["cut"] == ("its section between each two of its flat faces offset in "
+                                    "by its walls")
     assert found["over"]["core_mm3"] > found["shifted"]["core_mm3"]
     assert "only 1 of" in found["unread"]["refused"]
     assert "planes could be read to check it" in found["unread"]["refused"]

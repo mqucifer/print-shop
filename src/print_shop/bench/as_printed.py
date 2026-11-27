@@ -700,6 +700,58 @@ def mitres(part: Any, layers: int, by: float) -> tuple[list[Any], int]:
     return found, left
 
 
+def _levels(part: Any, layers: int) -> list[float] | None:
+    """Where a part whose every face is upright to its layers or flat in their plane, a stack
+    of prisms along them, has its flat faces, along its layers, its ends among them: or None
+    for a part with a face of any other kind, slanted or curved across its layers."""
+    way = _vector(layers, 1.0)
+    levels = set(_span(part, layers))
+    for face in part.Faces:
+        u0, u1, v0, v1 = face.ParameterRange
+        normals = [face.normalAt(u0 + (u1 - u0) * i / 4, v0 + (v1 - v0) * j / 4)
+                   for i in range(5) for j in range(5)]  # fmt: skip
+        along = [abs(n.dot(way)) for n in normals]
+        if all(a < 1e-6 for a in along):
+            continue
+        if type(face.Surface).__name__ == "Plane" and all(abs(a - 1) < 1e-6 for a in along):
+            levels.add(round(_span(face, layers)[0], 9))
+            continue
+        return None
+    return sorted(levels)
+
+
+def slabs_in_plane(part: Any, layers: int, by: float) -> Any | None:
+    """What of a part whose every face is upright to its layers or flat in their plane
+    (`_levels`) is at least `by` from its outline in its own layer's plane, exactly: between
+    each two of its flat faces' levels its section is the same, so it's that section offset in
+    by `by` in its plane (`_offset_2d`) and run between them, the slabs fused
+    (mqucifer/print-shop#363). Its steps are at the part's own flat faces' levels, where the part
+    steps. None where nothing's left, or the part isn't such a stack.
+
+    Raises:
+        _Unread: Where a slab's section can't be offset.
+    """
+
+    levels = _levels(part, layers)
+    if levels is None:
+        return None
+    prisms = []
+    for low, high in zip(levels, levels[1:], strict=False):
+        if high - low < 1e-6:
+            continue
+        section = _section(part, layers, (low + high) / 2)
+        if section is None:
+            continue
+        for face in section.Faces:
+            for inner in _offset_2d(face, -by, layers):
+                prisms.append(_moved_to(inner, layers, low).extrude(_vector(layers, high - low)))
+    solids = [s for p in prisms for s in p.Solids if s.Volume > NOTHING]
+    if not solids:
+        return None
+    fused = solids[0].fuse(solids[1:]) if len(solids) > 1 else solids[0]
+    return _one(_solids(fused.removeSplitter()))
+
+
 def _gap(part: Any, layers: int, at: float, walls: float, open_by: float) -> tuple[Any, Any]:
     """A layer's thin gap (`thin_runs`): what of the area inside its walls Orca's opening
     leaves no infill in, in regions over `open_by` squared, not the corners every opening
@@ -729,15 +781,18 @@ def _same(first: Any, then: Any, layers: int) -> bool:
     return bool(first.cut(moved).Area + moved.cut(first).Area < GAP_SAME * first.Area)
 
 
-def thin_runs(part: Any, layers: int, walls: float, open_by: float) -> list[Any]:
+def thin_runs(part: Any, layers: int, walls: float, open_by: float, bead: float = 0.0) -> list[Any]:
     """Where the part is too thin for Orca's sparse infill, to take out of its core, the skin
     solid there (mqucifer/print-shop#363): measured layer by layer, as Orca slices it, at
     planes `GAP_STEP` apart, each layer's gap (`_gap`). Where `GAP_RUN` or more planes in a
     row have the same gap (`_same`) as the first of them, as a web's or a joint's detail's
     does, the gap stands through them: grown its walls' width out, past the core's own faces
     into the walls, so that what's cut meets the core only where the kept infill ends, and
-    less what the first plane keeps, and run from half a step below the first plane to half
-    above the last, as solids. A gap that moves from layer to layer, as a bowed face's
+    less what the first plane keeps shrunk by `bead`, so that the cut bites a bead's width into
+    the kept core where it meets it, and leaves no face there narrower than a bead, nor one
+    on the kept core's own; and run from half a step below the first plane to half above the
+    last, as solids. The bite makes the core a little small there, which `checked` holds to
+    `SHORT`. A gap that moves from layer to layer, as a bowed face's
     wedge-shaped tip does, is left in the core: it's thinner than infill there, a little too
     big, and the part read a little weaker than printed, the safe side, which `checked`
     holds to `AGREE`. Each solid is one run."""
@@ -760,7 +815,12 @@ def thin_runs(part: Any, layers: int, walls: float, open_by: float) -> list[Any]
                 return
         cut = Part.makeCompound(grown)
         if kept is not None:
-            cut = cut.cut(kept)
+            try:
+                bitten = [g for f in kept.Faces for g in _offset_2d(f, -bead, layers)]
+            except _Unread:
+                return
+            if bitten:
+                cut = cut.cut(Part.makeCompound(bitten))
         if cut.Area <= 1e-9:
             return
         start = first - GAP_STEP / 2
@@ -806,9 +866,14 @@ def _cut_from(
     if shells is None:
         shells = eroded_along(part, layers, top, bottom, up)
     own = shells if source is part else eroded_along(source, layers, top, bottom, up)
-    for how in ("offset", "copies"):
+    ways = (["slabs"] if _levels(source, layers) is not None else []) + ["offset", "copies"]
+    for how in ways:
         try:
-            if how == "offset":
+            if how == "slabs":
+                inside = slabs_in_plane(source, layers, walls) if walls > 0 else source
+                words = (f"its section between each two of its flat faces offset in by its "
+                         f"walls{whence}")
+            elif how == "offset":
                 inside = offset_in_plane(source, layers, -walls) if walls > 0 else source
                 words = f"OCCT's offset of it stretched along its layers{whence}"
             else:
@@ -831,7 +896,7 @@ def _cut_from(
                 words += (f", and opened where its layers are too thin for infill, at "
                           f"{len(thin)} run(s) of them")
         except Exception as exc:  # noqa: BLE001 - OCCT raises where it can't make it
-            what = "its offset" if how == "offset" else "its copies"
+            what = {"slabs": "its slabs", "offset": "its offset"}.get(how, "its copies")
             said.append(f"OCCT couldn't make {what}{whence} ({type(exc).__name__})")
             continue
         check = checked(part, core, layers, walls, top, bottom, up, open_by)
@@ -896,7 +961,7 @@ def cut_core(
     """
     said: list[str] = []
     shells = eroded_along(part, layers, top, bottom, up)
-    thin = thin_runs(part, layers, walls, open_by) if open_by > 0 else []
+    thin = thin_runs(part, layers, walls, open_by, bead) if open_by > 0 else []
     found = _cut_from(part, part, "", layers, walls, top, bottom, up, bead, said, shells,
                       open_by, thin)  # fmt: skip
     if found is not None:

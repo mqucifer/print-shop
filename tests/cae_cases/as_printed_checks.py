@@ -76,8 +76,9 @@ def main() -> None:
     found["fin"] = {
         "layer_mm2": area,
         "true_mm2": (10 - 2 * WALLS) ** 2,
-        "empty": read(fin, offset_in_plane=nothing, eroded_in_plane=nothing),
-        "copies": read(fin, offset_in_plane=failed),
+        "empty": read(fin, slabs_in_plane=nothing, offset_in_plane=nothing,
+                      eroded_in_plane=nothing),
+        "copies": read(fin, slabs_in_plane=failed, offset_in_plane=failed),
     }
     bar = box((0, 0, 0), (60, 20, 14))
     right = as_printed.offset_in_plane
@@ -90,15 +91,17 @@ def main() -> None:
             return right(shape, layers, by * share)
         return cut
 
-    found["shifted"] = read(bar, offset_in_plane=moved)
-    found["short"] = read(bar, offset_in_plane=further(1.04))
-    found["over"] = read(bar, offset_in_plane=further(0.96))
+    # Each wrong cut given as the first way a bar's tried, its slabs (mqucifer/print-shop#363),
+    # and as the offset after it.
+    found["shifted"] = read(bar, slabs_in_plane=moved, offset_in_plane=moved)
+    found["short"] = read(bar, slabs_in_plane=further(1.04), offset_in_plane=further(1.04))
+    found["over"] = read(bar, slabs_in_plane=further(0.96), offset_in_plane=further(0.96))
     ledge = box((0, 0, 0), (60, 20, 6)).fuse(box((0, 0, 0), (30, 20, 14))).removeSplitter()
 
     def slab_missing(shape: Any, layers: int, by: float) -> Any:
         return right(shape, layers, by).cut(box((-1, -1, 5.6), (61, 21, 6.4)))
 
-    found["ledge"] = read(ledge, offset_in_plane=slab_missing)
+    found["ledge"] = read(ledge, slabs_in_plane=slab_missing, offset_in_plane=slab_missing)
     calls = [0]
     layer_core = as_printed.layer_core
 

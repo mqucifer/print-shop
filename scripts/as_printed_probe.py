@@ -4,7 +4,8 @@ mesh's elements inside out, on an assembly of one's own (mqucifer/print-shop#356
 
 Run from the folder the assembly is in:
 
-    uv run python <print-shop>/scripts/as_printed_probe.py ASSEMBLY.json [--mesh MM] [--thin]
+    uv run python <print-shop>/scripts/as_printed_probe.py ASSEMBLY.json [--mesh MM]
+        [--thin | --offsets]
 
 `--mesh` is the mesh the run gave `load`, or `load`'s own where it gave none. It runs in the
 bench's second image under `load`'s limits. For each part the assembly gives a `print`, in its
@@ -35,6 +36,13 @@ leaves no infill, how many regions, and whether they stay the same from layer to
 each sliver, whether it lies in such a gap or in an island of infill under 15 mm², which Orca's
 `minimum_sparse_infill_area` fills solid.
 
+With `--offsets` (mqucifer/print-shop#363), it says instead whether OCCT's offset can cut each
+printed part's walls at all: how many of its faces are upright to its layers or flat in their
+plane, and OCCT's offset of it stretched 10, 3 and 1 times along its layers, at two tolerances,
+with arcs at its concave edges or mitres, on the part and on it simplified; unstretched, its
+flat faces moved back along its layers by copies, exact on a part whose faces are all upright or
+flat; and for each made, its check against its layers and its slivers.
+
 It prints only counts, kinds of face, verdicts and seconds: each part by its number, never its
 name, and no figure of any shape or place. Nothing is written but gmsh's own files in the
 container's /tmp.
@@ -56,7 +64,7 @@ WHOLE_LIMIT = 2 * host.TWO_PASSES
 
 
 def inner(  # pragma: no cover
-    assembly_file: str, mesh: float | None, thin_only: bool = False
+    assembly_file: str, mesh: float | None, mode: str = ""
 ) -> None:
     """Inside the container: each stage said as it starts, then its counts and verdicts."""
     import collections
@@ -264,7 +272,7 @@ def inner(  # pragma: no cover
                 print(f"    {n} sliver(s): {words}", flush=True)
 
         open_by = as_printed.open_radius(bead, height)
-        thin = as_printed.thin_runs(own, layers, walls, open_by)
+        thin = as_printed.thin_runs(own, layers, walls, open_by, bead)
         print(f"  part {k}: {len(thin)} run(s) of layers too thin for infill, to open",
               flush=True)  # fmt: skip
         sources = [("the part", own)]
@@ -309,6 +317,76 @@ def inner(  # pragma: no cover
                     merged = as_printed.healed(core, bead)
                     print("    merged: " + ("none left" if merged is not None else
                                             "some left"), flush=True)  # fmt: skip
+
+    def offsets(k: int, own: Any, layers: int, settings: Any) -> None:
+        """Whether OCCT's offset can cut the part's walls at all, and how (mqucifer/print-shop
+        #363): stretched along its layers or not, at two tolerances, with arcs or mitres at its
+        concave edges, on the part and on it simplified; and for each that's made, how it
+        holds to its layers and its slivers."""
+        bead = float(settings.line_width or 0)
+        height = float(settings.layer_height or 0)
+        walls = as_printed.wall_thickness(int(settings.walls or 0), bead, height)
+        top = float(settings.top or 0) * height
+        bottom = float(settings.bottom or 0) * height
+        up = -1.0 if (settings.up or "+")[0] == "-" else 1.0
+        open_by = as_printed.open_radius(bead, height)
+        way = as_printed._vector(layers, 1.0)
+        upright = flat = slanted = 0
+        slanted_kinds: collections.Counter[str] = collections.Counter()
+        for face in own.Faces:
+            u0, u1, v0, v1 = face.ParameterRange
+            along = [abs(face.normalAt(u0 + (u1 - u0) * i / 4, v0 + (v1 - v0) * j / 4).dot(way))
+                     for i in range(5) for j in range(5)]  # fmt: skip
+            if all(a < 1e-6 for a in along):
+                upright += 1
+            elif close_faces.kind_of(face) == "flat" and all(abs(a - 1) < 1e-6 for a in along):
+                flat += 1
+            else:
+                slanted += 1
+                slanted_kinds[close_faces.kind_of(face)] += 1
+        stack = as_printed._levels(own, layers) is not None
+        others = ", ".join(f"{n} {w}" for w, n in slanted_kinds.items()) or "none"
+        print(f"  part {k}: faces upright to its layers {upright}, flat in their plane {flat}, "
+              f"any other {slanted} ({others}); a stack of prisms along its layers, cut by "
+              f"slabs: {'yes' if stack else 'no'}", flush=True)
+        shells = as_printed.eroded_along(own, layers, top, bottom, up)
+        simple = as_printed.simplified(own, bead)
+        sources = [("the part", own)] + ([("it simplified", simple[0])] if simple else [])
+        for label, source in sources:
+            for stretch, tolerance, join in ((10.0, 1e-4, 0), (10.0, 1e-2, 0), (3.0, 1e-4, 0),
+                                             (1.0, 1e-4, 0), (1.0, 1e-2, 0), (1.0, 1e-4, 2)):
+                words = (f"{label}, stretched {stretch:g}x, tolerance {tolerance:g}, "
+                         f"{'arcs' if join == 0 else 'mitres'}")
+                began_at = time.time()
+                try:
+                    scale = [1.0, 1.0, 1.0]
+                    scale[layers] = stretch
+                    there, back = App.Matrix(), App.Matrix()
+                    there.scale(*scale)
+                    back.scale(*(1 / v for v in scale))
+                    given = source.transformGeometry(there) if stretch != 1 else source
+                    made = given.makeOffsetShape(-walls, tolerance, False, False, 0, join, False)
+                    if made.isNull() or not made.Solids:
+                        print(f"    {words}: OCCT made nothing", flush=True)
+                        continue
+                    inside = made.transformGeometry(back) if stretch != 1 else made
+                    if stretch == 1:
+                        # Flat faces moved its walls along the layers too: moved back, copies
+                        # along the layers, exact on a part whose faces are upright or flat.
+                        step = as_printed._vector(layers, walls)
+                        inside = inside.fuse([inside.translated(step),
+                                              inside.translated(step * -1)]).removeSplitter()
+                    core = as_printed._one(as_printed._solids(inside.common(shells)))
+                except Exception as exc:  # noqa: BLE001
+                    print(f"    {words}: failed, {stopped(exc)} "
+                          f"({time.time() - began_at:.0f} s)", flush=True)
+                    continue
+                check = as_printed.checked(own, core, layers, walls, top, bottom, up, open_by)
+                found = as_printed.slivers(core, bead) if core is not None else []
+                print(f"    {words}: made in {time.time() - began_at:.0f} s; checked at "
+                      f"{check.read} of {check.planes} planes, short {100 * check.short:.1f}% "
+                      f"and over {100 * check.over:.1f}% of its walls: "
+                      f"{check.fails() or 'holds'}; slivers {len(found)}", flush=True)
 
     def thinness(k: int, own: Any, layers: int, settings: Any) -> None:
         """Where the core is too thin for Orca's sparse infill, layer by layer, and whether the
@@ -444,10 +522,11 @@ def inner(  # pragma: no cover
         bead = float(settings.line_width or 0)
         faces_said("the part", own, bead)
         edges_said(own)
-    if thin_only:
+    if mode:
         for k, part in printed:
             if not part.printed.settings.missing():
-                thinness(k, owns[k], load.AXES.index(part.layers), part.printed.settings)
+                (thinness if mode == "thin" else offsets)(
+                    k, owns[k], load.AXES.index(part.layers), part.printed.settings)
         return
     for k, part in printed:
         settings = part.printed.settings
@@ -558,22 +637,25 @@ def inner(  # pragma: no cover
 
 def main(argv: list[str]) -> int:
     words = list(argv)
-    thin = "--thin" in words
-    if thin:
-        words.remove("--thin")
+    mode = ""
+    for flag in ("--thin", "--offsets"):
+        if flag in words:
+            words.remove(flag)
+            mode = flag[2:]
     mesh = None
     if "--mesh" in words:
         k = words.index("--mesh")
         mesh = float(words[k + 1])
         del words[k : k + 2]
     if len(words) != 1 or not words[0].endswith(".json"):
-        print("give the assembly: as_printed_probe.py ASSEMBLY.json [--mesh MM] [--thin]")
+        print("give the assembly: as_printed_probe.py ASSEMBLY.json [--mesh MM] "
+              "[--thin | --offsets]")
         return 2
     if host.image_id(host.CAE_IMAGE) is None:
         print(host.missing(host.CAE_IMAGE))
         return 3
     code = "import sys\nfrom typing import Any\n" + inspect.getsource(inner)
-    code += f"\ninner({words[0]!r}, {mesh!r}, {thin!r})\n"
+    code += f"\ninner({words[0]!r}, {mesh!r}, {mode!r})\n"
     name = f"print-bench-{uuid.uuid4().hex[:12]}"
     argv_ = host.container(
         Path.cwd(), [host.CAE_PYTHON, "-I", "-c", code], name, image=host.CAE_IMAGE,
