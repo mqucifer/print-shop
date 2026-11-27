@@ -67,8 +67,9 @@ def _count(counts: dict[str, str], key: str) -> int:
 
 def report(trace: list[str], said: list[tuple[str, str]], most: int = 12) -> list[str]:
     """One line a step, as it was said, in order: when it began and how long it ran, in s; the
-    container's peak at its start and at its end, the most it held while it ran, and of that
-    what was files in /tmp, in GiB. Then the `most` steps the peak rose most in."""
+    container's peak at its start and at its end, the most it held while it ran, of that what
+    was files in /tmp, and what `load`'s own process had in use and had freed but kept then, in
+    GiB. Then the `most` steps the peak rose most in."""
     rows: list[tuple[float, str, list[dict[str, str]]]] = []
     for line in trace:
         if line.startswith(host.STEP_LINE + " "):
@@ -77,7 +78,10 @@ def report(trace: list[str], said: list[tuple[str, str]], most: int = 12) -> lis
         elif line.startswith(host.MEMORY_LINE + " ") and rows:
             _, *fields = line[len(host.MEMORY_LINE) + 1 :].split()
             rows[-1][2].append(dict(f.split("=", 1) for f in fields if "=" in f))
-    lines = ["began s, ran s, peak GiB at its start and its end, most held GiB, of it /tmp GiB"]
+    lines = [
+        "began s, ran s, peak GiB at its start and its end, most held GiB, of it /tmp GiB; and "
+        "load's own process then, in use GiB and freed but kept GiB"
+    ]
     rises: list[tuple[int, str]] = []
     for k, (at, what, counts) in enumerate(rows):
         if not counts:
@@ -87,7 +91,8 @@ def report(trace: list[str], said: list[tuple[str, str]], most: int = 12) -> lis
         first, last = _count(counts[0], "peak"), _count(counts[-1], "peak")
         line = (
             f"{at:8.1f} {took:8.1f}  {_gib(counts[0].get('peak'))} {_gib(counts[-1].get('peak'))}"
-            f"  {_gib(held.get('current'))} {_gib(held.get('shmem'))}  {what}"
+            f"  {_gib(held.get('current'))} {_gib(held.get('shmem'))}"
+            f"  {_gib(held.get('used'))} {_gib(held.get('kept'))}  {what}"
         )
         lines.append(line)
         rises.append((last - first, line))

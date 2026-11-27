@@ -11,9 +11,11 @@ container had held by then (`host.killed`). The lines are the host's, and aren't
 Each line is the line's kind, the seconds since the command began, and what it says:
 - `bench: step 12.3 meshing and solving the joined parts, at a mesh of at most 5 mm`, or once
   a step has ended and no other is going on, `bench: step 15.0 between steps, after ...`
-- `bench: memory 12.3 current=123 peak=456 anon=78 shmem=9`, in bytes, from the container's
-  cgroup: what it holds now, the most it has held, of that what's the process's own, and what's
-  in /tmp, which is memory. `-` where the kernel keeps no count.
+- `bench: memory 12.3 current=123 peak=456 anon=78 shmem=9 used=50 kept=20`, in bytes: from
+  the container's cgroup, what it holds now, the most it has held, of that what's its processes'
+  own, and what's in /tmp, which is memory; and from this process's C library, what it has in
+  use and what it has freed but kept, which no other process, as gmsh or CalculiX, can use.
+  `-` where the kernel or the C library keeps no count.
 
 Standard library only.
 """
@@ -21,6 +23,7 @@ Standard library only.
 from __future__ import annotations
 
 import contextlib
+import ctypes
 import sys
 import threading
 import time
@@ -66,7 +69,30 @@ def memory(cgroup: Path | None = None) -> dict[str, int | None]:
                 found[key] = int(value)
     except OSError:
         pass
+    found.update(heap())
     return found
+
+
+class _Mallinfo2(ctypes.Structure):
+    _fields_ = [
+        (name, ctypes.c_size_t)
+        for name in (
+            "arena", "ordblks", "smblks", "hblks", "hblkhd", "usmblks", "fsmblks", "uordblks",
+            "fordblks", "keepcost",
+        )
+    ]  # fmt: skip
+
+
+def heap() -> dict[str, int | None]:
+    """This process's C library's heap, in bytes: `used`, what's in use, its own and what it
+    maps for large blocks; and `kept`, what's freed and kept for the process. None off glibc."""
+    try:
+        info = ctypes.CDLL("libc.so.6").mallinfo2
+    except (OSError, AttributeError):
+        return {"used": None, "kept": None}
+    info.restype = _Mallinfo2
+    got = info()
+    return {"used": int(got.uordblks + got.hblkhd), "kept": int(got.fordblks)}
 
 
 def _say(kind: str, text: str) -> None:

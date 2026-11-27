@@ -38,15 +38,18 @@ def test_each_step_is_said_as_it_begins_and_the_one_it_was_inside_as_it_ends(
     has ended, that it's between steps; the memory with each step's start, from the cgroup."""
     group = _cgroup(tmp_path, 2 * GIB, 3 * GIB - 1, GIB // 4)
     monkeypatch.setattr(progress, "CGROUP", group)
+    monkeypatch.setattr(progress, "heap", lambda: {"used": GIB, "kept": GIB // 2})
     with progress.step("joining the parts"), progress.step("reading  the\n joint a+b"):
         pass
     said = capsys.readouterr().err.splitlines()
     kinds = [line.split(" ", 3)[1] + " " + line.split(" ", 3)[3] for line in said]
     assert kinds == [
         "step joining the parts",
-        f"memory current={2 * GIB} peak={3 * GIB - 1} anon={2 * GIB - GIB // 4} shmem={GIB // 4}",
+        f"memory current={2 * GIB} peak={3 * GIB - 1} anon={2 * GIB - GIB // 4} shmem={GIB // 4} "
+        f"used={GIB} kept={GIB // 2}",
         "step reading the joint a+b",
-        f"memory current={2 * GIB} peak={3 * GIB - 1} anon={2 * GIB - GIB // 4} shmem={GIB // 4}",
+        f"memory current={2 * GIB} peak={3 * GIB - 1} anon={2 * GIB - GIB // 4} shmem={GIB // 4} "
+        f"used={GIB} kept={GIB // 2}",
         "step joining the parts",
         "step between steps, after joining the parts",
     ]
@@ -54,10 +57,22 @@ def test_each_step_is_said_as_it_begins_and_the_one_it_was_inside_as_it_ends(
     assert (progress.STEP_LINE, progress.MEMORY_LINE) == (host.STEP_LINE, host.MEMORY_LINE)
 
 
-def test_a_cgroup_with_no_counts_is_said_unknown(tmp_path: Path) -> None:
+def test_a_cgroup_with_no_counts_is_said_unknown(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setattr(progress, "heap", lambda: {"used": None, "kept": None})
     assert progress.memory(tmp_path / "none") == dict.fromkeys(
-        ("current", "peak", "anon", "shmem")
+        ("current", "peak", "anon", "shmem", "used", "kept")
     )
+
+
+def test_the_heap_is_counted_where_there_s_a_c_library_that_counts_it() -> None:
+    """glibc's counts on Linux, as in the image and on CI; none on the Mac."""
+    found = progress.heap()
+    if sys.platform.startswith("linux"):
+        assert found["used"] is not None and found["used"] > 0 and found["kept"] is not None
+    else:
+        assert found == {"used": None, "kept": None}
 
 
 def test_load_s_own_steps_say_themselves_and_what_stops_one_is_still_said_with_it(
@@ -213,3 +228,43 @@ def test_giving_back_runs_where_there_is_no_c_library_to_ask() -> None:
     from print_shop.bench import cae
 
     cae.give_back()
+
+
+def _load_trace() -> Any:
+    import importlib.util
+
+    path = Path(__file__).parent.parent / "scripts" / "load_trace.py"
+    spec = importlib.util.spec_from_file_location("load_trace", path)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def test_the_diagnostic_says_no_name_and_no_figure(tmp_path: Path) -> None:
+    """`scripts/load_trace.py` is run on a design's own assembly: each part and joint is said by
+    its number and the joint's kind, and every figure in a step's words is `#`."""
+    trace = _load_trace()
+    made = tmp_path / "a.json"
+    made.write_text(
+        '{"parts": [{"name": "seat-2"}, {"name": "leg"}], '
+        '"joints": [{"between": ["seat-2", "leg"], "kind": "through"}]}'
+    )
+    said = trace.names(made)
+    words = "judging the joint seat-2+leg, through, between seat-2 and leg, at 3.5 mm by 12"
+    assert trace.plain(words, said) == (
+        "judging the joint joint1 (through), through, between part1 and part2, at # mm by #"
+    )
+    lines = trace.report(
+        [
+            "bench: step 1.0 reading the part leg, at 4 mm",
+            f"bench: memory 1.0 current={GIB} peak={GIB} anon={GIB} shmem=0 used={GIB} kept=0",
+            f"bench: memory 6.0 current={2 * GIB} peak={2 * GIB} anon=1 shmem=0 used=1 kept=1",
+            "bench: step 9.0 between steps, after reading the part leg, at 4 mm",
+        ],
+        said,
+    )
+    assert lines[1] == (
+        "     1.0      8.0  1.00 2.00  2.00 0.00  0.00 0.00  reading the part part2, at # mm"
+    )
+    assert "leg" not in "\n".join(lines) and "4 mm" not in "\n".join(lines)
