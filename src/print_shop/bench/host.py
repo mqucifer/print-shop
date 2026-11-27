@@ -77,6 +77,17 @@ TWO_PASSES = 3600
 #: at once: two of these are 8 of it. Every other command, and a `load` without `--parts`,
 #: keeps `MEMORY`, so what each proves of the 3 GiB stands.
 TWO_PASSES_MEMORY = "4g"
+#: The C library's settings for `load`'s container (mqucifer/print-shop#346), the operator's
+#: ruling: a measurement, to be read with and without them on the same case. On a design run's
+#: whole table, `load`'s own process kept freed memory beside gmsh and CalculiX, which run as
+#: processes of their own and can't use it, as much again as it had in use: `cae.give_back`'s
+#: trim returns only what's at the heap's top. Two arenas, not one for each thread FreeCAD and
+#: OCC start, so what's freed is in fewer heaps to fragment; and a trim threshold set at all
+#: fixes glibc's threshold for `mmap` at its 128 KiB, where it otherwise rises up to 32 MiB as
+#: large blocks are freed, so a mesh's or a shape's large blocks are mapped and given back as
+#: they're freed, and the heap's top is trimmed past 16 MiB free. Every other command keeps
+#: glibc's own.
+LOAD_MALLOC = {"MALLOC_ARENA_MAX": "2", "MALLOC_TRIM_THRESHOLD_": str(16 * 2**20)}
 OFFER = "BENCH_TIMEOUT_TWO_PASSES"
 TAKEN = "bench: two passes take the longer limit"
 ABLE = "bench: two passes could read it"
@@ -265,6 +276,12 @@ def asks_two_passes(args: list[str]) -> bool:
     return word == "load" and "--parts" in args[args.index(word) + 1 :]
 
 
+def env_for(args: list[str]) -> dict[str, str]:
+    """More of a bench command's environment: `LOAD_MALLOC` for `load`, and nothing for any
+    other."""
+    return dict(LOAD_MALLOC) if command_word(args) == "load" else {}
+
+
 def memory_for(args: list[str]) -> str:
     """The memory a bench command runs in: `TWO_PASSES_MEMORY` for a `load` that asks for two
     passes with `--parts`, and `MEMORY` for every other."""
@@ -307,7 +324,7 @@ def run(
     # The command's own limit, so a command that can see it coming stops before it and says
     # where it got to (`load` in two passes, mqucifer/print-shop#301); and the longer one it may
     # take up (mqucifer/print-shop#325).
-    env = {"BENCH_TIMEOUT": str(timeout)}
+    env = {**({} if python else env_for(args)), "BENCH_TIMEOUT": str(timeout)}
     if longer is not None:
         env[OFFER] = str(longer)
     memory = MEMORY if python else memory_for(args)

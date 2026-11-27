@@ -130,8 +130,8 @@ class Box:
             timeout = host.TWO_PASSES if host.asks_two_passes(args) else None
             longer = host.offered(args)
         return self._run(
-            host.bench_command(args), where, timeout, image, longer=longer,
-            memory=host.memory_for(args),
+            host.bench_command(args), where, timeout, image, env=host.env_for(args),
+            longer=longer, memory=host.memory_for(args),
         )  # fmt: skip
 
     def helper(

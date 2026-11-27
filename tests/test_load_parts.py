@@ -211,6 +211,23 @@ def test_a_load_in_two_passes_is_given_the_hour_and_one_pass_keeps_its_limit(
     assert given["BENCH_TIMEOUT"] == "600" and host.OFFER not in given
 
 
+def test_load_s_container_runs_with_the_c_library_s_settings_and_no_other_does(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """mqucifer/print-shop#346, the operator's ruling: `load`, in one pass or two, runs with
+    `host.LOAD_MALLOC`, two arenas and a trim threshold of 16 MiB; every other command and a
+    script keep glibc's own."""
+    malloc = {"MALLOC_ARENA_MAX": "2", "MALLOC_TRIM_THRESHOLD_": str(16 * 2**20)}
+    assert malloc == host.LOAD_MALLOC
+    for args in (["load", "a.json", "--parts"], ["load", "a.json"], ["--out", "o", "load", "a"]):
+        env = _ran_under(monkeypatch, tmp_path, args)
+        assert {k: env.get(k) for k in malloc} == malloc, args
+    for args in (["optimise", "p.step"], ["bend", "c.step"], ["clearance", "--parts"]):
+        assert not set(malloc) & set(_ran_under(monkeypatch, tmp_path, args)), args
+    script = _ran_under(monkeypatch, tmp_path, ["load", "a.json"], python=True)
+    assert not set(malloc) & set(script)
+
+
 def _child(code: str) -> list[str]:
     import sys
 
@@ -289,6 +306,9 @@ def test_a_design_round_s_load_in_two_passes_is_given_the_hour_as_host_run_gives
         ("3600", None), ("300", "3600"), ("300", None), ("300", None), ("300", None),
         ("600", None),
     ]  # fmt: skip
+    # And `load` with the C library's settings, as `host.run` gives it (mqucifer/print-shop#346).
+    malloc = [one.get("MALLOC_ARENA_MAX") for one in told]
+    assert malloc == ["2", "2", None, None, None, "2"]
 
 
 def test_a_design_round_waits_the_hour_only_once_two_passes_take_it_up(
