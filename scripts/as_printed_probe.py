@@ -339,13 +339,9 @@ def inner(  # pragma: no cover
             section = as_printed._section(own, layers, at)
             if section is None:
                 return [], []
-            inner = []
-            for face in section.Faces:
-                try:
-                    inner += [f for f in face.makeOffset2D(-walls, 0, False, False, False).Faces
-                              if f.Area > 1e-9]
-                except Exception:  # noqa: BLE001 - nothing left of a face thinner than its walls
-                    continue
+            # Each face offset on its own, a face OCCT can't offset that isn't thinner than
+            # the walls raising, never read as gone.
+            inner, _ = as_printed._inside_walls(own, layers, at, walls)
             sparse = list(inner)
             for along in (top * up, -bottom * up):
                 other = as_printed._section(own, layers, at + along)
@@ -356,26 +352,23 @@ def inner(  # pragma: no cover
             return inner, sparse
 
         def opened(faces: list[Any], radius: float) -> list[Any]:
-            kept = []
-            for face in faces:
-                try:
-                    smaller = face.makeOffset2D(-radius, 0, False, False, False)
-                    kept += [f for f in smaller.makeOffset2D(radius, 0, False, False, False).Faces
-                             if f.Area > 1e-9]
-                except Exception:  # noqa: BLE001 - all of it narrower than twice the radius
-                    continue
-            return kept
+            return list(as_printed.opened(faces, radius, layers))
 
         stage(f"part {k}: each layer's core opened as Orca opens it, every 0.5 mm")
         low, high = as_printed._span(own, layers)
         grid = [low + 0.25 + 0.5 * i for i in range(int((high - low) / 0.5))]
         for name, radius in radii.items():
-            with_gaps, regions, stable, moving = 0, 0, 0, 0
+            with_gaps, regions, stable, moving, unread = 0, 0, 0, 0, 0
             last = None
             for at in grid:
-                inner, _ = layer(at)
+                try:
+                    inner, _ = layer(at)
+                    kept = opened(inner, radius)
+                except Exception:  # noqa: BLE001 - a layer OCCT can't offset isn't read
+                    unread += 1
+                    last = None
+                    continue
                 gap = []
-                kept = opened(inner, radius)
                 for face in inner:
                     rest = face.cut(Part.makeCompound(kept)) if kept else face
                     # Not the corners any opening rounds, a fifth of its radius squared each.
@@ -396,7 +389,7 @@ def inner(  # pragma: no cover
                     last = None
             print(f"  {name} opening: {with_gaps} of {len(grid)} layers have a gap, "
                   f"{regions} gap region(s) in all; from layer to layer {stable} the same and "
-                  f"{moving} moved", flush=True)
+                  f"{moving} moved; {unread} layer(s) OCCT couldn't open, not read", flush=True)
 
         stage(f"part {k}: where its slivers lie")
         counted: collections.Counter[str] = collections.Counter()
@@ -405,8 +398,14 @@ def inner(  # pragma: no cover
             normal = face.normalAt(*face.Surface.parameter(centre))
             point = centre - normal * 0.02
             at = (point.x, point.y, point.z)[layers]
-            inner, sparse = layer(at)
             here = Part.Vertex(point)
+            try:
+                inner, sparse = layer(at)
+                for radius in radii.values():
+                    opened(sparse, radius)
+            except Exception:  # noqa: BLE001
+                counted["in a layer OCCT couldn't open, not read"] += 1
+                continue
 
             def holds(faces: list[Any], here: Any = here) -> bool:
                 return any(f.distToShape(here)[0] < 1e-3 for f in faces)
