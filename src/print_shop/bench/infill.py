@@ -41,10 +41,16 @@ stiffer than a test of it; and it takes as much strain as the tests' own yield o
 modulus, as a share of their plastic's, at the least (`strain_share`): against PETG's own,
 "Tensile Yield Strength [MPa] 47 ± 2" over its 1.5 GPa in the layers' plane, and its 1% across
 them. The patterns no test here reads alone, rectilinear, zigzag, line, crosshatch and
-alignedrectilinear, take grid's: the same straight lines, crossed.
+alignedrectilinear, take grid's: the same straight lines, crossed. A second test of a core
+alone, Alabdli et al. 2026 (*Polymers* 18:2299, PETG grid at 20 to 60%, its angle not said, so
+read against grid's lines their stiffest way), reaches more of its lines, and sets nothing; it
+checks grid from 20%. Tests of a skin round a core read the core too stiff, as their own 100%
+has its solid infill at an angle, softer than walls along the pull: they're upper bounds only
+(`BOUNDS`), and every core is read under each. Each core says which test set its figures and
+from what density any test checks it (`set_by`, `checked_from`).
 
-**The second method** is the lines' figures themselves, beside each test (`checks`), so every
-figure has its test and its lines' reading, with how far apart they are.
+**The second method** is the lines' figures themselves, beside each test (`checks`) and each
+bound (`bounds`), so every figure has its test and its lines' reading, with how far apart.
 
 Plain Python and NumPy: the cae image reads it in `load`, and the tests in the first.
 """
@@ -72,44 +78,119 @@ LINES: dict[str, tuple[tuple[float, float, bool], ...]] = {
     "triangles": ((0.0, 1 / 3, True), (60.0, 1 / 3, True), (120.0, 1 / 3, True)),
     "gyroid": (),
 }
-#: Ben hadj Hassine, Chatti, Louhichi and Seibi (2024), "Experimental Study of the Tensile
-#: Behavior of Structures Obtained by FDM 3D Printing Process", Polymers 16(11):1562,
-#: doi:10.3390/polym16111562, Table 3, "Mixed full factorial design of experiments and tensile
-#: test results": each row's pattern, density in percent and cell orientation in degrees (its
-#: Table 2's levels: "Honeycomb Gyroid Grid Triangles"; "40 50 60"; "0 45 90"), then its
-#: "Yield Strength (MPa)" and "Elastic Modulus (MPa)", as printed. Honeycomb isn't read here.
-TESTS: tuple[tuple[str, float, float, float, float], ...] = (
-    ("grid", 40, 0, 1.84, 344.5), ("grid", 40, 45, 1.28, 78.0), ("grid", 40, 90, 1.84, 344.5),
-    ("grid", 50, 0, 3.60, 605.0), ("grid", 50, 45, 2.72, 272.0), ("grid", 50, 90, 3.60, 605.0),
-    ("grid", 60, 0, 4.49, 773.5), ("grid", 60, 45, 2.91, 403.0), ("grid", 60, 90, 4.49, 773.5),
-    ("gyroid", 40, 0, 2.10, 227.5), ("gyroid", 40, 45, 1.34, 111.5),
-    ("gyroid", 40, 90, 1.93, 210.0), ("gyroid", 50, 0, 3.35, 514.5),
-    ("gyroid", 50, 45, 1.86, 238.5), ("gyroid", 50, 90, 2.67, 434.5),
-    ("gyroid", 60, 0, 3.80, 488.0), ("gyroid", 60, 45, 3.66, 360.0),
-    ("gyroid", 60, 90, 4.55, 685.0),
-    ("triangles", 40, 0, 2.56, 411.0), ("triangles", 40, 45, 1.73, 483.0),
-    ("triangles", 40, 90, 1.84, 325.0), ("triangles", 50, 0, 3.33, 339.5),
-    ("triangles", 50, 45, 2.91, 446.5), ("triangles", 50, 90, 4.00, 616.5),
-    ("triangles", 60, 0, 4.67, 624.0), ("triangles", 60, 45, 4.29, 646.0),
-    ("triangles", 60, 90, 4.43, 696.5),
+#: The published tests the figures are taken from, each with its own words for its plastic, and
+#: the figure each share is of: the study's own solid, as its own tests measured it.
+@dataclass(frozen=True)
+class Source:
+    key: str
+    said: str
+    material: str
+    #: The study's solid plastic's stiffness and strength, in MPa, that its shares are of.
+    solid_mpa: float
+    strength_mpa: float
+
+
+SOURCES = {
+    s.key: s
+    for s in (
+        Source(
+            "ben-hadj-hassine-2024",
+            "Ben hadj Hassine, Chatti, Louhichi and Seibi (2024), \"Experimental Study of the "
+            "Tensile Behavior of Structures Obtained by FDM 3D Printing Process\", Polymers "
+            "16(11):1562, doi:10.3390/polym16111562: PLA, \"Top and bottom solid layer 0 | Shell "
+            "number 0\", with an extensometer, its plastic's \"tensile strength of 20.9 MPa, "
+            "tensile modulus of 1882 Mpa\"",
+            "pla", 1882.0, 20.9,
+        ),
+        Source(
+            "alabdli-2026",
+            "Alabdli, Jalal, Alqarni, Basalah and Damiati (2026), \"Influence of Infill Density "
+            "on Bacterial Colonization and Mechanical Performance of 3D-Printed PETG "
+            "Scaffolds\", Polymers 18:2299, doi:10.3390/polym18182299: PETG grid, its Table 1, "
+            "strain \"from the crosshead displacement, corrected for machine compliance\", "
+            "stress over \"the original gross cross-sectional area\", its walls and shells not "
+            "said, its own 100% \"418.0 ± 41.8\" MPa and \"12.50 ± 0.75\" MPa",
+            "petg", 418.0, 12.50,
+        ),
+    )
+}
+#: Each test of a core alone: its source, its pattern, its density in percent, the angle of the
+#: pull to its lines in degrees, or None where the source doesn't say, and its strength and
+#: modulus in MPa, as printed. Ben hadj Hassine's Table 3, "Yield Strength (MPa)" and "Elastic
+#: Modulus (MPa)" by its Table 2's levels, "Honeycomb Gyroid Grid Triangles", "40 50 60" and
+#: cell orientation "0 45 90"; and Alabdli's Table 1, "UTS (MPa)" and "Young's Modulus (MPa)".
+TESTS: tuple[tuple[str, str, float, float | None, float, float], ...] = tuple(
+    ("ben-hadj-hassine-2024", *row) for row in (
+        ("grid", 40, 0, 1.84, 344.5), ("grid", 40, 45, 1.28, 78.0), ("grid", 40, 90, 1.84, 344.5),
+        ("grid", 50, 0, 3.60, 605.0), ("grid", 50, 45, 2.72, 272.0), ("grid", 50, 90, 3.60, 605.0),
+        ("grid", 60, 0, 4.49, 773.5), ("grid", 60, 45, 2.91, 403.0), ("grid", 60, 90, 4.49, 773.5),
+        ("gyroid", 40, 0, 2.10, 227.5), ("gyroid", 40, 45, 1.34, 111.5),
+        ("gyroid", 40, 90, 1.93, 210.0), ("gyroid", 50, 0, 3.35, 514.5),
+        ("gyroid", 50, 45, 1.86, 238.5), ("gyroid", 50, 90, 2.67, 434.5),
+        ("gyroid", 60, 0, 3.80, 488.0), ("gyroid", 60, 45, 3.66, 360.0),
+        ("gyroid", 60, 90, 4.55, 685.0),
+        ("triangles", 40, 0, 2.56, 411.0), ("triangles", 40, 45, 1.73, 483.0),
+        ("triangles", 40, 90, 1.84, 325.0), ("triangles", 50, 0, 3.33, 339.5),
+        ("triangles", 50, 45, 2.91, 446.5), ("triangles", 50, 90, 4.00, 616.5),
+        ("triangles", 60, 0, 4.67, 624.0), ("triangles", 60, 45, 4.29, 646.0),
+        ("triangles", 60, 90, 4.43, 696.5),
+    )
+) + tuple(
+    ("alabdli-2026", "grid", density, None, strength, modulus)
+    for density, strength, modulus in ((20, 1.27, 18.5), (40, 2.79, 47.9), (60, 5.72, 133.6))
 )
-#: The same paper, its plastic: Polymaker PolyTerra PLA, "tensile strength of 20.9 MPa, tensile
-#: modulus of 1882 Mpa".
-TESTED_MPA, TESTED_STRENGTH_MPA = 1882.0, 20.9
-#: Its Poisson's ratio isn't given: the lines' figures are read with PETG's, `bend`'s 0.38.
-#: Which tested pattern stands for each read here: the line patterns take grid's.
+
+
+def backed_out(apparent: float, solid: float, area: float, skin: float) -> float:
+    """A core's stiffness as a share of the solid's, from a test of a skin round it: the
+    specimen's apparent modulus over its gross area, less its skin's, solid, over its
+    skin's area, over what's left. It reads the core stiffer than it is: a test's own 100%
+    has its solid infill at its pattern's angle, softer than walls along the pull, so the
+    walls are read too soft. It's an upper bound only (`BOUNDS`)."""
+    return (apparent * area - solid * skin) / (area - skin) / solid
+
+
+#: Tests of a skin round a core, as upper bounds a core is held under at its density and its
+#: angle to the pull, each as its source's own figures give it:
+#: - Racz and Dudescu (2022), "Numerical Investigation of the Infill Rate upon Mechanical
+#:   Proprieties of 3D-Printed Materials", Polymers 14:2022, doi:10.3390/polym14102022: ABS,
+#:   rectilinear "0° orientation of the pattern with respect to the tensile direction", "A
+#:   uniaxial extensometer was used", "(4 mm thickness, 10 mm width; ... cross-section area of
+#:   40 mm2)"; Table 4's EXP, "20% | 982.0", "40% | 1177.5", "100% | 1521.8"; and Table 2's
+#:   material in the section, "20% | 20.50" and "40% | 23.85" mm², so the core's gross area is
+#:   (23.85 - 20.50) / 0.2, 16.75 mm², and the skin's the rest.
+#: - Rismalia et al. (2019), "Infill pattern and density effects on the tensile properties of
+#:   3D printed PLA material", J. Phys.: Conf. Ser. 1402:044041, doi:10.1088/1742-6596/1402/
+#:   4/044041: PLA, "Wall Thickness 1.2 mm", "Top/Bottom Thickness 0.6 mm", strain gauges,
+#:   grid "45 degrees angle with respect to the axial axis", Table 2 "Grid 25 % 2.76 ± 0.38"
+#:   GPa, and "grid pattern with 100% infill density ... 3.6 GPa"; ASTM D638 Type I, 13 mm
+#:   wide, its thickness not said: 3.2 mm, which of the two it might be reads the lower bound.
+BOUNDS: tuple[tuple[str, str, float, float, float], ...] = (
+    ("racz-dudescu-2022", "rectilinear", 20, 0.0,
+     backed_out(982.0, 1521.8, 40.0, 40.0 - (23.85 - 20.50) / 0.2)),
+    ("racz-dudescu-2022", "rectilinear", 40, 0.0,
+     backed_out(1177.5, 1521.8, 40.0, 40.0 - (23.85 - 20.50) / 0.2)),
+    ("rismalia-2019", "grid", 25, 45.0,
+     backed_out(2760.0, 3600.0, 13 * 3.2, 13 * 3.2 - (13 - 2.4) * (3.2 - 1.2))),
+)
+#: Which tested pattern stands for each read here: the line patterns take grid's, the same
+#: straight lines, crossed; and which a bound of it is read against: the same lines.
 TESTED_AS = {
     "rectilinear": "grid", "zigzag": "grid", "line": "grid", "crosshatch": "grid",
     "alignedrectilinear": "grid", "grid": "grid", "triangles": "triangles", "gyroid": "gyroid",
 }
+BOUNDED_AS = {
+    "rectilinear": "rectilinear", "zigzag": "rectilinear", "line": "rectilinear",
+    "crosshatch": "rectilinear", "grid": "grid",
+}
+#: Its Poisson's ratio isn't given: the lines' figures are read with PETG's, `bend`'s 0.38.
 #: Prusament PETG's datasheet (version 1.1, 16-02-2022): "Tensile Yield Strength [MPa] 47 ± 2"
 #: for a specimen printed flat, over its tensile modulus, 1.5 GPa: 3.13%, what the tests' shares
-#: of their plastic's yield over its modulus are taken of, in the layers' plane.
+#: of their plastic's strength over its modulus are taken of, in the layers' plane.
 YIELD_MPA = 47.0
-#: The least and most density read, in percent. The tests run from 40% to 60%: below 40% the
-#: core is the lines' figures at the tests' share, which no test checks.
+#: The least and most density read, in percent. Past what a pattern's tests and bounds reach
+#: (`checked_from`) the core is the lines' figures at the tests' share, which nothing checks.
 LEAST, MOST = 10.0, 60.0
-TESTED_FROM = 40.0
 
 
 def _outer(a: np.ndarray, b: np.ndarray) -> np.ndarray:
@@ -185,39 +266,77 @@ def lines_stiffness(
 _FLAT = (np.array([0.0, 0.0, 1.0]), np.array([1.0, 0.0, 0.0]), np.array([0.0, 1.0, 0.0]))
 
 
-def checks(tested: str, poisson: float = 0.38) -> list[dict[str, float]]:
-    """Each test of a pattern beside its lines' reading, at the test's density, pulled at the
-    test's angle to its lines in the layers' plane: each as a share of the tested plastic's
-    stiffness, and the test's yield over its modulus as a share of the plastic's."""
+def _lines(pattern: str, density: float, angle: float | None, poisson: float = 0.38) -> float:
+    """A core's stiffness by its lines alone, as a share of its solid's, pulled at `angle` to
+    its lines in the layers' plane; at None, the way it's stiffest, so a test whose angle isn't
+    said reads as the least share of its lines it could be."""
     up, first, second = _FLAT
+    tensor = lines_stiffness(pattern, density, 0.0, 1.0, poisson, up, first, second)
+    angles = [angle] if angle is not None else [float(a) for a in range(0, 91, 5)]
+    return max(
+        pulled(tensor, math.cos(math.radians(a)) * first + math.sin(math.radians(a)) * second)
+        for a in angles
+    )
+
+
+def checks(tested: str, poisson: float = 0.38) -> list[dict[str, Any]]:
+    """Each test of a pattern beside its lines' reading, at the test's density, pulled at the
+    test's angle to its lines in the layers' plane, or the way they're stiffest where it isn't
+    said: each as a share of its own source's solid, and the test's strength over its
+    modulus as a share of its solid's."""
     found = []
-    for pattern, density, angle, strength, modulus in TESTS:
+    for key, pattern, density, angle, strength, modulus in TESTS:
         if pattern != tested:
             continue
-        tensor = lines_stiffness(pattern, density, 0.0, TESTED_MPA, poisson, up, first, second)
-        way = math.cos(math.radians(angle)) * first + math.sin(math.radians(angle)) * second
-        lines = pulled(tensor, way) / TESTED_MPA
+        source = SOURCES[key]
+        lines = _lines(pattern, density, angle, poisson)
+        share = modulus / source.solid_mpa
         found.append({
+            "source": key,
+            "material": source.material,
             "density_pct": density,
             "angle_deg": angle,
-            "test_share": modulus / TESTED_MPA,
+            "test_share": share,
             "lines_share": lines,
-            "scale": modulus / TESTED_MPA / lines,
-            "strain_share": (strength / modulus) / (TESTED_STRENGTH_MPA / TESTED_MPA),
+            "scale": share / lines,
+            "strain_share": (strength / modulus) / (source.strength_mpa / source.solid_mpa),
         })
     return found
+
+
+def set_by(tested: str, figure: str = "scale") -> dict[str, Any]:
+    """The test that sets a pattern's `scale` or `strain_share`: the least of all its tests."""
+    return min(checks(tested), key=lambda c: float(c[figure]))
 
 
 def scale(tested: str) -> float:
     """The least share of its lines' stiffness any test of a pattern reached, at most 1: what
     the core's lines' stiffness is held to, so it's read no stiffer than any test of it."""
-    return min(1.0, min(c["scale"] for c in checks(tested)))
+    return min(1.0, float(set_by(tested)["scale"]))
 
 
 def strain_share(tested: str) -> float:
-    """The least of a pattern's tests' yield over their modulus, as a share of their plastic's
-    strength over its modulus, at most 1: the share of the solid's strain its core takes."""
-    return min(1.0, min(c["strain_share"] for c in checks(tested)))
+    """The least of a pattern's tests' strength over their modulus, as a share of their
+    plastic's, at most 1: the share of the solid's strain its core takes."""
+    return min(1.0, float(set_by(tested, "strain_share")["strain_share"]))
+
+
+def bounds(pattern: str) -> list[dict[str, Any]]:
+    """Each upper bound on a pattern's core (`BOUNDS`), beside what's read for it there."""
+    found = []
+    for key, bounded, density, angle, share in BOUNDS:
+        if BOUNDED_AS.get(pattern) != bounded:
+            continue
+        read = scale(TESTED_AS[pattern]) * _lines(bounded, density, angle)
+        found.append({"source": key, "density_pct": density, "angle_deg": angle,
+                      "bound_share": share, "read_share": read})
+    return found
+
+
+def checked_from(pattern: str) -> float:
+    """The least density any test or bound of a pattern reaches, in percent."""
+    tested = [c["density_pct"] for c in checks(TESTED_AS[pattern])]
+    return float(min(tested + [b["density_pct"] for b in bounds(pattern)]))
 
 
 @dataclass(frozen=True)
@@ -288,7 +407,11 @@ class Core:
         along = math.radians(self.angle_deg)
         stiff_along = pulled(tensor, math.cos(along) * first + math.sin(along) * second)
         stiff_across = pulled(tensor, up)
-        unchecked = self.density_pct < TESTED_FROM
+        start = checked_from(self.pattern)
+        unchecked = self.density_pct < start
+        setter = set_by(self.tested)
+        angle = ("its stiffest way" if setter["angle_deg"] is None
+                 else f"{setter['angle_deg']:g}° to its lines")
         return {
             "pattern": self.pattern,
             "density_pct": self.density_pct,
@@ -299,12 +422,17 @@ class Core:
             "modulus_along_mpa": round(stiff_along, 2),
             "modulus_across_mpa": round(stiff_across, 2),
             "unchecked": unchecked,
+            "checked_from_pct": start,
+            "scale_set_by": {k: setter[k] for k in ("source", "material", "density_pct",
+                                                     "angle_deg")},
             "said": (
                 f"{self.pattern} at {self.density_pct:g}%, {how}; {stiff_along:.0f} MPa along "
                 f"{self.angle_deg:g}° and {stiff_across:.0f} MPa across its layers, "
-                f"{100 * self.scale:.0f}% of its lines' own as the least of the tests of "
-                f"{self.tested} reached"
-                + (f", below the tests' {TESTED_FROM:g}% to {MOST:g}%" if unchecked else "")
+                f"{100 * self.scale:.0f}% of its lines' own, the least any test of "
+                f"{self.tested} reached: {setter['source']}'s {setter['material'].upper()} at "
+                f"{setter['density_pct']:g}%, pulled {angle}"
+                + (f"; below the {start:g}% the published tests reach, unchecked" if unchecked
+                   else "")
             ),
         }
 

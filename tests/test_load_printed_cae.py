@@ -143,9 +143,11 @@ def test_the_reply_says_what_it_assumed_and_that_no_print_has_checked_it(cae: An
     assert "walls 0.90 mm thick, 1.00 mm of shells under each top face" in answer.text
     assert "Ben hadj Hassine et al. 2024, Polymers 16:1562" in answer.text
     assert "mqucifer/print-shop#340" in answer.text
-    assert "below the tests' 40% to 60%" in answer.text, "20% is below what the tests checked"
+    assert "Alabdli et al. 2026" in answer.text and "grid from 20%" in answer.text
     core = answer.numbers["parts"]["beam"]["cores"][0]
-    assert core["unchecked"] and core["tested_as"] == "grid"
+    assert not core["unchecked"] and core["checked_from_pct"] == 20
+    assert core["tested_as"] == "grid"
+    assert core["scale_set_by"]["source"] == "ben-hadj-hassine-2024"
     assert core["stretch_limit_pct"] == pytest.approx(round(infill.core(
         Settings(pattern="grid", infill=20, infill_angle=0), MATERIALS["petg"]).along_pct, 4))
     assert "on the coarser mesh" in answer.text and "core in the part" in answer.text

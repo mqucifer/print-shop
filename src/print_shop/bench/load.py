@@ -2683,8 +2683,6 @@ def _as_printed(assembly: Assembly, report: Report, cores: dict[str, list[Any]])
     """What a read as printed assumed (mqucifer/print-shop#337): each printed part's cells, its
     walls and shells, its cores' figures and their source, that no print has checked them, and
     what of it is still read solid."""
-    from .infill import MOST, TESTED_FROM
-
     found: dict[str, Any] = {}
     for part in assembly.parts:
         if part.name not in cores:
@@ -2719,21 +2717,28 @@ def _as_printed(assembly: Assembly, report: Report, cores: dict[str, list[Any]])
                 "not as printed: stronger than a printed part's, so read it with a margin"
             )
     report.numbers["printed"] = found
+    patterns = sorted({c["pattern"] for cells in found.values() for c in cells})
+    reach = "; ".join(
+        f"{p} from {infill.checked_from(p):g}%, "
+        f"set by {infill.set_by(infill.TESTED_AS[p])['source']}"
+        for p in patterns
+    )
     report.line(
         "each core's figures: its lines as Orca 2.4.2 lays them, each set stiff along its run, "
         "walled through the layers where a pattern lays the same lines each layer, and bending "
         "between them (Ashby 2006, The properties of foams and lattices); held to the least "
-        "share of that the published tests of an infill alone reached, Ben hadj Hassine et al. "
-        "2024, Polymers 16:1562, PLA with no walls or shells at 40, 50 and 60%, its Table 3, and "
-        "taking the strain at its yield as a share of the solid's those tests did, at the least "
-        f"(`infill.py`, docs/bench.md). Below {TESTED_FROM:g}% no test checks them; none goes "
-        f"past {MOST:g}%"
+        "share of that any published test of an infill alone reached, Ben hadj Hassine et al. "
+        "2024, Polymers 16:1562 (PLA with no walls or shells, 40 to 60%), and Alabdli et al. "
+        "2026, Polymers 18:2299 (PETG grid, 20 to 60%), its strain as a share of the solid's "
+        "those tests took, at the least; and under each published test of a skin round a core "
+        "as an upper bound (`infill.BOUNDS`, docs/bench.md). Checked by them: "
+        f"{reach}; below that no test checks them, and none goes past {infill.MOST:g}%"
     )
     report.note(
-        "the infill's figures are published tests of PLA, as shares of their own plastic's, "
-        "taken for PETG: none has been checked against a print from this printer yet, which "
-        "the printed coupons will do (mqucifer/print-shop#340). A printed part hangs at its "
-        "solid weight, more than its own"
+        "the infill's figures are published tests of PLA, ABS and PETG, as shares of their "
+        "own plastic's, taken for this PETG: none has been checked against a print from this "
+        "printer yet, which the printed coupons will do (mqucifer/print-shop#340). A printed "
+        "part hangs at its solid weight, more than its own"
     )
 
 

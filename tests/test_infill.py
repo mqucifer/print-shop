@@ -37,18 +37,52 @@ def test_each_pattern_s_share_of_its_lines_is_the_least_any_test_of_it_reached()
     triangles' least are theirs."""
     for pattern in ("grid", "gyroid", "triangles"):
         rows = infill.checks(pattern)
-        assert len(rows) == 9, "three densities, each at three angles"
+        mine = [r for r in rows if r["source"] == "ben-hadj-hassine-2024"]
+        assert len(mine) == 9, "three densities, each at three angles"
         assert infill.scale(pattern) == pytest.approx(min(r["scale"] for r in rows))
         for row in rows:
             assert row["scale"] == pytest.approx(row["test_share"] / row["lines_share"])
             # Never stiffer than a test of it.
             assert infill.scale(pattern) * row["lines_share"] <= row["test_share"] + 1e-12
-    worst = min(infill.checks("grid"), key=lambda r: r["scale"])
-    assert (worst["density_pct"], worst["angle_deg"]) == (40, 45)
+    worst = infill.set_by("grid")
+    assert (worst["source"], worst["density_pct"], worst["angle_deg"]) == (
+        "ben-hadj-hassine-2024", 40, 45)
     assert worst["test_share"] == pytest.approx(78.0 / 1882)
     assert infill.scale("grid") == pytest.approx(0.218, abs=0.001)
     assert infill.scale("gyroid") == pytest.approx(0.370, abs=0.001)
     assert infill.scale("triangles") == pytest.approx(0.396, abs=0.001)
+
+
+def test_a_petg_test_whose_angle_isn_t_said_is_read_against_its_lines_stiffest_way() -> None:
+    """Alabdli et al. 2026, Table 1: PETG grid at 20%, "18.5 ± 3.7" MPa against its own 100%,
+    "418.0 ± 41.8": 0.044 of it, where grid's lines at their stiffest, along one set, are 0.163
+    of the solid. So 0.27, above Ben hadj Hassine's least, which stands."""
+    rows = {r["density_pct"]: r for r in infill.checks("grid") if r["source"] == "alabdli-2026"}
+    assert set(rows) == {20, 40, 60}
+    assert rows[20]["test_share"] == pytest.approx(18.5 / 418.0)
+    assert rows[20]["lines_share"] == pytest.approx(
+        max(infill._lines("grid", 20, a) for a in range(0, 91, 5)))
+    assert rows[20]["scale"] == pytest.approx(0.271, abs=0.001)
+    assert all(r["scale"] > infill.scale("grid") for r in rows.values())
+    assert rows[20]["material"] == "petg"
+
+
+def test_a_skin_round_a_core_is_an_upper_bound_and_every_core_is_read_under_it() -> None:
+    """Racz and Dudescu 2022: ABS rectilinear at 20%, 982.0 MPa over its 40 mm², its core
+    (23.85 - 20.50) / 0.2 = 16.75 mm² of it, the rest skin at its own 100%'s 1521.8:
+    (982.0 · 40 - 1521.8 · 23.25) / 16.75 = 232.7 MPa, 0.153 of the solid."""
+    assert infill.backed_out(982.0, 1521.8, 40.0, 23.25) == pytest.approx(232.7 / 1521.8,
+                                                                          rel=1e-3)
+    for pattern in ("rectilinear", "zigzag", "line", "crosshatch", "grid"):
+        found = infill.bounds(pattern)
+        assert found, pattern
+        for bound in found:
+            assert 0 < bound["read_share"] < bound["bound_share"], (pattern, bound)
+    assert infill.bounds("gyroid") == [] and infill.bounds("triangles") == []
+    # What's checked, and from what density: grid and the lines by PETG at 20% and the
+    # bounds; gyroid and triangles only by the tests of a core alone, from 40%.
+    assert infill.checked_from("grid") == infill.checked_from("rectilinear") == 20
+    assert infill.checked_from("gyroid") == infill.checked_from("triangles") == 40
 
 
 def test_the_strain_a_core_takes_is_the_tests_yield_over_their_modulus_at_the_least() -> None:
