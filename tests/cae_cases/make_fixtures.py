@@ -58,6 +58,12 @@ axis and 80 tall, with a 2° seam between them, and a rib across the seam: a cap
 round the slices' outsides, and a fin under it that fills the seam, touching both. Each is drawn
 in place, and again in its print pose and placed by its turns: about x, y or z, and two combined.
 And a peg 6 across standing in a blind hole 10 deep in a cube of 20, touching its wall and floor.
+
+`seam/` (mqucifer/print-shop#334): a strip 1.5 thick, 30 long and 40 tall, bonded in a seam
+between two blocks and standing 10 proud of their tops, the seam turned 30° about z. The strip
+is drawn flat, as printed, and placed by a turn about x and then about z, its `at` written to six
+decimals, as an assembly's file gives it, so it sits a hair, 0.26 µm, off the blocks; and drawn
+standing and placed by the one turn about z, exactly where it is, and by its `at` to six decimals.
 """
 
 from __future__ import annotations
@@ -1024,8 +1030,113 @@ def turns() -> None:
     assembly(out / "peg.json", pegged, [{"between": ["peg", "socket"], "kind": "touching"}], floor)
 
 
+#: The strip in its seam (mqucifer/print-shop#334): its thickness, length and height, how far it
+#: stands off the floor, and the seam's turn about z.
+SEAM_T, SEAM_L, SEAM_H, SEAM_LOW, SEAM_TURN = 1.5, 30.0, 40.0, 10.0, 30.0
+#: Where it's placed in its seam's own axes before that turn, as a design run's ribs are.
+SEAM_AT = (0.0, -2.35, 0.0)
+
+
+def seam() -> None:
+    """A strip in a seam between two blocks, the seam off the axes: placed by two turns, with
+    its `at` to six decimals, and by one, exactly."""
+    out = Path("seam")
+    round_z = [["z", SEAM_TURN]]
+    both = [["x", -90], ["z", SEAM_TURN]]
+
+    def in_seam(low: tuple[float, float, float], high: tuple[float, float, float]) -> Any:
+        made = box(low, high)
+        made.transformShape(_turned(round_z), True)
+        return made
+
+    t, long, h = SEAM_T, SEAM_L, SEAM_H
+    # The blocks' tops below the strip's: it stands proud of them, so the faces it meets them
+    # by are bounded by their edges as well as its own.
+    save(in_seam((-10, -20, 0), (long + 10, 0, h)), out / "block1.step")
+    save(in_seam((-10, t, 0), (long + 10, t + 20, h)), out / "block2.step")
+    at = _turned(round_z).multVec(App.Vector(*SEAM_AT))
+    strip = box((0, 0, SEAM_LOW), (long, t, SEAM_LOW + h))
+    strip.transformShape(App.Matrix(1, 0, 0, -SEAM_AT[0], 0, 1, 0, -SEAM_AT[1], 0, 0, 1,
+                                    -SEAM_AT[2], 0, 0, 0, 1), True)  # fmt: skip
+    strip.transformShape(_turned(round_z), True)
+    save(print_pose(strip, both), out / "strip-flat.step")
+    save(print_pose(strip, round_z), out / "strip-standing.step")
+    blocks: Rows = [{"name": f"block{k}", "file": f"block{k}.step", "layers": "z"} for k in (1, 2)]
+    joints: Rows = [{"between": ["strip", f"block{k}"], "kind": "bonded"} for k in (1, 2)]
+    held = [{"plane": "z=0", "how": "fixed"}]
+    flat = {"name": "strip", "file": "strip-flat.step", "turn": both, "layers": "z"}
+    standing = {"name": "strip", "file": "strip-standing.step", "turn": round_z, "layers": "y"}
+    exact, written = [at.x, at.y, at.z], [round(v, 6) for v in (at.x, at.y, at.z)]
+    assembly(out / "two-turns.json", [*blocks, {**flat, "at": written}], joints, held)
+    assembly(out / "one-turn.json", [*blocks, {**standing, "at": exact}], joints, held)
+    assembly(out / "one-turn-written.json", [*blocks, {**standing, "at": written}], joints, held)
+
+
+#: A printed bar's settings (mqucifer/print-shop#337): the store's own lines, 0.45 mm walls and
+#: 0.2 mm layers, five layers on top and three under, as `profiles/standard` gives them.
+PRINT = {"line_width": 0.45, "top": 5, "bottom": 3, "pattern": "grid", "infill_angle": 0,
+         "layer_height": 0.2, "up": "+z"}
+#: The printed bar's walls and densities, and its box round the root.
+PRINT_WALLS, PRINT_INFILL = (2, 4), (20, 40, 60)
+
+
+def printed() -> None:
+    """The beam printed (mqucifer/print-shop#337): at each of 2 wall counts and 3 densities,
+    held at its root and loaded at its tip as `load/one.json` is; and at 2 walls and 20% with a
+    box round its root, its first 30 mm, at 60% and with walls of its own."""
+    out = Path("load")
+    wall = [{"plane": "x=0", "how": "fixed"}]
+    for walls in PRINT_WALLS:
+        for infill in PRINT_INFILL:
+            settings = {**PRINT, "walls": walls, "infill": infill}
+            row = {"name": "beam", "file": "beam.step", "layers": "z", "print": settings}
+            assembly(out / f"printed-{walls}-{infill}.json", [row], held=wall)
+    root = {"name": "root", "box": [[-1, -1, -1], [30, BEAM_W + 1, BEAM_T + 1]], "infill": 60,
+            "why": "denser at the root, where it's bent most"}
+    walled = {**root, "name": "walled", "walls": 4}
+    # The beam's lower half denser, as a band of layers in its own z, and a box over it at its
+    # root, which wins over the band whatever their order.
+    band = {"name": "band", "layers": [0, 5], "infill": 40}
+    for name, region in (("dense", root), ("walled", walled)):
+        settings = {**PRINT, "walls": 2, "infill": 20, "regions": [region]}
+        row = {"name": "beam", "file": "beam.step", "layers": "z", "print": settings}
+        assembly(out / f"printed-{name}.json", [row], held=wall)
+    settings = {**PRINT, "walls": 2, "infill": 20, "regions": [root, band]}
+    row = {"name": "beam", "file": "beam.step", "layers": "z", "print": settings}
+    assembly(out / "printed-band.json", [row], held=wall)
+    # The beam printed turned over, own -z up: its 5 top layers on its z 0 face.
+    settings = {**PRINT, "walls": 2, "infill": 20, "up": "-z"}
+    row = {"name": "beam", "file": "beam.step", "layers": "z", "print": settings}
+    assembly(out / "printed-over.json", [row], held=wall)
+    # A block pulled straight across its layers, held on its bed face, its top pulled up.
+    save(box((0, 0, 0), (40, 40, 10)), out / "pulled.step")
+    settings = {**PRINT, "walls": 2, "infill": 20}
+    row = {"name": "block", "file": "pulled.step", "layers": "z", "print": settings}
+    assembly(out / "printed-pulled.json", [row], held=[{"plane": "z=0", "how": "fixed"}])
+    # The beam as two halves bolted at its middle, as `two.json`, each printed: each has its own
+    # walls at the faces where they meet.
+    half = BEAM_L / 2
+    halves: Rows = [
+        {"name": "root", "file": "half.step", "layers": "z",
+         "print": {**PRINT, "walls": 2, "infill": 20}},
+        {"name": "tip", "file": "half.step", "at": [half, 0, 0], "layers": "z",
+         "print": {**PRINT, "walls": 2, "infill": 20}},
+    ]
+    bolted: Rows = [
+        {"between": ["root", "tip"], **BOLT, **HOLDS, "at": [[half, BEAM_W / 2, BEAM_T / 2]]}
+    ]
+    assembly(out / "printed-two.json", halves, bolted, wall)
+    # The same bar's lines along it, and across it.
+    for angle in (0, 45):
+        settings = {**PRINT, "pattern": "rectilinear", "walls": 2, "infill": 20,
+                    "infill_angle": angle}
+        row = {"name": "beam", "file": "beam.step", "layers": "z", "print": settings}
+        assembly(out / f"printed-lines-{angle}.json", [row], held=wall)
+
+
 def main() -> None:
     loads()
+    printed()
     throughs()
     peaks()
     shears()
@@ -1034,6 +1145,7 @@ def main() -> None:
     plays()
     turned()
     turns()
+    seam()
     large()
     stool()
     sleeved()

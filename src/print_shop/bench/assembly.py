@@ -37,6 +37,10 @@ whoever designs the parts (`docs/bench.md` has it in full):
   it (held along the plane's axis only, free to slide) or `fixed` to it. With none, it stands on
   its lowest level.
 
+- **`print`**, on a part, is how it's printed (`printed.py`, mqucifer/print-shop#337): its walls,
+  shells and infill, and regions of their own. `load` reads a part that has it as a skin round
+  an infill core (`as_printed.py`); one without it is solid.
+
 Plain Python and NumPy: `load` reads it in the second image and `fit-bed` in the first.
 """
 
@@ -50,6 +54,7 @@ from typing import Any
 
 import numpy as np
 
+from . import printed as printing
 from .bend import LIMITS
 from .report import NoAnswer
 
@@ -280,6 +285,9 @@ class PartAt:
     #: what of the part `load` leaves out to read it as a lower bound, where the whole can't be
     #: read (mqucifer/print-shop#295).
     band: str | None = None
+    #: How it's printed, where the file says (`printed.py`, mqucifer/print-shop#337): `load`
+    #: reads it as a skin of walls and shells round an infill core. None reads it solid.
+    printed: printing.Printed | None = None
 
     def matrix(self) -> np.ndarray:
         """Its turns as one rotation."""
@@ -517,7 +525,18 @@ def _part(entry: Any, folder: Path) -> PartAt:
         str(_one_of(entry["layers"], AXES, f"{name}'s `layers`")),
         _with(entry.get("with", []), name, folder),
         _band(entry.get("band"), name, folder),
+        _printed(entry.get("print"), name),
     )
+
+
+def _printed(given: Any, name: str) -> printing.Printed | None:
+    """A part's `print`: its walls, shells and infill, and its regions, or None for solid."""
+    if given is None:
+        return None
+    try:
+        return printing.read(given, f"the part {name}'s print")
+    except ValueError as exc:
+        raise NoAnswer(str(exc)) from exc
 
 
 def _band(given: Any, name: str, folder: Path) -> str | None:

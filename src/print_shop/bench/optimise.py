@@ -933,6 +933,13 @@ def run(args: Any, report: Report) -> None:
         "walls and infill, creep, and any other load aren't in it. The kept material is BESO's "
         "answer for that case on this mesh, jagged at the elements' size"
     )
+    if part.printed is not None:
+        # `load` reads a printed part as its skin round its core (mqucifer/print-shop#337);
+        # `optimise` doesn't yet.
+        report.note(
+            f"{part.name}'s `print` isn't read here: optimise reads it solid, as if every wall, "
+            "shell and core were the plastic's own. `load` reads it as printed"
+        )
     split = [s for s in (soft, same_before) if s == "split"]
     if volume_off > VOLUME_AGREE or split:
         report.verdict(

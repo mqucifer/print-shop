@@ -1684,6 +1684,42 @@ def test_a_peg_in_a_hole_on_a_straight_mesh_reads_each_face_it_meets_once(cae: A
     )
 
 
+#: The strip in its seam (`make_fixtures.seam`), pushed down at the middle of its top, 10 mm
+#: proud of the blocks.
+SEAM_ARGS = ("--weight", "1", "--at", "12.6154,8.1495,50")
+
+
+def test_a_strip_a_hair_off_its_neighbours_is_parted_from_them_however_it_s_turned(
+    cae: Any,
+) -> None:
+    """mqucifer/print-shop#334: a design run's rib, drawn flat and placed by a turn about x and
+    then about z in a seam off the axes, read `NO ANSWER: the mesh gives rib1 no element of its
+    own`. Its `at` as written puts it a hair, a few tenths of a µm, off its neighbours: over
+    OCC's 1e-7 mm, so the fuse shares the faces it meets them by but holds their edges looser,
+    and gmsh's nodes along those edges lie off the face by more than the face's own tolerance,
+    which is all FreeCAD's lookup takes. The mesh's triangles there weren't found, and the strip
+    was taken for one with the blocks. Taking each face within the tolerance the joined parts
+    hold it to, a strip in a seam turned 30°, placed by two turns with its `at` to six
+    decimals, has elements of its own and reads as the same strip drawn standing and placed
+    exactly by one turn, within the second check; so too by one turn with its `at` to six
+    decimals, which main read as wrongly: the hair, not the second turn, was the cause. And a
+    part that still isn't parted is named with its turns."""
+    one = cae("load", "seam/one-turn.json", *SEAM_ARGS)
+    assert one.verdict == "UNREAD", one.text
+    assert "glue is a second hold only" in one.record["why"]
+    for name in ("two-turns", "one-turn-written"):
+        hair = cae("load", f"seam/{name}.json", *SEAM_ARGS)
+        assert hair.verdict == one.verdict, (name, hair.text)
+        assert set(hair.numbers["parts"]) == {"block1", "block2", "strip"}, hair.text
+        assert all(p["nodes"] > 0 for p in hair.numbers["parts"].values()), name
+        reads_as(hair, one)
+    unparted = forced(cae, "unfound", "load", "seam/two-turns.json", *SEAM_ARGS)
+    assert unparted.verdict == "NO ANSWER" and unparted.code == 2, unparted.text
+    why = unparted.record["why"]
+    assert re.search(r"the mesh gives [a-z0-9, ]*strip[a-z0-9, ]* no element of its own", why), why
+    assert why.endswith("; strip is placed by -90° about x, then 30° about z"), why
+
+
 def test_what_load_cant_read_is_no_answer_naming_the_part_and_the_step(cae: Any) -> None:
     """mqucifer/print-shop#319: nothing `load` can't read reaches the reply as an error's last
     line alone. With the mesh's triangles where the parts meet not found, the part left with no
