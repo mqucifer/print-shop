@@ -15,6 +15,12 @@ stop as neither.
 
 **Leaving the part.** A file that's gone from the directory has left it, and so has one a `done`
 after its failure didn't name in `part`.
+
+**Never a given file** (mqucifer/print-shop#365). A file under `references/` is given, and isn't
+printed: `done` refuses one in `part`. An assembly run's placed copy of an approved part, or a
+stand-in for a load, failing `thin` was named as a part file at every reply and at the stop, though
+the approved part passed `thin` in its own run. A `thin` on a given file, at any settings, is never
+held, and the reply to it says why.
 """
 
 from __future__ import annotations
@@ -35,6 +41,15 @@ DEFAULTS = {
 }
 #: How much of what the bench said each line keeps.
 WHY_CHARS = 160
+#: Where the given files are: `references/<name>`.
+GIVEN = "references/"
+#: Why a given file isn't read for printing, nor its `thin` held: said in the reply to a `thin`
+#: on one, and at an ask that draws one.
+NOT_HELD_ON_GIVEN = (
+    "given, not printed, so it isn't read or held for printing: only the files `done` delivers to "
+    "print are, by `thin`, the side on the bed and the downward faces. An approved part given to "
+    "place was read in its own run, and a stand-in isn't printed."
+)
 
 
 @dataclass(frozen=True)
@@ -62,6 +77,12 @@ def counted(argv: list[str]) -> str | None:
                 return None
         except ValueError:
             return None
+    plain = _files(words)
+    return plain[0] if len(plain) == 1 else None
+
+
+def _files(words: list[str]) -> list[str]:
+    """The files a `thin` call names, its options and their values left out."""
     plain: list[str] = []
     value = False
     for word in words[1:]:
@@ -71,7 +92,29 @@ def counted(argv: list[str]) -> str | None:
             value = "=" not in word and word not in nudge.FLAGS
         else:
             plain.append(word)
-    return plain[0] if len(plain) == 1 else None
+    return plain
+
+
+def given(name: str) -> bool:
+    """A given file, `references/<name>`: never printed, so never held to `thin`."""
+    return name.removeprefix("/work/").removeprefix("./").startswith(GIVEN)
+
+
+def on_given(argv: list[str]) -> list[str]:
+    """The files a `thin` call reads, at any settings, where every one is given: else none."""
+    words = argv[1:] if argv[:1] == ["bench"] else argv
+    if not words or words[0] != "thin":
+        return []
+    plain = _files(words)
+    return plain if plain and all(given(name) for name in plain) else []
+
+
+def given_said(files: list[str]) -> str:
+    """Why given files aren't read or held for printing, each named."""
+    if not files:
+        return ""
+    named = ", ".join(f"`{name}`" for name in files)
+    return f"{named}: {NOT_HELD_ON_GIVEN}"
 
 
 def failing(
@@ -85,7 +128,7 @@ def failing(
             last[one.file] = one
     found = []
     for name, one in last.items():
-        if one.verdict != "FAIL" or name not in present:
+        if one.verdict != "FAIL" or name not in present or given(name):
             continue
         if part is not None and part_at is not None and part_at > one.at_call and name not in part:
             continue
