@@ -49,7 +49,7 @@ from __future__ import annotations
 import json
 import shlex
 from collections.abc import Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
 
@@ -57,7 +57,7 @@ import numpy as np
 
 from print_shop.bench import arm as arm_module
 from print_shop.bench import placed as placed_module
-from print_shop.rounds import holds, judge
+from print_shop.rounds import holds, judge, placing
 from print_shop.rounds.box import Box
 from print_shop.rounds.needs import UNSURE, Need
 
@@ -89,11 +89,20 @@ class Way:
     onto: tuple[str, ...]
     along: str
     source: str
+    #: The part of the assembly it's read as, where the assembly names the moving file in
+    #: several parts: one way for each (mqucifer/print-shop#343).
+    moving_as: str = ""
 
     @property
     def command(self) -> str:
         onto = " ".join(shlex.quote(f) for f in self.onto)
-        return f"fit-on {shlex.quote(self.moving)} --onto {onto} --along {self.along} --from clear"
+        found = f"fit-on {shlex.quote(self.moving)} --onto {onto} --along {self.along} --from clear"
+        return f"{found} --as {shlex.quote(self.moving_as)}" if self.moving_as else found
+
+    @property
+    def moved(self) -> str:
+        """The moving file as it's read: as its part, where it's one of several."""
+        return f"{self.moving} as {self.moving_as}" if self.moving_as else self.moving
 
 
 @dataclass
@@ -119,6 +128,9 @@ class Place:
     verdict: str = ""
     why: str = ""
     numbers: dict[str, Any] = field(default_factory=dict)
+    #: The copy of `file` it's on, as `fit-on` read it: `FILE as PART` where an assembly names
+    #: the file in several parts (mqucifer/print-shop#343), else the file.
+    read_as: str = ""
 
     @property
     def where(self) -> str:
@@ -138,12 +150,20 @@ class Checked:
     unsure: bool
     places: list[Place] = field(default_factory=list)
     numbers: dict[str, Any] = field(default_factory=dict)
+    #: `fit-on` read none of the moving file's copies: the assembly names it in several parts
+    #: and the reading says which to move. That's never a way it can't tell, as copies would go
+    #: unread: it fails (mqucifer/print-shop#343).
+    refused: bool = False
 
     def failing(self, accepted: Sequence[str] = ()) -> list[Place]:
         """The places that fail, less those a person accepted for their pair of files."""
         return [
             p for p in self.places if p.status in FAILS and key(self.way, p) not in set(accepted)
         ]
+
+    def fails(self, accepted: Sequence[str] = ()) -> bool:
+        """Whether the way doesn't pass: a place that fails, or copies left unread."""
+        return self.refused or bool(self.failing(accepted))
 
     def plain(self) -> dict[str, Any]:
         return {
@@ -153,6 +173,7 @@ class Checked:
             "verdict": self.verdict,
             "why": self.why,
             "unsure": self.unsure,
+            "refused": self.refused,
             "places": [
                 {k: v for k, v in place.__dict__.items() if k != "numbers"}
                 | {"would_pass": place.numbers.get("would_pass")}
@@ -162,8 +183,10 @@ class Checked:
 
 
 def key(way: Way, place: Place) -> str:
-    """The pair of files a failing place is between: what a person accepts at an ask."""
-    return f"{way.moving} onto {place.file}"
+    """The pair of files a failing place is between: what a person accepts at an ask. Where
+    either is one of several parts made from one file, the part is named too
+    (mqucifer/print-shop#343)."""
+    return f"{way.moved} onto {place.read_as or place.file}"
 
 
 def _step(name: str) -> bool:
@@ -314,6 +337,7 @@ def _place(
     kept: Path,
     name: str,
     placed: dict[str, Any] | None = None,
+    moving_as: str = "",
 ) -> None:
     """What one place comes to: the arm looked for on each printed file of the two, and bent.
     `placed` is each file `fit-on` read placed, as its record says: the place is turned back
@@ -330,11 +354,11 @@ def _place(
             "its depth isn't across x, y or z, and `bend` takes a push along one of them"
         )
         return
-    for file in (place.file, way.moving):
+    for k, file in enumerate((place.file, way.moving)):
         if file.startswith(holds.REFERENCES):
             continue
         corners = [list(place.box[0]), list(place.box[1])]
-        if file == way.moving:
+        if k == 1:
             # The place is where the part was `out_mm` out: in the part's own file it's back
             # along its way out by that much.
             axis = AXES.index(way.along[1])
@@ -342,8 +366,11 @@ def _place(
             for corner in corners:
                 corner[axis] -= back
         across = place.across
-        if file in (placed or {}):
-            corners, across = own_frame(corners, across, (placed or {})[file])
+        # Each placement is by the name it's read by (mqucifer/print-shop#343): the moving
+        # part's is `fit-on`'s `moving`.
+        copy = (moving_as or file) if k == 1 else (place.read_as or file)
+        if copy in (placed or {}):
+            corners, across = own_frame(corners, across, (placed or {})[copy])
             if not across:
                 place.no_arm.append(
                     f"on `{file}`: its push isn't along an axis of the file as it's built, "
@@ -372,19 +399,39 @@ def _place(
         return
 
 
+def copies(box: Box, found: list[Way], where: Path) -> list[Way]:
+    """Each way, and where the assembly the box places it by names its moving file in several
+    parts, one way for each part, moved `--as` it (mqucifer/print-shop#343): each copy has its
+    own way on, and the others stand where they sit."""
+    every: list[Way] = []
+    placing_of = getattr(box, "placing", None)
+    for way in found:
+        argv = shlex.split(way.command)
+        assembly = placing.assembly_of(placing_of(list(argv), where) if placing_of else argv)
+        parts = placing.parts_of(where, assembly, way.moving) if assembly else []
+        if len(parts) > 1:
+            every += [replace(way, moving_as=part) for part in parts]
+        else:
+            every.append(way)
+    return every
+
+
 def read(
     box: Box, found: list[Way], on_bed: dict[str, str], where: Path, kept: Path
 ) -> list[Checked]:
     """Each way read by `fit-on`, and each place it passes by `bend`, in fresh containers over
     `where`, their answers kept under `kept`."""
     checked: list[Checked] = []
-    for n, way in enumerate(found):
+    for n, way in enumerate(copies(box, found, where)):
         reading = _read(box, f"way-on-{n}", way.command, ["CLEAR"], where, kept)
         record = reading.record or {}
         numbers = dict(record.get("numbers") or {})
         why = str(record.get("why") or reading.why)[:WHY_CHARS]
-        unsure = reading.verdict not in ("CLEAR", "BLOCKED") or reading.verdict in UNSURE
-        one = Checked(way, reading.verdict, why, unsure, numbers=numbers)
+        refused = reading.verdict == "NO ANSWER" and placed_module.SEVERAL_MOVING in why
+        unsure = not refused and (
+            reading.verdict not in ("CLEAR", "BLOCKED") or reading.verdict in UNSURE
+        )
+        one = Checked(way, reading.verdict, why, unsure, numbers=numbers, refused=refused)
         checked.append(one)
         if reading.verdict != "BLOCKED":
             continue
@@ -397,10 +444,21 @@ def read(
                 _axis(read_place.get("across")),
                 float(read_place["out_mm"]),
                 bool(read_place.get("seated")),
+                read_as=str(read_place.get("read_as") or ""),
             )
             one.places.append(place)
             if k < MOST:
-                _place(box, way, place, on_bed, where, kept, f"bend-{n}-{k}", numbers.get("placed"))
+                _place(
+                    box,
+                    way,
+                    place,
+                    on_bed,
+                    where,
+                    kept,
+                    f"bend-{n}-{k}",
+                    numbers.get("placed"),
+                    str(numbers.get("moving") or ""),
+                )
             else:
                 given = [f for f in (place.file, way.moving) if f.startswith(holds.REFERENCES)]
                 place.given = given[0] if given else ""
@@ -413,13 +471,12 @@ def standing(checked: list[Checked], accepted: Sequence[str] = ()) -> list[judge
     """Each reading as a row of the ledger's `standing`: the way on, and each arm bent."""
     rows: list[judge.Standing] = []
     for one in checked:
-        failing = one.failing(accepted)
         rows.append(
             judge.Standing(
                 WAY_ON,
                 one.way.moving,
                 one.way.command,
-                not one.unsure and not failing,
+                not one.unsure and not one.fails(accepted),
                 one.unsure,
                 one.verdict,
                 one.why,
@@ -538,21 +595,21 @@ def said(
     lines: list[str] = []
     for one in checked:
         failing = one.failing(list(accepted or {}))
-        if only_failing and not failing:
+        if only_failing and not one.fails(list(accepted or {})):
             continue
         way = one.way
         mark = (
             "can't tell"
             if one.unsure
             else "DOESN'T PASS"
-            if failing
+            if failing or one.refused
             else "for a person to judge"
             if any(p.status == PERSON for p in one.places)
             else "accepted by a person"
             if any(p.status in FAILS for p in one.places)
             else "ok"
         )
-        named = way.part if way.part == way.moving else f"{way.part} (`{way.moving}`)"
+        named = way.part if way.part == way.moved else f"{way.part} (`{way.moved}`)"
         lines.append(
             f"- {named} onto {', '.join(f'`{f}`' for f in way.onto)}, its way out {way.along} "
             f"from {way.source}, {mark}: `{way.command}` reads {one.verdict or 'no verdict'}: "

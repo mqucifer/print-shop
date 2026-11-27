@@ -680,6 +680,17 @@ class Built:
     angles: dict[int, float]
     #: The plastic laid inside the region on this layer, mm3.
     volume_mm3: float
+    #: The outer walls' length inside the region on this layer, mm: the outline and its holes.
+    #: The walls' band over it is how wide they lie (`band_mm`, mqucifer/print-shop#339).
+    outline_mm: float = 0.0
+
+    @property
+    def band_mm(self) -> float | None:
+        """How wide the walls lie inside the region on this layer, in mm: their band's area, what
+        of the part they cover, over the outline they run round. None with no outline in it."""
+        if self.outline_mm <= 0:
+            return None
+        return (self.area_mm2 - self.core_mm2) / self.outline_mm
 
 
 def _section(width: float, height: float) -> float:
@@ -797,11 +808,16 @@ def built(layer: Layer, grid: Grid, region: np.ndarray) -> Built:
     outer = by_kind.get(OUTER_WALL, [])
     wall_count: int | None = None
     meet = 0.0
+    outline = 0.0
     if outer:
         points, which_outer = _samples(outer)
         row, col, on = grid.cells(points[:, 0], points[:, 1])
         keep = np.zeros(len(points), dtype=bool)
         keep[on] = region[row[on], col[on]]
+        # Each sample stands for its own share of its line's length.
+        lengths = np.array([ln.length for ln in outer])
+        per = lengths / np.bincount(which_outer, minlength=len(outer)).clip(min=1)
+        outline = float(per[which_outer[keep]].sum())
         keep &= (np.arange(len(points)) % max(1, round(0.5 / STEP))) == 0
         if keep.any():
             ends = np.array([(ln.x0, ln.y0, ln.x1, ln.y1) for ln in outer])[which_outer[keep]]
@@ -828,4 +844,5 @@ def built(layer: Layer, grid: Grid, region: np.ndarray) -> Built:
         walls=wall_count, walls_meet=round(meet, 3),
         angles={k: round(v, 2) for k, v in sorted(angles.items())},
         volume_mm3=round(volume, 4),
+        outline_mm=round(outline, 3),
     )

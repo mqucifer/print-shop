@@ -77,6 +77,37 @@ def placed_by(where: Path, assembly: str) -> set[str]:
     return found
 
 
+def parts_of(where: Path, assembly: str, file: str) -> list[str]:
+    """The parts an assembly file names `file` in, as its `file` or in its `with`, in order:
+    more than one where it's alike parts (mqucifer/print-shop#343). Read loosely, as
+    `placed_by` is."""
+    try:
+        data = json.loads((where / assembly).read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+        return []
+    entries = data.get("parts") if isinstance(data, dict) else None
+    folder = PurePosixPath(_plain(assembly)).parent
+    found: list[str] = []
+    for entry in entries if isinstance(entries, list) else []:
+        if not isinstance(entry, dict) or not isinstance(entry.get("name"), str):
+            continue
+        others = entry.get("with")
+        names = [entry.get("file"), *(others if isinstance(others, list) else [])]
+        if any(isinstance(f, str) and _plain(str(folder / f)) == _plain(file) for f in names):
+            found.append(entry["name"])
+    return list(dict.fromkeys(found))
+
+
+def assembly_of(argv: Sequence[str]) -> str:
+    """The assembly a command's `--placed` names, or nothing."""
+    for k, word in enumerate(argv):
+        if word == FLAG and k + 1 < len(argv):
+            return argv[k + 1]
+        if word.startswith(f"{FLAG}="):
+            return word.split("=", 1)[1]
+    return ""
+
+
 def named(argv: Sequence[str]) -> list[str]:
     """The geometry a bench command names, `--variant`'s and `--onto`'s too, and not a test
     piece's."""

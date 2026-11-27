@@ -130,3 +130,7 @@ A lesson is for any part with its traits, so a reviewer keeps it first. A person
 In the print ledger, created if missing, without moving its schema version: `print_lessons`, `print_lesson_steps`, `print_lesson_evidence`, `job_lessons` and `print_lesson_scores`, and the columns `prints.features` and `print_lessons.material`, added if missing. Older code still runs against the file: it inserts into `prints` by column name. On a copy of the real ledger every row reads back as it was, and a second open and draw changes nothing.
 
 **Not yet:** keying a lesson to the intake's answer on which faces are seen (`questions.SEEN`), lessons entered from a file (`rounds.py lessons load`'s equivalent), and a lesson for the harness rather than the proposal.
+
+## Lessons from a settings study
+
+A settings study (mqucifer/print-shop#339, `docs/settings-study.md`) prints nothing, so its lessons aren't print lessons: they're kept beside them in `study_lessons`, keyed by the part's traits as these are and by its joints, with the same statuses and the same reviewer's steps (`scripts/settings_study.py lessons`, `accept`, `edit`, `reject`). A kept one reaches a later study of a part with every one of its keys, never the print loop's proposal.

@@ -39,7 +39,7 @@ import numpy as np
 
 from . import dovetail
 from .assembly import AXES, Assembly, Joint, Latch, PartAt
-from .cae import ccx_one_thread, tidy_mesh, tidy_solve
+from .cae import ccx_one_thread, gmsh, tidy_mesh, tidy_solve
 from .report import NoAnswer
 
 #: A latch's ledge is over its hook within this, in mm, along the slide: the slide check's own
@@ -400,7 +400,7 @@ def _solve(
         analysis.addObject(mesh)
         doc.recompute()
         tools = GmshTools(mesh)
-        wrong = tools.create_mesh()
+        wrong = gmsh(tools)
         tidy_mesh(tools)
         fem = mesh.FemMesh
         if wrong or not fem.VolumeCount:
