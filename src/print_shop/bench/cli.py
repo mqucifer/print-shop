@@ -1536,10 +1536,23 @@ def parser() -> Parser:
         dest="cuts",
         action="append",
         default=[],
-        metavar="AXIS=AT[,AXIS=FROM:TO]",
+        metavar="AXIS=AT[,AXIS=FROM:TO] | at=X,Y,Z,normal=NX,NY,NZ[,up=UX,UY,UZ][,u=FROM:TO]",
         help="a cut-through as a view: every file cut by a plane, each in its colour. z=3 is level "
-        "at 3 mm; x=50 is upright through x=50, seen from +x; y=40 from the front. A window, "
-        "such as x=50,y=20:40, draws only that stretch of the plane",
+        "at 3 mm; x=50 is upright through x=50, seen from +x; y=40 from the front, -y. A window, "
+        "such as x=50,y=20:40, draws only that stretch of the plane. Any plane: at=X,Y,Z,"
+        "normal=NX,NY,NZ is the one through that point square to that direction, seen from the "
+        "normal's side, its axes u (right) and v (up) in mm from the point; up=UX,UY,UZ says "
+        "which way is up (+z laid on it unless said, or +y on a plane within 30° of level), and "
+        "u=FROM:TO and v=FROM:TO draw only that stretch. normal=1,0,0, 0,0,1 and 0,-1,0 draw as "
+        "x=, z= and y= do; normal=0,1,0 is seen from +y, the mirror of y=",
+    )
+    render.add_argument(
+        "--gaps",
+        action="store_true",
+        help="on each cut, mark each pair of files' least gap where it lies, with its figure, read "
+        "from the section's outlines: OCCT's on a pair of STEP files, as clearance reads it. A gap "
+        "is read in the plane: never less than clearance's least gap in 3D, and more where the "
+        "plane meets the parts slantwise, so a joint can look looser on a cut than it is",
     )
     render.add_argument("--size", type=int, default=768)
     render.add_argument("--renders-out", dest="out_renders", default="renders")
