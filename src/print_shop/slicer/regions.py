@@ -67,6 +67,7 @@ from typing import Any, cast
 import numpy as np
 import trimesh
 
+from print_shop.bench.as_printed import wall_thickness
 from print_shop.bench.footprint import footprint
 from print_shop.bench.limits import over
 from print_shop.bench.printed import (
@@ -96,6 +97,7 @@ __all__ = [
     "ANGLE_DEGREES",
     "INFILL_POINTS",
     "Bed",
+    "Depth",
     "Fit",
     "Pose",
     "Project",
@@ -109,6 +111,9 @@ __all__ = [
     "slice_regions",
     "turned_to_fit",
     "wall_band",
+    "regions_meet",
+    "walls_depth",
+    "walls_held",
     "write_project",
 ]
 
@@ -393,6 +398,266 @@ def turned_to_fit(mesh: trimesh.Trimesh, laid: tuple[float, float], bed: Bed) ->
     points = np.asarray(mesh.vertices) @ np.asarray(flat.matrix)[:3, :3].T
     turn, _, _ = footprint(points[:, :2], (bed.size[0], bed.size[1]))
     return fit_of(mesh, (laid[0], laid[1], float(turn)), bed)
+
+
+# --------------------------------------------------------------------------
+# How many walls a region's depth holds, before it's sliced
+# --------------------------------------------------------------------------
+
+#: The most heights along the layers axis a region's depth is read at.
+DEPTH_LAYERS = 9
+#: The most of a section's cells whose distance to its edge is measured.
+DEPTH_CELLS = 40_000
+#: Each own axis as the layers axis, the part's points turned so it's z: a cyclic turn of the
+#: axes, which keeps the section's handedness.
+_TO_UP = {"x": (1, 2, 0), "y": (2, 0, 1), "z": (0, 1, 2)}
+
+
+@dataclass(frozen=True)
+class Depth:
+    """How deep a region with walls of its own lies in the part, across its layers, and the walls
+    that holds (mqucifer/print-shop#357). A region with walls of its own is printed as an
+    island, walled round its own outline, so its walls come in from every side of its section
+    in the part: a strip 1 mm deep round a face is walled from the face and from the region's
+    inner edge, and holds as many walls as fit in half of it."""
+
+    region: str
+    #: Its own section in the part across, typically: on each layer, for each point of its
+    #: outline the largest circle in it that reaches the point, twice their median
+    #: (`_typical`); and across its layers, their median, as the reader
+    #: judges a region's walls by the count most of its outline has, and most of its layers. A
+    #: face mesh's layers that lie in a face across the layers hold the whole of it, and those
+    #: through the faces round it only a strip: a deep face mesh's median is its strip's where
+    #: most of its layers are, as the reader's is.
+    depth_mm: float
+    #: The walls that depth holds, and a bead's spacing (`as_printed.wall_thickness`).
+    holds: int
+    spacing_mm: float
+    width_mm: float
+
+    def held(self) -> str:
+        return (f"is {self.depth_mm:.2f} mm deep in the part along most of its outline, which "
+                f"holds at most {self.holds} wall{'s' if self.holds != 1 else ''} of "
+                f"{self.spacing_mm:.2f} mm")
+
+    def said(self) -> str:
+        return f"{self.region} {self.held()}"
+
+
+def _held(depth_mm: float, spacing_mm: float, width_mm: float) -> int:
+    """The walls a section `depth_mm` across holds, walled from both sides: one for each two
+    bead spacings across it, and one where it's narrower than that but a line's width or more.
+
+    Read off Orca 2.4.2 on the bar of `tests/test_slice_regions.py`: a ring round its hole, of
+    each depth, asked for 10 walls of its own, with the store's 0.45 mm lines at 0.2 mm (a bead
+    spacing of 0.407 mm). 0.8 to 1.4 mm deep laid 1 wall, 1.8 to 2.2 mm 2, 2.6 to 3.0 mm 3,
+    3.4 and 3.8 mm 4, and 4.4 mm 5. The reader read 3 at 1.6 mm and 5 at 2.4 mm, a depth
+    either side of where one more pair of walls fits: where walls meet across a section, the
+    reader counts both sides' (`RegionRead`'s walls fill it)."""
+    if depth_mm < width_mm:
+        return 0
+    return max(1, math.floor(depth_mm / (2 * spacing_mm) + 1e-9))
+
+
+def walls_depth(walls: int, width_mm: float, height_mm: float) -> float:
+    """The least depth in the part, to a hundredth of a mm, that holds `walls` of a region's
+    own (`_held`)."""
+    spacing = wall_thickness(1, width_mm, height_mm)
+    depth = 0.0
+    while _held(depth, spacing, width_mm) < walls:
+        depth = round(depth + 0.01, 2)
+    return depth
+
+
+def _up_mesh(mesh: trimesh.Trimesh, layers: str) -> trimesh.Trimesh:
+    order = _TO_UP[layers]
+    turned = mesh.copy()
+    turned.vertices = np.asarray(mesh.vertices)[:, list(order)]
+    return turned
+
+
+def _segments(mesh: trimesh.Trimesh, z: float) -> np.ndarray:
+    lines = trimesh.intersections.mesh_plane(  # type: ignore[no-untyped-call]
+        mesh, [0.0, 0.0, 1.0], [0.0, 0.0, z])
+    if len(lines) == 0:
+        return np.zeros((0, 4))
+    return np.column_stack([lines[:, 0, 0], lines[:, 0, 1], lines[:, 1, 0], lines[:, 1, 1]])
+
+
+def _eroded(mask: np.ndarray) -> np.ndarray:
+    """Each cell's depth in `mask`, in cells: the step it's eroded at, by turns square to the
+    raster and across its diagonals too, which is within a twelfth of the distance."""
+    depth = np.zeros(mask.shape, dtype=np.int32)
+    held = mask.copy()
+    held[0, :] = held[-1, :] = held[:, 0] = held[:, -1] = False
+    step = 0
+    while held.any():
+        step += 1
+        depth[held] = step
+        kept = held.copy()
+        kept[1:, :] &= held[:-1, :]
+        kept[:-1, :] &= held[1:, :]
+        kept[:, 1:] &= held[:, :-1]
+        kept[:, :-1] &= held[:, 1:]
+        if step % 2 == 0:
+            kept[1:, 1:] &= held[:-1, :-1]
+            kept[1:, :-1] &= held[:-1, 1:]
+            kept[:-1, 1:] &= held[1:, :-1]
+            kept[:-1, :-1] &= held[1:, 1:]
+        held = kept
+    return depth
+
+
+def _distances(points: np.ndarray, segments: np.ndarray, reach: float) -> np.ndarray:
+    """Each point's distance to the nearest of `segments`, in mm, measured tile by tile against
+    the segments within `reach` of each tile: no point is further than that from its nearest."""
+    found = np.zeros(len(points))
+    if len(points) == 0:
+        return found
+    tile = max(reach, 5.0)
+    keys = np.floor((points - points.min(axis=0)) / tile).astype(np.int64)
+    low_x = np.minimum(segments[:, 0], segments[:, 2])
+    high_x = np.maximum(segments[:, 0], segments[:, 2])
+    low_y = np.minimum(segments[:, 1], segments[:, 3])
+    high_y = np.maximum(segments[:, 1], segments[:, 3])
+    for key in np.unique(keys, axis=0):
+        mine = np.flatnonzero((keys == key).all(axis=1))
+        lo, hi = points[mine].min(axis=0) - reach, points[mine].max(axis=0) + reach
+        near = (low_x <= hi[0]) & (high_x >= lo[0]) & (low_y <= hi[1]) & (high_y >= lo[1])
+        edges = segments[near] if near.any() else segments
+        a, ab = edges[:, :2], edges[:, 2:] - edges[:, :2]
+        length2 = np.maximum((ab ** 2).sum(axis=1), 1e-18)
+        chunk = max(1, 2_000_000 // len(edges))
+        for k in range(0, len(mine), chunk):
+            at = points[mine[k:k + chunk], None, :]
+            t = np.clip(((at - a) * ab).sum(axis=2) / length2, 0.0, 1.0)
+            found[mine[k:k + chunk]] = np.sqrt(
+                ((at - (a + t[:, :, None] * ab)) ** 2).sum(axis=2)).min(axis=1)
+    return found
+
+
+def _typical(mask: np.ndarray, grid: gcode.Grid, segments: np.ndarray) -> float:
+    """How far a section's walls can come in from its outline, typically, in mm: for each cell
+    along its outline, the largest circle in the section that reaches it, and their median.
+
+    The reader counts a region's walls along its whole outline and takes the count most of it
+    has (`gcode.built`), so the walls it holds follow its typical width, not its fattest spot:
+    a square tube's convex corners, or a hook at the end of a thin arm (mqucifer/print-shop#358's
+    review). The circles are centred on the section's ridge, the cells no erosion step reaches
+    before their neighbours (`_eroded`), each measured to the nearest edge exactly."""
+    if not mask.any() or len(segments) == 0:
+        return 0.0
+    depth = _eroded(mask)
+    padded = np.pad(depth, 1)
+    ny, nx = depth.shape
+    around = np.max([padded[1 + dy:1 + dy + ny, 1 + dx:1 + dx + nx]
+                     for dy in (-1, 0, 1) for dx in (-1, 0, 1) if dy or dx], axis=0)
+    ridge_rows, ridge_cols = np.nonzero((depth > 0) & (depth >= around))
+    edge_rows, edge_cols = np.nonzero(depth == 1)
+    if len(ridge_rows) == 0 or len(edge_rows) == 0:
+        return 0.0
+
+    def at(rows: np.ndarray, cols: np.ndarray) -> np.ndarray:
+        step = max(1, math.ceil(len(rows) / DEPTH_CELLS))
+        return np.column_stack([grid.x0 + (cols[::step] + 0.5) * grid.cell,
+                                grid.y0 + (rows[::step] + 0.5) * grid.cell])
+
+    centres, outline = at(ridge_rows, ridge_cols), at(edge_rows, edge_cols)
+    # Erosion is within a twelfth of the distance, and a cell or two at the edge.
+    reach = (1.2 * int(depth.max()) + 3) * grid.cell
+    radii = _distances(centres, segments, reach)
+    # Each outline cell's largest circle: the ridge's that reach it, a cell's slack for the
+    # raster. Measured tile by tile, as the circles reach no further than `reach`.
+    best = np.zeros(len(outline))
+    tile = max(reach, 5.0)
+    keys = np.floor((outline - outline.min(axis=0)) / tile).astype(np.int64)
+    for key in np.unique(keys, axis=0):
+        mine = np.flatnonzero((keys == key).all(axis=1))
+        lo, hi = outline[mine].min(axis=0) - reach, outline[mine].max(axis=0) + reach
+        near = np.flatnonzero(((centres >= lo) & (centres <= hi)).all(axis=1))
+        if len(near) == 0:
+            continue
+        chunk = max(1, 2_000_000 // len(near))
+        for k in range(0, len(mine), chunk):
+            gap = np.sqrt(((outline[mine[k:k + chunk], None, :] - centres[near][None, :, :])
+                           ** 2).sum(axis=2))
+            reaches = gap <= radii[near][None, :] + grid.cell
+            best[mine[k:k + chunk]] = np.where(reaches, radii[near][None, :], 0.0).max(axis=1)
+    return float(np.median(best))
+
+
+def walls_held(part: trimesh.Trimesh, region: Region, layers: str, base: Path | None,
+               width_mm: float, height_mm: float) -> Depth | None:
+    """How deep `region` lies in the part across its layers, typically, and the walls that
+    holds, before Orca slices it. Both are in the part's own axes, with `layers` the own axis
+    its layers run along: a turn about the up axis changes neither. Read at up to `DEPTH_LAYERS`
+    heights through it; None where it holds none of the part.
+
+    Its own section in the part, whatever other regions take of it: Orca 2.4.2 doesn't wall
+    the border between two regions. On the bar, a ring round the hole 3 mm deep asked for 3
+    walls, under a later ring 1.5 mm deep, read 3 walls in the 1.5 mm the later one leaves of
+    it, all from its outer edge, whether the later ring set infill only, 1 wall or 3; and the
+    later ring asked for 3 read 3 in its own 1.5 mm. So a region that meets another holds
+    walls this doesn't measure (`regions_meet`)."""
+    spacing = wall_thickness(1, width_mm, height_mm)
+    body = _up_mesh(part, layers)
+    if isinstance(region.shape, Layers):
+        shape = None
+        low, high = region.shape.low, region.shape.high
+        plane = body.bounds[:, :2]
+    else:
+        shape = _up_mesh(_shape_mesh(region, base), layers)
+        low, high = float(shape.bounds[0][2]), float(shape.bounds[1][2])
+        plane = np.array([np.maximum(body.bounds[0][:2], shape.bounds[0][:2]),
+                          np.minimum(body.bounds[1][:2], shape.bounds[1][:2])])
+    low, high = max(low, float(body.bounds[0][2])), min(high, float(body.bounds[1][2]))
+    if high <= low or (plane[1] <= plane[0]).any():
+        return None
+    # Heights through it, off its ends by half a layer, as a layer is read at its middle.
+    inset = min(height_mm / 2, (high - low) / 2)
+    count = max(1, min(DEPTH_LAYERS, math.ceil((high - low) / height_mm)))
+    heights = np.linspace(low + inset, high - inset, count)
+    grid = gcode.Grid.round(float(plane[0][0]), float(plane[0][1]), float(plane[1][0]),
+                            float(plane[1][1]))
+    x0, y0 = grid.x0, grid.y0
+    x1, y1 = x0 + grid.nx * grid.cell, y0 + grid.ny * grid.cell
+    found = []
+    for z in heights:
+        edges = _segments(body, float(z))
+        mask = grid.fill(edges)
+        if shape is not None:
+            own = _segments(shape, float(z))
+            mask &= grid.fill(own)
+            edges = np.vstack([edges, own])
+        if mask.sum() * grid.cell ** 2 < LEAST_MM2:
+            continue
+        # Only edges that reach the raster can bound what's in it.
+        near = ((np.minimum(edges[:, 0], edges[:, 2]) <= x1)
+                & (np.maximum(edges[:, 0], edges[:, 2]) >= x0)
+                & (np.minimum(edges[:, 1], edges[:, 3]) <= y1)
+                & (np.maximum(edges[:, 1], edges[:, 3]) >= y0))
+        found.append(2 * _typical(mask, grid, edges[near]))
+    if not found:
+        return None
+    depth = round(float(np.median(found)), 2)
+    return Depth(region.name, depth, _held(depth, spacing, width_mm), round(spacing, 4),
+                 width_mm)
+
+
+def regions_meet(first: Region, second: Region, layers: str, base: Path | None) -> bool:
+    """Whether two regions' shapes reach each other, by their boxes in the part's own axes: a
+    band of layers by its heights along `layers`."""
+    a = "xyz".index(layers)
+
+    def box(region: Region) -> np.ndarray:
+        if isinstance(region.shape, Layers):
+            low, high = np.full(3, -np.inf), np.full(3, np.inf)
+            low[a], high[a] = region.shape.low, region.shape.high
+            return np.array([low, high])
+        return np.asarray(_shape_mesh(region, base).bounds)
+
+    one, two = box(first), box(second)
+    return bool(np.all(one[0] <= two[1]) and np.all(two[0] <= one[1]))
 
 
 def _shape_mesh(region: Region, base: Path | None) -> trimesh.Trimesh:

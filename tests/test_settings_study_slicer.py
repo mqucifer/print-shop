@@ -6,6 +6,8 @@ out, and the Mac runs it.
 
 from __future__ import annotations
 
+from dataclasses import replace
+
 import pytest
 
 from print_shop.bench.as_printed import wall_thickness
@@ -26,13 +28,19 @@ def read(tmp_path_factory: pytest.TempPathFactory) -> dict[str, Sliced]:
     stl = bar(folder)
     shaper = Shaper(read_part(stl), folder / "meshes", None, _assembly(folder), "bar")
     slicing = OrcaSlicing(stl, STORE_PROFILES, folder / "meshes")
+    fitting = shaper.candidate("fitting", {"settings": {"walls": 3}, "regions": [
+        {"joints": "all", "margin": 2, "faces": True, "walls": 2, "infill": 50}]})
+    # Past what the regions' 2 mm hold: the shaper refuses it before slicing
+    # (mqucifer/print-shop#357), so it's made here as it was asked, for the reader to find.
+    thin = replace(fitting, name="joints", regions=tuple(
+        replace(r, settings=replace(r.settings, walls=5)) for r in fitting.regions))
     asked = {
         "defaults": Candidate("defaults", Settings()),
         "walls": shaper.candidate("walls", {"settings": {"walls": 4, "infill": 30,
                                                          "pattern": "grid", "infill_angle": 0},
                                             "wall_sequence": "inner-outer-inner wall"}),
-        "joints": shaper.candidate("joints", {"settings": {"walls": 3}, "regions": [
-            {"joints": "all", "margin": 2, "faces": True, "walls": 5, "infill": 50}]}),
+        "joints": thin,
+        "fitting": fitting,
         "roomy": shaper.candidate("roomy", {"settings": {"walls": 2}, "regions": [
             {"joints": ["bar+post-bolt-1"], "margin": 6, "walls": 4, "infill": 50}]}),
     }
@@ -95,3 +103,15 @@ def test_walls_orca_couldnt_fit_in_a_region_are_said_as_not_built(
         for name in names]
     assert joints.unread == ["bar+post-bolt-1's infill: asked 50, read -: not read (nothing of "
                              "it inside the region)"]
+
+
+def test_regions_whose_depth_holds_their_walls_are_built_as_asked(
+    read: dict[str, Sliced],
+) -> None:
+    """The same 2 mm regions round the hole and the latch with the 2 walls their depth holds
+    (mqucifer/print-shop#357): Orca builds what's asked, and load reads what's printed."""
+    fitting = read["fitting"]
+    said = "\n".join(fitting.regions)
+    assert fitting.unbuilt == [], said
+    for name in ("bar+post-bolt-1", "bar+lid-latch"):
+        assert f"{name}: " in said and "walls: asked 2, read 2" in said, said
