@@ -108,12 +108,6 @@ def main(argv: list[str]) -> int:
         default=None,
         help="the container's memory, as docker's; the bench's own for the command unless given",
     )
-    top.add_argument(
-        "--malloc",
-        choices=("on", "off"),
-        default="on",
-        help="the C library's settings `load` runs with (`host.LOAD_MALLOC`), or glibc's own",
-    )
     top.add_argument("command", nargs=argparse.REMAINDER)
     args = top.parse_args(argv)
     if args.command[:1] != ["load"] or len(args.command) < 2:
@@ -123,13 +117,11 @@ def main(argv: list[str]) -> int:
         return 3
     if args.memory is not None:
         host.MEMORY = host.TWO_PASSES_MEMORY = args.memory
-    if args.malloc == "off":
-        host.LOAD_MALLOC = {}
     memory = host.memory_for(args.command)
     trace: list[str] = []
     done = host.run(args.command, Path.cwd(), trace=trace)
     said = names(Path(args.command[1]))
-    print(f"load under {memory}, the C library's settings {args.malloc}: exit {done.returncode}")
+    print(f"load under {memory}: exit {done.returncode}")
     found = re.search(r"^verdict: ([A-Z ]+?)(:|$)", done.stdout, re.M)
     print(f"verdict: {found.group(1) if found else 'none'}")
     if done.returncode == 2 and "it was killed" in done.stdout:
