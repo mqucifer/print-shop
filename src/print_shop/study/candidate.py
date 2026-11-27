@@ -43,6 +43,7 @@ from print_shop.slicer.regions import (
     Pose,
     degrees_said,
     fit_of,
+    regions_meet,
     turned_to_fit,
     walls_depth,
     walls_held,
@@ -310,7 +311,15 @@ class Shaper:
                                self.layer_height)
             if depth is None:
                 continue
-            if asked > depth.holds:
+            # Orca doesn't wall the border between two regions, so one that meets another
+            # holds walls its own section doesn't say: it's noted, and the reader judges it.
+            meets = [r.name for r in regions if r is not region
+                     and regions_meet(region, r, layers, self.folder)]
+            if asked > depth.holds and meets:
+                notes.append(f"{depth.said()}, but it meets {', '.join(meets)}, whose border "
+                             "with it Orca doesn't wall: it may hold more, so it's sliced and "
+                             "the layers say")
+            elif asked > depth.holds:
                 fewer = (f"ask {depth.holds} or fewer" if depth.holds else
                          "give it no walls of its own")
                 refused.append(

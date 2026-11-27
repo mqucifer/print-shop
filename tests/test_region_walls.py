@@ -11,6 +11,7 @@ is read before slicing; the tests that slice with Orca are marked `slicer`, and 
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Any
 
 import pytest
 import trimesh
@@ -97,9 +98,9 @@ def test_a_face_meshs_depth_is_its_strip_not_the_faces_across_its_layers(tmp_pat
     found = walls_held(read_part(bar(tmp_path)), _face_mesh(tmp_path, 1.0, 6), "z", tmp_path,
                        0.45, 0.2)
     assert found is not None
-    assert found.depth_mm == pytest.approx(1.0, abs=0.1)
+    assert found.depth_mm == pytest.approx(1.0, abs=0.15)
     assert found.holds == 1
-    assert found.said().endswith("on most of its layers, which holds at most 1 wall of 0.41 mm")
+    assert found.said().endswith("along most of its outline, which holds at most 1 wall of 0.41 mm")
 
 
 def test_a_band_of_layers_is_as_deep_as_the_parts_own_section(tmp_path: Path) -> None:
@@ -131,18 +132,17 @@ def test_a_face_mesh_1_mm_deep_asked_for_6_walls_is_refused_naming_1(tmp_path: P
 def test_the_models_regions_round_the_joints_are_held_to_their_depth(tmp_path: Path) -> None:
     shaper = Shaper(read_part(bar(tmp_path)), tmp_path / "meshes", None, _assembly(tmp_path),
                     "bar")
-    with pytest.raises(ValueError, match="region bar\\+post-bolt-1 asks 6 walls, but it is "
-                                         "2.00 mm deep in the part on most of its layers, which "
-                                         "holds at most 2 walls of 0.41 mm: ask 2 or fewer"):
+    with pytest.raises(ValueError, match=r"region bar\+post-bolt-1 asks 6 walls, but it is "
+                                         r"(1\.9\d|2\.0\d) mm deep in the part along most of "
+                                         r"its outline, which holds at most 2 walls of 0\.41 "
+                                         r"mm: ask 2 or fewer"):
         shaper.candidate("c1", {"regions": [{"joints": ["bar+post-bolt-1"], "margin": 2,
                                              "walls": 6}]})
     fits = shaper.candidate("c1", {"regions": [{"joints": "all", "margin": 2, "faces": True,
                                                 "walls": 2}]})
-    assert fits.notes == (
-        "bar+post-bolt-1 is 2.00 mm deep in the part on most of its layers, which holds at most "
-        "2 walls of 0.41 mm",
-        "bar+lid-latch is 1.90 mm deep in the part on most of its layers, which holds at most 2 "
-        "walls of 0.41 mm")
+    assert [n.split(" is ")[0] for n in fits.notes] == ["bar+post-bolt-1", "bar+lid-latch"]
+    assert all(n.endswith("deep in the part along most of its outline, which holds at most 2 "
+                          "walls of 0.41 mm") for n in fits.notes), fits.notes
     assert fits.plain()["notes"] == list(fits.notes)
 
 
@@ -159,8 +159,9 @@ def test_a_refused_region_isnt_sliced_and_its_reason_reaches_the_model(part: Stu
     reads = [c.result for c in result.calls if c.tool == "read"]
     assert reads[0].startswith("refused: region bar+post-bolt-1 asks 6 walls")
     assert [c.name for c in seen] == ["defaults", "c1", "c2"], "no slice spent on it"
-    assert "  before slicing: bar+post-bolt-1 is 2.00 mm deep in the part on most of its " \
-           "layers, which holds at most 2 walls of 0.41 mm" in reads[1]
+    assert "  before slicing: bar+post-bolt-1 is " in reads[1]
+    assert "mm deep in the part along most of its outline, which holds at most 2 walls of " \
+           "0.41 mm" in reads[1]
 
 
 def test_the_read_tool_and_the_part_say_what_a_depth_holds(part: StudyPart) -> None:  # noqa: F811
@@ -236,3 +237,101 @@ def test_the_walls_a_face_mesh_1_mm_deep_holds_are_built_as_asked(tmp_path: Path
     walls = next(s for s in result.regions[0].said if s.name == "walls")
     assert (walls.asked, walls.read, walls.verdict) == ("1", "1", "as asked"), \
         result.regions[0].lines()
+
+
+# --------------------------------------------------------------------------
+# The typical width, not the widest: mqucifer/print-shop#358's cold review
+# --------------------------------------------------------------------------
+
+
+def _square_tube(folder: Path) -> Path:
+    """A square tube 20 x 20 x 10 mm, its walls 2.2 mm thick: its convex corners are wider."""
+    tube = trimesh.creation.box((20, 20, 10)).difference(trimesh.creation.box((15.6, 15.6, 12)))
+    tube.apply_translation((10, 10, 5))
+    folder.mkdir(parents=True, exist_ok=True)
+    tube.export(folder / "tube.stl")
+    return folder / "tube.stl"
+
+
+def _hooked_arm(folder: Path) -> Path:
+    """An arm 30 x 1.2 x 10 mm with a hook 4 x 4 mm at its end: one fat spot on a thin part."""
+    arm = trimesh.creation.box((30, 1.2, 10))
+    arm.apply_translation((15, 0.6, 5))
+    hook = trimesh.creation.box((4, 4, 10))
+    hook.apply_translation((32, 1.4, 5))
+    folder.mkdir(parents=True, exist_ok=True)
+    arm.union(hook).export(folder / "arm.stl")
+    return folder / "arm.stl"
+
+
+#: A region over the whole of each, by its box.
+TUBE_BOX = [[-1, -1, -1], [21, 21, 11]]
+ARM_BOX = [[-1, -2, -1], [35, 5, 11]]
+#: A ring 3 mm deep round the bar's hole, and a later one 1.5 mm deep inside it.
+RINGS: list[dict[str, Any]] = [
+    {"name": "outer", "cylinder": {"at": [*HOLE, -1], "axis": "z", "radius": 6, "length": 12}},
+    {"name": "inner", "cylinder": {"at": [*HOLE, -1], "axis": "z", "radius": 4.5, "length": 12},
+     "infill": 50},
+]
+
+
+@pytest.mark.parametrize("make,box,asked,holds", [
+    (_square_tube, TUBE_BOX, 3, 2),
+    (_hooked_arm, ARM_BOX, 2, 1),
+])
+def test_a_region_holds_the_walls_of_its_typical_width_not_its_fattest_spot(
+    tmp_path: Path, make: Any, box: list[list[float]], asked: int, holds: int,
+) -> None:
+    shaper = Shaper(read_part(make(tmp_path)), tmp_path / "meshes")
+    with pytest.raises(ValueError, match=f"region all asks {asked} walls, but it is .* which "
+                                         f"holds at most {holds} walls? of 0.41 mm"):
+        shaper.candidate("c1", {"regions": [{"name": "all", "box": box, "walls": asked}]})
+    (note,) = shaper.candidate("c2", {"regions": [{"name": "all", "box": box,
+                                                   "walls": holds}]}).notes
+    assert f"holds at most {holds} wall" in note
+
+
+def test_a_region_that_meets_another_is_noted_not_refused(tmp_path: Path) -> None:
+    """Orca doesn't wall the border between two regions (`walls_held`): the outer ring keeps its
+    whole 3 mm for its walls, and the inner one, 1.5 mm deep, may hold more than its section
+    says, so it's sliced and the layers say."""
+    shaper = Shaper(read_part(bar(tmp_path)), tmp_path / "meshes")
+    found = shaper.candidate("c1", {"regions": [{**RINGS[0], "walls": 3},
+                                                {**RINGS[1], "walls": 3}]})
+    outer, inner = found.notes
+    assert outer.startswith("outer is 3.0") and outer.endswith("holds at most 3 walls of 0.41 mm")
+    assert inner.startswith("inner is 1.4") and "holds at most 1 wall of 0.41 mm, but it meets " \
+        "outer, whose border with it Orca doesn't wall: it may hold more" in inner
+    with pytest.raises(ValueError, match="region inner asks 3 walls"):
+        shaper.candidate("c2", {"regions": [{**RINGS[1], "walls": 3}]})
+
+
+@pytest.mark.slicer
+@needs_orca
+@pytest.mark.parametrize("make,box,walls,verdict", [
+    (_square_tube, TUBE_BOX, 2, "as asked"),
+    (_square_tube, TUBE_BOX, 3, "not as asked"),
+    (_hooked_arm, ARM_BOX, 1, "as asked"),
+    (_hooked_arm, ARM_BOX, 2, "not as asked"),
+])
+def test_orca_builds_the_walls_the_typical_width_holds_and_no_more(
+    tmp_path: Path, make: Any, box: list[list[float]], walls: int, verdict: str,
+) -> None:
+    printed = read({"walls": 4, "regions": [{"name": "all", "box": box, "walls": walls}]})
+    result = slice_regions(make(tmp_path), printed, STORE_PROFILES, tmp_path / "out")
+    said = next(s for s in result.regions[0].said if s.name == "walls")
+    assert said.verdict == verdict, result.regions[0].lines()
+
+
+@pytest.mark.slicer
+@needs_orca
+@pytest.mark.parametrize("inner", [{}, {"walls": 1}, {"walls": 3}])
+def test_orca_walls_a_ring_whole_under_a_later_one(tmp_path: Path, inner: dict[str, Any]) -> None:
+    """The outer ring's 3 walls are laid in what the inner one leaves of it, 1.5 mm, all from
+    its outer edge: Orca doesn't wall their border, whatever the inner one sets."""
+    printed = read({"walls": 4, "regions": [{**RINGS[0], "walls": 3}, {**RINGS[1], **inner}]})
+    result = slice_regions(bar(tmp_path), printed, STORE_PROFILES, tmp_path / "out")
+    for reading in result.regions:
+        for said in reading.said:
+            if said.name == "walls":
+                assert said.verdict == "as asked", reading.lines()
