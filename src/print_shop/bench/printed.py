@@ -75,6 +75,7 @@ __all__ = [
     "ORCA",
     "PART_ONLY",
     "PATTERNS",
+    "UPS",
     "SHAPES",
     "Box",
     "Cylinder",
@@ -113,7 +114,9 @@ ALSO: dict[str, dict[str, str | None]] = {
 }
 #: The settings a region can't carry: the whole part's only. A `layers` region may set
 #: `layer_height`, as Orca's height range does.
-PART_ONLY = frozenset({"line_width", "layer_height"})
+PART_ONLY = frozenset({"line_width", "layer_height", "up"})
+#: The ways a part can stand as it prints: its own layers axis, with its sign (`Settings.up`).
+UPS = ("+x", "-x", "+y", "-y", "+z", "-z")
 #: Orca 2.4.2's names for a sparse infill pattern (`sparse_infill_pattern`): each one Orca
 #: sliced a bar with, from the store's profiles, and wrote back in its config block as given.
 #: A name Orca doesn't know isn't refused: it slices as `crosshatch`, so a name is checked here.
@@ -152,6 +155,11 @@ class Settings:
     infill_angle: float | None = None
     #: The layer height, in mm.
     layer_height: float | None = None
+    #: The way the part stands as it prints: its own layers axis with its sign, `+z` or `-z`
+    #: for layers along z (mqucifer/print-shop#337). Its top shells are under its faces that
+    #: look that way, and its bottom shells over those that look the other. Orca has no key for
+    #: it: the print side writes it from the pose it slices with (`slicer.regions`).
+    up: str | None = None
 
     def given(self) -> dict[str, Any]:
         """The settings given, by name."""
@@ -163,8 +171,9 @@ class Settings:
         return replace(base, **self.given())
 
     def missing(self) -> list[str]:
-        """The settings not given: each one `load` needs and can't take from a profile."""
-        return [f.name for f in fields(self) if getattr(self, f.name) is None]
+        """The settings not given: each one `load` needs and can't take from a profile. Not
+        `up`, which `load` needs only where the top and bottom shells differ."""
+        return [f.name for f in fields(self) if getattr(self, f.name) is None and f.name != "up"]
 
     def orca(self) -> dict[str, str]:
         """The settings given, as Orca's keys and values, with what's written with each
@@ -172,7 +181,7 @@ class Settings:
         and only the pose turns it into Orca's plate angle (`slicer.regions`)."""
         out: dict[str, str] = {}
         for name, value in self.given().items():
-            if name == "infill_angle":
+            if name in ("infill_angle", "up"):
                 continue
             if name == "infill":
                 said = f"{value:g}%"
@@ -194,6 +203,7 @@ class Settings:
             "pattern": lambda v: f"{v} pattern",
             "infill_angle": lambda v: f"infill at {v:g} degrees",
             "layer_height": lambda v: f"{v:g} mm layers",
+            "up": lambda v: f"printed own {v} up",
         }
         given = self.given()
         return ", ".join(words[k](v) for k, v in given.items()) if given else "nothing of its own"
@@ -374,6 +384,11 @@ def _settings(raw: dict[str, Any], where: str, region: bool, layers: bool = Fals
     if "layer_height" in raw:
         got["layer_height"] = _number(f"{where}'s layer_height", raw["layer_height"],
                                       least=0.01, most=1.0)
+    if "up" in raw:
+        if raw["up"] not in UPS:
+            raise ValueError(f"{where}'s up is the part's layers axis with its sign as it prints, "
+                             f"one of {', '.join(UPS)}: not {raw['up']!r}")
+        got["up"] = raw["up"]
     if "pattern" in raw:
         pattern = raw["pattern"]
         if not isinstance(pattern, str) or pattern not in PATTERNS:
