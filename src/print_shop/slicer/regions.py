@@ -93,8 +93,10 @@ __all__ = [
     "RegionRead",
     "RegionsSlice",
     "Said",
+    "band",
     "settings_of",
     "slice_regions",
+    "wall_band",
     "write_project",
 ]
 
@@ -120,6 +122,9 @@ STRAIGHT = frozenset({"rectilinear", "grid"})
 FILLED = 0.1
 #: A layer is read in a region where the part's area in it is at least this, mm2.
 LEAST_MM2 = 2.0
+#: The most layers the walls' band of a whole part is read on, evenly spaced (`wall_band`): a
+#: leg 700 mm tall has 3,500 layers, and the band is the same on each.
+BAND_LAYERS = 40
 #: The orca CLI's object index, from 1, for the one part in each project.
 _OBJECT = "1"
 _REGIONS_MODEL = "3D/Objects/regions.model"
@@ -650,6 +655,11 @@ class RegionRead:
         return bool(read) and all(s.verdict == "as asked" for s in read)
 
     @property
+    def band_mm(self) -> float | None:
+        """How wide its walls lie, as built, in mm (`band`)."""
+        return band(self.layers)
+
+    @property
     def ignored(self) -> bool:
         """Whether Orca built the part's own in it, for everything it asks that was read."""
         read = [s for s in self.said if s.verdict != "not read"]
@@ -683,6 +693,8 @@ class RegionsSlice:
     settings: Settings
     #: The way the part stood as it was sliced (`Pose.up`).
     up: str | None = None
+    #: How wide the part's own walls lie, without its regions, in mm (`wall_band`).
+    band_mm: float | None = None
 
     @property
     def time_added_s(self) -> int | None:
@@ -713,6 +725,39 @@ class RegionsSlice:
         for region in self.regions:
             out += region.lines()
         return out
+
+
+def band(layers: list[gcode.Built]) -> float | None:
+    """How wide the walls lie over `layers`, in mm: the median of each layer's band
+    (`gcode.Built.band_mm`), where it has an outline. A second reading of a wall count's
+    thickness (mqucifer/print-shop#339): `load` takes n walls as n of Orca's bead spacings
+    (`bench.as_printed.wall_thickness`), and this is what the layers lay. On the bar of
+    `tests/test_slice_regions.py` it reads 0.07 to 0.09 mm wider, as a bead's own width reaches
+    past its spacing: 0.901 mm for 2 walls at 0.45 mm lines and 0.2 mm layers, against 0.814,
+    and 1.697 for 4, against 1.628. Where walls meet across a section too narrow for them, it
+    reads narrower, as half of each meets the other's; and in a region with walls of its own,
+    the island's walls round its own faces are an outline of theirs."""
+    found = sorted(b for b in (layer.band_mm for layer in layers) if b is not None)
+    return round(found[len(found) // 2], 3) if found else None
+
+
+def wall_band(sliced: gcode.Sliced, project: Project) -> float | None:
+    """How wide the part's walls lie, in mm, read on at most `BAND_LAYERS` of its layers, the
+    whole part each: a slice of the part without regions, so every wall is its own."""
+    bounds = project.part.bounds
+    sx, sy = project.pose.shift
+    grid = gcode.Grid.round(float(bounds[0][0] + sx), float(bounds[0][1] + sy),
+                            float(bounds[1][0] + sx), float(bounds[1][1] + sy))
+    whole = grid.empty()
+    whole[:] = True
+    layers = sliced.layers
+    step = max(1, math.ceil(len(layers) / BAND_LAYERS))
+    found = []
+    for layer in layers[step // 2::step]:
+        built = gcode.built(layer, grid, whole)
+        if built.area_mm2 >= LEAST_MM2:
+            found.append(built)
+    return band(found)
 
 
 def _footer_grams(sliced: gcode.Sliced) -> float | None:
@@ -1064,6 +1109,7 @@ def slice_regions(
         project=with_regions.path, time_s=sliced.time_s, base_time_s=base_sliced.time_s,
         grams=_footer_grams(sliced), base_grams=_footer_grams(base_sliced), regions=reads,
         settings=with_regions.settings, up=with_regions.pose.up(),
+        band_mm=wall_band(base_sliced, without),
     )
 
 
