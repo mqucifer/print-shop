@@ -633,6 +633,7 @@ def parsed(words: str, capsys: pytest.CaptureFixture[str]) -> str:
         "wall cup.step --hole 0,0,5 --axis x",
         "render cup.step --look cup.step=blue:cup --views top",
         "render cup.step --cut z=3,x=0:10",
+        "render cup.step --cut at=1,2,3,normal=0,1,1,up=0,0,1,u=-5:5 --gaps",
     ],
 )
 def test_the_bench_takes_its_arguments_as_said(
