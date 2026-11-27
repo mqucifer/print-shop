@@ -50,6 +50,17 @@ def _grown(box: Box, margin: float) -> Box:
             (high[0] + margin, high[1] + margin, high[2] + margin))
 
 
+def _held(box: Box, mesh: trimesh.Trimesh, margin: float) -> Box | None:
+    """`box` held to the part and `margin` round it: a fit a sidecar gives as heights only is a
+    box a billion mm across. None where they don't meet."""
+    low = np.maximum(np.asarray(box[0]), mesh.bounds[0] - margin)
+    high = np.minimum(np.asarray(box[1]), mesh.bounds[1] + margin)
+    if np.any(high <= low):
+        return None
+    return ((float(low[0]), float(low[1]), float(low[2])),
+            (float(high[0]), float(high[1]), float(high[2])))
+
+
 def _section(mesh: trimesh.Trimesh, axis: int, at: float) -> np.ndarray:
     """The part's section square to own axis `axis` at `at`, as 2D segments (u0, v0, u1, v1) in
     the other two axes, cyclic from it."""
@@ -131,8 +142,11 @@ def round_joints(
             notes.append(f"{name}: its place wasn't derived ({fit.derived or 'no box'}), so no "
                          "region is put round it")
             continue
-        regions.append(Region(name, _grown(fit.box, margin), settings,
-                              f"round {fit.line()}, {margin:g} mm margin"))
+        held = _held(_grown(fit.box, margin), mesh, margin)
+        if held is None:
+            notes.append(f"{name}: its box doesn't meet the part, so no region is put round it")
+            continue
+        regions.append(Region(name, held, settings, f"round {fit.line()}, {margin:g} mm margin"))
     if assembly is not None and part is not None:
         at = assembly.part(part)
         low, high = mesh.bounds
@@ -169,8 +183,14 @@ def round_joints(
                 lo, hi = own_corners.min(axis=0), own_corners.max(axis=0)
                 box: Box = ((float(lo[0]), float(lo[1]), float(lo[2])),
                             (float(hi[0]), float(hi[1]), float(hi[2])))
-                regions.append(Region(f"{joint.name}-latch", _grown(box, margin), settings,
-                                      f"round the latch of {joint.name}, {margin:g} mm margin"))
+                held = _held(_grown(box, margin), mesh, margin)
+                if held is None:
+                    notes.append(f"{joint.name}-latch: its box doesn't meet {part}, so no region "
+                                 "is put round it")
+                else:
+                    regions.append(Region(f"{joint.name}-latch", held, settings,
+                                          f"round the latch of {joint.name}, {margin:g} mm "
+                                          "margin"))
     if not regions and not notes:
         notes.append("the context and the assembly name no joint on this part")
     return Joints(regions, notes)

@@ -676,7 +676,7 @@ class Built:
     #: share of those samples whose walls run into another outline's: walls that fill the space.
     walls: int | None
     walls_meet: float
-    #: The sparse infill's lines' length by the way they run, in 15 degree steps from +x.
+    #: The sparse infill's lines' length by the way they run, to the whole degree from +x.
     angles: dict[int, float]
     #: The plastic laid inside the region on this layer, mm3.
     volume_mm3: float
@@ -779,8 +779,7 @@ def built(layer: Layer, grid: Grid, region: np.ndarray) -> Built:
             for k in np.flatnonzero(keep):
                 ln = sparse_lines[int(which[k])]
                 laid += STEP * _section(ln.width, layer.height)
-                step = round(math.degrees(math.atan2(ln.y1 - ln.y0, ln.x1 - ln.x0)) % 180 / 15)
-                angle = int(step * 15 % 180)
+                angle = round(math.degrees(math.atan2(ln.y1 - ln.y0, ln.x1 - ln.x0))) % 180
                 angles[angle] = angles.get(angle, 0.0) + STEP
             infill = 100.0 * laid / (clear.sum() * cell)
         else:

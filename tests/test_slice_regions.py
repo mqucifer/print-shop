@@ -25,12 +25,20 @@ from print_shop.ingest.orientation import AXIS_ALIGNED, read_part
 from print_shop.setup.context import Fit, PartContext
 from print_shop.slicer import gcode
 from print_shop.slicer.joints import hole_at, round_joints
+from print_shop.slicer.orca import parse_config_block
 from print_shop.slicer.regions import (
+    ANGLE_DEGREES,
     Pose,
     Project,
     RegionsSlice,
     _add_regions,
+    _angle_said,
+    _coarse,
+    _infill_apart,
+    _infill_close,
     _item_shift,
+    _lifted,
+    _said,
     read_region,
     settings_of,
     slice_regions,
@@ -141,6 +149,16 @@ def test_a_part_orca_turned_on_the_plate_isnt_read_against_its_turn() -> None:
                        "</build>") == (88.0, 118.0)
     with pytest.raises(RuntimeError, match="Orca turned the part on the plate"):
         _item_shift('<item objectid="2" transform="0 1 0 -1 0 0 0 0 1 88 118 0"/>')
+
+
+def test_a_part_orca_lifted_off_the_plate_isnt_read_where_it_isnt() -> None:
+    """mqucifer/print-shop#341's review: a part placed above the bed, on a raft or with a z
+    offset would shift every band and shell, so each is refused rather than read."""
+    with pytest.raises(RuntimeError, match="placed the part 2 mm above the plate"):
+        _item_shift('<item objectid="2" transform="1 0 0 0 1 0 0 0 1 88 118 2"/>')
+    assert _lifted({"raft_layers": "0", "z_offset": "0"}) == ""
+    assert "on 3 raft layers" in _lifted({"raft_layers": "3", "z_offset": "0"})
+    assert "a z offset of 0.1 mm" in _lifted({"raft_layers": "0", "z_offset": "0.1"})
 
 
 # --------------------------------------------------------------------------
@@ -290,10 +308,74 @@ def test_a_layer_filled_solid_reads_solid() -> None:
     assert found.infill is None
 
 
+def test_the_sparse_lines_way_is_read_to_the_whole_degree() -> None:
+    """mqucifer/print-shop#341's review: read in 15 degree steps, a line at 52 degrees passed
+    for one at 45 or 60, so the stated tolerance wasn't the real one."""
+    layer = _square_layer(2, 10.0)
+    layer.lines = [ln for ln in layer.lines if ln.kind != "Sparse infill"] + [
+        gcode.Line(5, 5, 5 + 8 * math.cos(math.radians(52)), 5 + 8 * math.sin(math.radians(52)),
+                   0.45, "Sparse infill", "")]
+    assert list(_read_square(layer, (0, 0, 20, 20)).angles) == [52]
+
+
 def test_outer_walls_close_into_loops() -> None:
     lines = _square_layer(1, 10.0).lines
     loops = gcode.loops(lines)
     assert len(loops) == 5  # four sides and the segment that closes the loop, of no length
+
+
+# --------------------------------------------------------------------------
+# What's said of each setting
+# --------------------------------------------------------------------------
+
+
+def test_a_setting_that_cant_be_told_from_the_parts_own_isnt_said_as_asked() -> None:
+    """mqucifer/print-shop#341's review: a part at 15% with a region asking 18% that Orca
+    ignored read "as asked", the two within the reading's tolerance of each other."""
+    near = _said("infill", 18.0, 15.0, 15.3, 15.1, _infill_close, _infill_apart)
+    assert (near.verdict, near.read) == ("not read", "15.3")
+    assert "can't tell from the part's own 15" in near.why
+    ignored = _said("infill", 60.0, 15.0, 15.3, 15.1, _infill_close, _infill_apart)
+    assert ignored.verdict == "as the part round it"
+    built = _said("infill", 60.0, 15.0, 61.4, 15.1, _infill_close, _infill_apart)
+    assert (built.verdict, built.base) == ("as asked", "15.1")
+    same = _said("walls", 2, 2, 2, 2, lambda r, a: r == a, lambda a, b: a != b)
+    assert same.verdict == "not read" and "can't tell" in same.why
+
+
+def _built(angles: dict[int, float]) -> gcode.Built:
+    return gcode.Built(n=1, z=0.2, height=0.2, area_mm2=100.0, core_mm2=80.0, solid=0.0,
+                       infill=15.0, walls=2, walls_meet=0.0, angles=angles, volume_mm3=1.0)
+
+
+def _flat_project(part_angle: float) -> Project:
+    box = trimesh.creation.box((10, 10, 10))
+    return Project(Path("p.3mf"), Pose.of(box, AXIS_ALIGNED[0]), {},
+                   Settings(infill_angle=part_angle), STORE_PROFILES, box)
+
+
+def test_an_angle_that_cant_be_told_from_the_parts_own_isnt_said_as_asked() -> None:
+    """The review's case: a part at 52 degrees, a region asking 38 that Orca ignored, its lines
+    at 52. Within twice the tolerance of each other, the two can't be told apart."""
+    asked = Settings(infill_angle=38.0, pattern="rectilinear")
+    found = _angle_said(_flat_project(52.0), asked, [_built({52: 100.0})], [], "rectilinear")
+    assert found.verdict == "not read" and "can't tell from the part's own 52" in found.why
+    far = Settings(infill_angle=0.0, pattern="rectilinear")
+    assert _angle_said(_flat_project(45.0), far, [_built({0: 60.0, 90: 40.0})], [],
+                       "rectilinear").verdict == "as asked"
+    assert _angle_said(_flat_project(45.0), far, [_built({45: 60.0, 135: 40.0})], [],
+                       "rectilinear").verdict == "as the part round it"
+    # The tolerance said is the one read with: a line 9 degrees off is off.
+    assert ANGLE_DEGREES == 8.0
+    assert _angle_said(_flat_project(45.0), far, [_built({9: 100.0})], [],
+                       "rectilinear").verdict == "not as asked"
+
+
+def test_a_raster_too_coarse_for_a_line_is_said() -> None:
+    assert _coarse(gcode.Grid.round(0, 0, 50, 50), 0.45) == ""
+    big = gcode.Grid.round(0, 0, 250, 250)
+    assert big.cell > 0.225
+    assert "coarser than half a line's width" in _coarse(big, 0.45)
 
 
 # --------------------------------------------------------------------------
@@ -358,6 +440,16 @@ def test_regions_are_put_round_each_joint_of_the_part_by_the_margin(tmp_path: Pa
     assert all(r.settings == Settings(infill=60.0, walls=4) for r in found.regions)
     assert any("fit-lost: its place wasn't derived" in n for n in found.notes)
     assert any("bar+post-bolt-2: no hole round its point" in n for n in found.notes)
+
+
+def test_a_fit_given_only_as_heights_is_held_to_the_part(tmp_path: Path) -> None:
+    """mqucifer/print-shop#341's review: a sidecar's fit given as z only is a box a billion mm
+    across; its region is held to the part and its margin."""
+    mesh = read_part(bar(tmp_path))
+    context = PartContext(source="a sidecar", fits=(
+        Fit(name="band", play_max=0.2, box=((-1e9, -1e9, 2.0), (1e9, 1e9, 4.0))),))
+    region = round_joints(Settings(infill=60.0), 1.0, mesh, context).regions[0]
+    assert np.asarray(region.shape) == pytest.approx(np.array([[-1, -1, 1], [81, 21, 5]]))
 
 
 # --------------------------------------------------------------------------
@@ -431,6 +523,29 @@ def test_each_shape_reads_as_orca_built_it(sliced: RegionsSlice) -> None:
     band = sliced.regions[3]
     assert len(band.layers) == 20
     assert all(r.built for r in sliced.regions)
+
+
+@pytest.mark.slicer
+@needs_orca
+def test_shells_are_read_against_the_part_without_regions_at_its_own_top(
+    sliced: RegionsSlice,
+) -> None:
+    """mqucifer/print-shop#341's review: the part's top layer was counted from the slice with
+    regions, whose 0.1 mm band adds layers, so the slice without them never had its top read."""
+    lid = next(s for s in sliced.regions[2].said if s.name == "top")
+    assert (lid.read, lid.base, lid.verdict) == ("9", "5", "as asked")
+
+
+@pytest.mark.slicer
+@needs_orca
+def test_the_parts_shells_are_layers_exactly_in_a_band_of_its_own_height_too(
+    sliced: RegionsSlice,
+) -> None:
+    """mqucifer/print-shop#341's review: the profile's shell thickness would give 10 layers of
+    0.1 mm where `load` is told 5. The part's counts are written with the thickness at 0."""
+    config = parse_config_block(sliced.gcode)
+    assert (config["top_shell_layers"], config["top_shell_thickness"]) == ("5", "0")
+    assert (config["bottom_shell_layers"], config["bottom_shell_thickness"]) == ("3", "0")
 
 
 @pytest.mark.slicer
@@ -538,3 +653,45 @@ def test_a_mesh_region_round_the_hole_rings_it_with_walls(
     if verdict != "as asked":
         assert "the walls fill it: only 2 fit in its width" in walls.why
     assert result.time_added_s is not None and result.time_added_s > 0
+
+
+def _script() -> Any:
+    import importlib.util  # noqa: PLC0415
+
+    path = Path(__file__).resolve().parents[1] / "scripts" / "slice_regions.py"
+    spec = importlib.util.spec_from_file_location("slice_regions_script", path)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def test_the_script_refuses_two_regions_of_one_name(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """mqucifer/print-shop#341's review: the joints' regions were joined to `--print`'s
+    unchecked, so one named like a joint's went to Orca twice."""
+    stl = bar(tmp_path)
+    _assembly(tmp_path)
+    given = tmp_path / "print.json"
+    given.write_text(json.dumps({"regions": [{"name": "bar+post-bolt-1", "infill": 30,
+                                              "box": [[0, 0, 0], [5, 5, 5]]}]}))
+    code = _script().main([str(stl), "--nozzle", "0.4", "--filament", "Elegoo PLA", "--print",
+                           str(given), "--joints", '{"walls": 4}', "--assembly",
+                           str(tmp_path / "assembly.json"), "--part", "bar",
+                           "--out", str(tmp_path / "out")])
+    assert code == 2
+    assert "each have a name of their own: bar+post-bolt-1" in capsys.readouterr().err
+
+
+def test_the_script_refuses_a_turn_against_the_parts_layers(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    stl = bar(tmp_path)
+    _assembly(tmp_path)
+    code = _script().main([str(stl), "--nozzle", "0.4", "--filament", "Elegoo PLA",
+                           "--joints", '{"walls": 4}', "--assembly",
+                           str(tmp_path / "assembly.json"), "--part", "bar", "--turn", "90,0,0",
+                           "--out", str(tmp_path / "out")])
+    assert code == 2
+    assert "but its layers are along z" in capsys.readouterr().err

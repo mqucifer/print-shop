@@ -33,7 +33,7 @@ import tempfile
 from pathlib import Path
 
 from print_shop.bench.assembly import read as read_assembly
-from print_shop.bench.printed import Printed, Settings, read
+from print_shop.bench.printed import Printed, Settings, as_json, read
 from print_shop.bench.report import NoAnswer
 from print_shop.ingest.orientation import read_part
 from print_shop.setup.context import read_context
@@ -76,6 +76,7 @@ def main(argv: list[str] | None = None) -> int:
         print(f"--print: {exc}", file=sys.stderr)
         return 2
     notes: list[str] = []
+    layers: str | None = None
     if args.joints:
         try:
             own = read({"regions": [{"name": "joint", "box": [[0, 0, 0], [1, 1, 1]],
@@ -87,10 +88,18 @@ def main(argv: list[str] | None = None) -> int:
                 parser.error("--assembly needs --part: the part's name in it")
             mesh = read_part(args.stl)
             joints = round_joints(own.settings, args.margin, mesh, context, assembly, args.part)
+            if assembly is not None and args.part:
+                layers = assembly.part(args.part).layers
         except (OSError, ValueError, NoAnswer, StopIteration) as exc:
             print(f"--joints: {exc}", file=sys.stderr)
             return 2
-        printed = Printed(printed.settings, (*printed.regions, *joints.regions))
+        try:
+            # Read again whole, so a joint's region named like one of --print's is refused.
+            printed = read(as_json(Printed(printed.settings,
+                                           (*printed.regions, *joints.regions))), "the regions")
+        except ValueError as exc:
+            print(f"--joints: {exc}", file=sys.stderr)
+            return 2
         notes += joints.notes
     if not printed.regions:
         print("no regions: give --print with regions, or --joints", file=sys.stderr)
@@ -105,7 +114,12 @@ def main(argv: list[str] | None = None) -> int:
     composed = choice.compose(out / "profiles")
     profiles = SlicerProfiles(machine=composed["machine"], process=composed["process"],
                               filament=composed["filament"], used=choice.used(STORE_DIR))
-    result = slice_regions(args.stl, printed, profiles, out, (turn[0], turn[1], turn[2]), base)
+    try:
+        result = slice_regions(args.stl, printed, profiles, out, (turn[0], turn[1], turn[2]),
+                               base, layers=layers)
+    except ValueError as exc:
+        print(exc, file=sys.stderr)
+        return 2
     (out / "print.json").write_text(json.dumps(result.for_load(), indent=2))
     for line in result.lines():
         print(line)

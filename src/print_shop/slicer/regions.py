@@ -107,7 +107,9 @@ ORCA_VERSION = "2.4.2"
 #: within 2, and gyroid's layers within 7 either side, their mean within 2.
 INFILL_POINTS = 3.0
 INFILL_SHARE = 0.08
-#: The sparse lines run as asked where most of their length is within this of the angle.
+#: The sparse lines run as asked where most of their length is within this of the angle. Each
+#: line's way is read to the whole degree (`gcode.built`), so a line is within it to half a
+#: degree more.
 ANGLE_DEGREES = 8.0
 #: Patterns whose lines run straight, at Orca's angle and at right angles to it: `grid` both on
 #: each layer, `rectilinear` each in turn, layer by layer (Orca 2.4.2, read on the bar). Their
@@ -394,6 +396,9 @@ def _item_shift(model: str) -> tuple[float, float]:
     if not np.allclose(turn, np.eye(3), atol=1e-6):
         raise RuntimeError("Orca turned the part on the plate as it wrote the project: its "
                            "regions and infill angle aren't read against a turn it chose")
+    if abs(values[11]) > 1e-6:
+        raise RuntimeError(f"Orca placed the part {values[11]:g} mm above the plate: its bands "
+                           "and shells aren't read where it isn't")
     return values[9], values[10]
 
 
@@ -505,6 +510,13 @@ def write_project(
             raise ValueError("the pose doesn't stand one of the part's own axes up, so its "
                              "infill angle can't be turned onto the plate")
         own[_PLATE_ANGLE] = f"{plate:g}"
+    # The part's shells are written as counts with Orca's shell thickness at 0, as a region's
+    # are: a band of thinner layers would otherwise get more of them than `load` is told.
+    shells = settings_of(Path(profiles.process), Path(profiles.machine))
+    own.update(Settings(top=printed.settings.top if printed.settings.top is not None
+                        else shells.top,
+                        bottom=printed.settings.bottom if printed.settings.bottom is not None
+                        else shells.bottom).orca())
     part_profiles = _with_settings(profiles, own, outdir)
     resolved = settings_of(Path(part_profiles.process), Path(part_profiles.machine))
     if printed.settings.infill_angle is None and resolved.infill_angle is not None:
@@ -597,10 +609,13 @@ class Said:
     #: "as asked", "not as asked", "as the part round it" (Orca didn't apply it) or "not read".
     verdict: str
     why: str = ""
+    #: What the part sliced without its regions reads there.
+    base: str = ""
 
     def line(self) -> str:
         why = f" ({self.why})" if self.why else ""
-        return f"{self.name}: asked {self.asked}, read {self.read}: {self.verdict}{why}"
+        base = f", without the regions {self.base}" if self.base not in ("", "-") else ""
+        return f"{self.name}: asked {self.asked}, read {self.read}{base}: {self.verdict}{why}"
 
 
 @dataclass
@@ -832,31 +847,63 @@ def _angle_said(project: Project, asked: Settings, layers: list[gcode.Built],
     main = max(angles, key=lambda a: angles[a])
     read = f"lines mostly at {main} on the plate, {share:.0%} within {ANGLE_DEGREES:g} of it"
     shown = f"{_shown(own)} (on the plate {plate:g}, and {(plate + 90) % 360:g})"
-    if share >= 0.8:
-        return Said("infill_angle", shown, read, "as asked")
     part = project.settings.infill_angle
     base_plate = project.pose.plate_angle(part) if part is not None else None
+    if base_plate is not None:
+        # Lines are read at the angle and at right angles to it, so two angles are told apart
+        # only where neither's window, a degree wider for the reading's, reaches the other's.
+        off = min(_angle_off(plate, base_plate), _angle_off(plate, base_plate + 90))
+        if off <= 2 * (ANGLE_DEGREES + 0.5):
+            return Said("infill_angle", shown, read, "not read",
+                        f"can't tell from the part's own {base_plate:g} on the plate: a "
+                        "reading of one is a reading of the other")
+    if share >= 0.8:
+        return Said("infill_angle", shown, read, "as asked")
     if base_plate is not None and _near(angles, base_plate) >= 0.8:
         return Said("infill_angle", shown, read, "as the part round it",
                     f"its lines run at the part's own {base_plate:g} on the plate")
     return Said("infill_angle", shown, read, "not as asked")
 
 
-def _said(name: str, asked: Any, read: Any, base: Any,
-          close: Callable[[Any, Any], bool]) -> Said:
+def _said(name: str, asked: Any, part: Any, read: Any, base: Any,
+          close: Callable[[Any, Any], bool], apart: Callable[[Any, Any], bool]) -> Said:
+    """One setting as asked and as read, against the part's own: `close` says a reading is
+    what was asked, and `apart` that two settings can be told apart by a reading."""
     shown = _shown
+    was = shown(base)
+    if asked is not None and part is not None and not apart(asked, part):
+        return Said(name, shown(asked), shown(read), "not read",
+                    f"can't tell from the part's own {shown(part)}: a reading of one is a "
+                    "reading of the other", was)
     if read is None:
-        return Said(name, shown(asked), "-", "not read", "nothing of it inside the region")
+        return Said(name, shown(asked), "-", "not read", "nothing of it inside the region", was)
     if close(read, asked):
-        return Said(name, shown(asked), shown(read), "as asked")
+        return Said(name, shown(asked), shown(read), "as asked", "", was)
     if base is not None and close(read, base):
         return Said(name, shown(asked), shown(read), "as the part round it",
-                    "Orca built the part's own here")
-    return Said(name, shown(asked), shown(read), "not as asked")
+                    "Orca built the part's own here", was)
+    return Said(name, shown(asked), shown(read), "not as asked", "", was)
+
+
+def _infill_within(asked: float) -> float:
+    return max(INFILL_POINTS, INFILL_SHARE * asked)
 
 
 def _infill_close(read: float, asked: float) -> bool:
-    return abs(read - asked) <= max(INFILL_POINTS, INFILL_SHARE * asked)
+    return abs(read - asked) <= _infill_within(asked)
+
+
+def _infill_apart(asked: float, part: float) -> bool:
+    """Whether readings of two densities can't be mistaken for each other."""
+    return abs(asked - part) > _infill_within(asked) + _infill_within(part)
+
+
+def _same(read: Any, asked: Any) -> bool:
+    return bool(read == asked)
+
+
+def _differ(asked: Any, part: Any) -> bool:
+    return bool(asked != part)
 
 
 def read_region(sliced: gcode.Sliced, base: gcode.Sliced, project: Project, base_project: Project,
@@ -870,36 +917,40 @@ def read_region(sliced: gcode.Sliced, base: gcode.Sliced, project: Project, base
     notes: list[str] = []
     said: list[Said] = []
     own = region.settings.given()
-    part_top = len(sliced.layers)
+    part_top, base_top = len(sliced.layers), len(base.layers)
+    part = project.settings
 
     if not layers:
         notes.append("the region holds none of the part: nothing of it is printed")
+    coarse = _coarse(_grid(project, region), part.line_width or 0.45)
+    if coarse:
+        notes.append(coarse)
     if not isinstance(region.shape, Layers):
         shape = project.shapes[region.name].bounds
-        part = project.part.bounds
+        extent = project.part.bounds
         past = [f"{'-+'[side]}{'xyz'[a]}" for side in (0, 1) for a in range(3)
-                if (shape[side][a] < part[side][a] - 1e-6 if side == 0
-                    else shape[side][a] > part[side][a] + 1e-6)]
+                if (shape[side][a] < extent[side][a] - 1e-6 if side == 0
+                    else shape[side][a] > extent[side][a] + 1e-6)]
         if past:
             notes.append("it reaches past the part on " + ", ".join(past) + " as it prints: "
                          "only what of the part lies inside it is read")
 
     if "infill" in own:
-        said.append(_said("infill", asked.infill, _round(_infill(layers)),
-                          _round(_infill(base_layers)), _infill_close))
+        said.append(_said("infill", asked.infill, part.infill, _round(_infill(layers)),
+                          _round(_infill(base_layers)), _infill_close, _infill_apart))
     if "walls" in own:
         walls, meet = _walls(layers)
         base_walls, _ = _walls(base_layers)
-        found = _said("walls", asked.walls, walls, base_walls, lambda r, a: r == a)
+        found = _said("walls", asked.walls, part.walls, walls, base_walls, _same, _differ)
         # What's left inside the walls for infill, past the gap fill between them.
         shares = sorted(b.core_mm2 * (1 - b.solid) / b.area_mm2 for b in layers
                         if b.area_mm2 > 0)
         filled = bool(shares) and shares[len(shares) // 2] < FILLED
-        if (walls is not None and asked.walls is not None and walls < asked.walls
-                and (filled or meet > 0.5)):
+        if (found.verdict != "not read" and walls is not None and asked.walls is not None
+                and walls < asked.walls and (filled or meet > 0.5)):
             found = Said(found.name, found.asked, found.read, "not as asked",
                          f"the walls fill it: only {walls} fit in its width, and nothing is left "
-                         "inside them")
+                         "inside them", found.base)
         said.append(found)
     if "infill_angle" in own or "pattern" in own:
         pattern = asked.pattern or ""
@@ -912,13 +963,13 @@ def read_region(sliced: gcode.Sliced, base: gcode.Sliced, project: Project, base
         if name not in own:
             continue
         found_shells = _shells(layers, part_top, top)
-        base_shells = _shells(base_layers, part_top, top)
+        base_shells = _shells(base_layers, base_top, top)
         if found_shells is None:
             said.append(Said(name, str(getattr(asked, name)), "-", "not read",
                              f"the region doesn't hold the part's {name} layer"))
         else:
-            said.append(_said(name, getattr(asked, name), found_shells, base_shells,
-                              lambda r, a: r == a))
+            said.append(_said(name, getattr(asked, name), getattr(part, name), found_shells,
+                              base_shells, _same, _differ))
     if "layer_height" in own and isinstance(region.shape, Layers):
         heights = sorted({round(b.height, 3) for b in layers})
         read = heights[0] if len(heights) == 1 else None
@@ -933,6 +984,31 @@ def read_region(sliced: gcode.Sliced, base: gcode.Sliced, project: Project, base
     grams = None if density is None else round((volume - base_volume) * density / 1000, 3)
     return RegionRead(region, asked, layers, base_layers, said, round(volume, 2),
                       round(base_volume, 2), grams, notes)
+
+
+def _coarse(grid: gcode.Grid, width: float) -> str:
+    """What's said of a region read on a raster too coarse for its lines: a big one, whose
+    cells `gcode.CELLS` caps the count of."""
+    if grid.cell <= width / 2:
+        return ""
+    return (f"it's read on a raster of {grid.cell:.2f} mm cells, coarser than half a line's "
+            f"width ({width / 2:g} mm): its solid layers and infill read less surely")
+
+
+def _lifted(config: dict[str, str]) -> str:
+    """Why the part doesn't sit on the plate where its project put it, from the slice's
+    settings: a raft under it, or a z offset. "" where it does."""
+    why = []
+    try:
+        rafts = int(float(_value(config.get("raft_layers", "0")) or 0))
+        offset = float(_value(config.get("z_offset", "0")) or 0)
+    except ValueError:
+        return "the slice's raft_layers or z_offset can't be read"
+    if rafts:
+        why.append(f"on {rafts} raft layers")
+    if offset:
+        why.append(f"with a z offset of {offset:g} mm")
+    return " and ".join(why)
 
 
 def _round(value: float | None) -> float | None:
@@ -961,6 +1037,9 @@ def slice_regions(
     base_sliced = gcode.read(base_path, keep_lines=True)
     _check_placed(sliced, with_regions)
     config = parse_config_block(sliced_path)
+    if lifted := _lifted(config):
+        raise RuntimeError(f"the part was sliced {lifted}: its bands and shells would be read "
+                           "where it doesn't print")
     try:
         density: float | None = float(_value(config.get("filament_density", "")))
     except ValueError:
