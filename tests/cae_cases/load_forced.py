@@ -14,7 +14,17 @@ Nothing here changes how the bench reads anything else.
 - `misordered`: the most stressed element of the last part with no node on a joint's faces,
   with two of its mid-side nodes given the other way round, as FreeCAD's order would be were
   it wrong (mqucifer/print-shop#320); `unshared` the same, with the checks of its sides' shared
-  nodes and of where they lie turned off, as for a swap they can't tell.
+  nodes and of where they lie turned off, as for a swap they can't tell;
+- `turned-away`: the curved mesh, finer where faces are close, turned away after its solve as
+  if an element were inside out, so the straight one starts from the pairs it found;
+- `inverted`: CalculiX's words for the first element of its input turned inside out, so the
+  curved and the straight try both fail on it;
+- `unplaceable`: `inverted`, with placing the element failing;
+- `alone-inverted`: the same element turned inside out in a part on its own's curved try in
+  the second pass, and nowhere else;
+- `search-fails`: the search for faces closer than the mesh's sag failing;
+- `unsized`: the faces found close where gmsh's triangles cross given no local size, so gmsh
+  refuses them as it did (mqucifer/print-shop#346).
 """
 
 from __future__ import annotations
@@ -132,6 +142,66 @@ elif mode in ("misordered", "unshared"):
     if mode == "unshared":
         # A swap neither the sides' shared nodes nor where they lie tells: the balance must.
         load.misordered = lambda wired, points: np.zeros(len(wired), dtype=bool)
+elif mode == "turned-away":
+    # The curved try meshed finer where faces are close and solved, then turned away as if
+    # CalculiX had found an element turned inside out (mqucifer/print-shop#346).
+    solve = load._Model.solve
+
+    def turned_away(self: Any, doc: Any) -> None:
+        solve(self, doc)
+        if not self.straight:
+            raise load._Curved("CalculiX found an element of the curved mesh turned inside out "
+                               f"({FORCED})", self.closes)  # fmt: skip
+
+    load._Model.solve = turned_away
+elif mode in ("inverted", "unplaceable", "alone-inverted"):
+    # CalculiX's words for an element turned inside out, the first of its input, as on a
+    # design run's table (mqucifer/print-shop#346): every try, curved and straight; the same
+    # with placing it failing; or a part on its own's curved try in the second pass alone.
+    import re
+
+    ccx = load._ccx
+
+    def inverted(fea: Any, size: float) -> None:
+        ccx(fea, size)
+        with open(fea.inp_file_name) as given:
+            first = re.search(r"^\*ELEMENT[^\n]*\n\s*(\d+),", given.read(), re.M | re.I)
+        fea.ccx_stdout += (" *ERROR in e_c3d: nonpositive jacobian\n        determinant in "
+                           f"element {first.group(1) if first else 1}\n")  # fmt: skip
+
+    if mode == "alone-inverted":
+        alone = importlib.import_module("bench.load_parts")._Alone
+        solve = alone.solve
+
+        def curved_inverted(self: Any, doc: Any) -> None:
+            if self.straight:
+                solve(self, doc)
+                return
+            load._ccx = inverted
+            try:
+                solve(self, doc)
+            finally:
+                load._ccx = ccx
+
+        alone.solve = curved_inverted
+    else:
+        load._ccx = inverted
+    if mode == "unplaceable":
+
+        def unplaceable(self: Any, point: Any) -> str:
+            raise RuntimeError("forced by the test")
+
+        load._Model._faces_near = unplaceable
+elif mode == "search-fails":
+    # The search for faces closer than the mesh's sag itself failing (mqucifer/print-shop#346).
+    def search_fails(*given: Any, **more: Any) -> Any:
+        raise ValueError("forced by the test")
+
+    load.close_faces.found = search_fails
+elif mode == "unsized":
+    # Faces that meet nowhere found close where gmsh's triangles cross, but given no local size
+    # (mqucifer/print-shop#346), as where the sizes don't part them.
+    load.close_faces.fields = lambda closes, size, scale=1.0: ""
 else:
     raise SystemExit(f"no such mode: {mode}")
 sys.exit(main(given))
