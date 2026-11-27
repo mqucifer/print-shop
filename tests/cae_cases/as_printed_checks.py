@@ -91,17 +91,25 @@ def main() -> None:
             return right(shape, layers, by * share)
         return cut
 
+    def as_slabs(cut: Any) -> Any:
+        """A wrong cut as the slabs give it, which take the walls in, not out, by a positive
+        distance."""
+        return lambda shape, layers, by: cut(shape, layers, -by)
+
     # Each wrong cut given as the first way a bar's tried, its slabs (mqucifer/print-shop#363),
     # and as the offset after it.
-    found["shifted"] = read(bar, slabs_in_plane=moved, offset_in_plane=moved)
-    found["short"] = read(bar, slabs_in_plane=further(1.04), offset_in_plane=further(1.04))
-    found["over"] = read(bar, slabs_in_plane=further(0.96), offset_in_plane=further(0.96))
+    found["shifted"] = read(bar, slabs_in_plane=as_slabs(moved), offset_in_plane=moved)
+    found["short"] = read(bar, slabs_in_plane=as_slabs(further(1.04)),
+                          offset_in_plane=further(1.04))
+    found["over"] = read(bar, slabs_in_plane=as_slabs(further(0.96)),
+                         offset_in_plane=further(0.96))
     ledge = box((0, 0, 0), (60, 20, 6)).fuse(box((0, 0, 0), (30, 20, 14))).removeSplitter()
 
     def slab_missing(shape: Any, layers: int, by: float) -> Any:
         return right(shape, layers, by).cut(box((-1, -1, 5.6), (61, 21, 6.4)))
 
-    found["ledge"] = read(ledge, slabs_in_plane=slab_missing, offset_in_plane=slab_missing)
+    found["ledge"] = read(ledge, slabs_in_plane=as_slabs(slab_missing),
+                          offset_in_plane=slab_missing)
     calls = [0]
     layer_core = as_printed.layer_core
 
