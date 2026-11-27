@@ -44,6 +44,7 @@ _began = time.monotonic()
 _steps: list[str] = []
 _lock = threading.Lock()
 _watching: dict[str, threading.Event | None] = {"stop": None}
+_thread: dict[str, threading.Thread | None] = {"now": None}
 
 
 def memory(cgroup: Path | None = None) -> dict[str, int | None]:
@@ -129,11 +130,16 @@ def watch(every: float = EVERY) -> None:
         while not event.wait(every):
             say_memory()
 
-    threading.Thread(target=beat, name="bench-memory", daemon=True).start()
+    thread = threading.Thread(target=beat, name="bench-memory", daemon=True)
+    _thread["now"] = thread
+    thread.start()
 
 
 def stop() -> None:
-    event = _watching["stop"]
+    """The memory no longer said: its thread told to stop, and waited for."""
+    event, thread = _watching["stop"], _thread["now"]
     if event is not None:
         event.set()
-    _watching["stop"] = None
+    if thread is not None:
+        thread.join(timeout=5)
+    _watching["stop"] = _thread["now"] = None

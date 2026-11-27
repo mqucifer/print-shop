@@ -942,3 +942,29 @@ def test_what_freecad_caches_of_the_kept_shapes_faces_is_let_go_as_each_step_end
     with load.step("reading the faces"):
         pass
     assert cleared == ["a", "b", "given back"]
+
+
+def test_a_part_the_squaring_left_as_it_was_stays_kept_once_the_squared_join_goes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """mqucifer/print-shop#336, the cold review: letting the squared parts' join go let go of a
+    part `squared` returned as it was too, a part as placed, whose faces' cache was then never
+    let go again."""
+
+    class Shape:
+        def generalFuse(self, others: list[Any]) -> tuple[Any, list[Any]]:  # noqa: N802
+            return Shape(), []
+
+    monkeypatch.setattr(load, "_joined", {})
+    monkeypatch.setattr(load, "_kept", [])
+    monkeypatch.setattr(load, "_placed_now", [])
+    placed = [Shape(), Shape()]
+    load.keep(placed)
+    load._placed_now[:] = placed
+    square = [placed[0], Shape()]
+    load.keep(square)
+    joined = load.fused(square)
+    assert any(s is joined for s in load._kept)
+    load.unjoined(square)
+    assert [s for s in load._kept if s is placed[0]], "a part as placed stays kept"
+    assert not [s for s in load._kept if s is square[1] or s is joined]

@@ -3502,7 +3502,7 @@ class Run:
                     ),
                     encoding="utf-8",
                 )
-        end_failed = any(one.failing(list(accepted)) for one in ends)
+        end_failed = any(one.fails(list(accepted)) for one in ends)
         met = met and not end_failed
         files = paths.snapshot(self.work)
         diff = self._diff(folder)
