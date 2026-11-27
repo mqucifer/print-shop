@@ -187,7 +187,7 @@ def inner(assembly_file: str, mesh: float | None, placed_only: bool) -> None:  #
         if where is None:
             print("  gmsh gives no point", flush=True)
             return None
-        stage("finding the faces nearest where gmsh's triangles cross")
+        stage("finding the faces nearest where gmsh refused the mesh")
         near = []
         for number, face in enumerate(faces, 1):
             box = face.BoundBox
@@ -207,7 +207,8 @@ def inner(assembly_file: str, mesh: float | None, placed_only: bool) -> None:  #
 
     def search(where: Any) -> tuple[list[Any], list[Any]]:
         """The close pairs as load finds them: every two parts' pair, and any near `where`."""
-        stage("finding the close pairs" + (", and near where gmsh's cross" if where else ""))
+        stage("finding the close pairs"
+              + (", and near where gmsh refused the mesh" if where else ""))  # fmt: skip
         before = len(measured)
         searched = time.time()
         found = close_faces.found(shape, size, known=measured, owners=owned, near=where)

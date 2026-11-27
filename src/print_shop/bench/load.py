@@ -610,6 +610,9 @@ class _Model:
         self.feature = doc.addObject("Part::Feature", "Parts")
         self.feature.Shape = whole
         self.shape = shape = self.feature.Shape
+        #: The joined shape itself, as the fuse made it, its faces in `shape`'s order: what
+        #: FreeCAD caches of its faces can be let go, where the document's copy can't be changed.
+        self.whole = whole
         if len(shape.Solids) != len(placed):
             raise NoAnswer(
                 f"joined, the {len(placed)} parts are {len(shape.Solids)} solids: two of them "
@@ -675,6 +678,7 @@ class _Model:
         whole = self.shape.generalFuse([solid for *_, solid in given])[0]
         self.feature.Shape = whole
         self.shape = self.feature.Shape
+        self.whole = whole
         solids = self.shape.Solids
         if len(solids) != len(whole.Solids):
             raise NoAnswer("the parts with their cores fused in couldn't be read back")
@@ -855,14 +859,16 @@ class _Model:
         analysis.addObject(mesh)
         doc.recompute()
         began = time.time()
-        tools = self._gmsh(GmshTools, mesh, "")
+        # Where the curved try found faces close, the straight one is meshed finer there from
+        # the start (mqucifer/print-shop#346).
+        tools = self._gmsh(GmshTools, mesh, close_faces.fields(self.closes, self.size))
         said = None if mesh.FemMesh.VolumeCount else _gmsh_said(tools)
         for _ in range(RETRIES):
             if said is None or not CROSSED.search(said):
                 break
             # gmsh's triangles on one face cross another's (mqucifer/print-shop#346): where two
             # faces that meet nowhere lie closer than their sag, it's meshed again finer there.
-            with step("finding faces closer than the mesh's sag, where gmsh's triangles cross"):
+            with step("finding faces closer than the mesh's sag, where gmsh refused them"):
                 sizes, more = self._close(int(mesh.MeshSizeFromCurvature), said)
             if not more:
                 break
@@ -880,7 +886,9 @@ class _Model:
             # FreeCAD keeps no mesh where gmsh ends with an error, and says nothing of it: its
             # own words are in what it printed.
             if not self.straight:
-                raise _Curved(f"gmsh made no curved mesh of the joined parts: {words[:900]}")
+                raise _Curved(
+                    f"gmsh made no curved mesh of the joined parts: {words[:900]}", self.closes
+                )
             raise _Unread(
                 "gmsh made no mesh of the joined parts, with its elements' sides curved onto "
                 f"the parts' faces or straight: {words[:900]}"
@@ -916,7 +924,8 @@ class _Model:
             if not self.straight:
                 raise _Curved(
                     "CalculiX found an element of the curved mesh, at most "
-                    f"{self.size:g} mm, turned inside out"
+                    f"{self.size:g} mm, turned inside out",
+                    self.closes,
                 )
             raise NoAnswer(
                 f"CalculiX solved nothing: an element of the mesh, at most {self.size:g} mm, is "
@@ -986,10 +995,10 @@ class _Model:
         elsewhere, it's left as gmsh meshed it."""
         point = _crossed_at(words)
         found = close_faces.found(
-            self.shape, self.size, per_turn, _measured(self.shape), self._face_owners(), point
+            self.whole, self.size, per_turn, _measured(self.whole), self._face_owners(), point
         )
         refused = close_faces.too_close(found)
-        faces = self.shape.Faces
+        faces = self.whole.Faces
         here = [
             c for c in refused
             if point is not None and min(
@@ -1021,11 +1030,12 @@ class _Model:
         if point is None:
             return ""
         near = []
-        for face in self.shape.Faces:
+        for face in self.whole.Faces:
             box = face.BoundBox
             box.enlarge(self.size)
             if box.isInside(point.Point):
                 near.append((float(face.distToShape(point)[0]), face))
+            close_faces._let_go(face)
         near.sort(key=lambda row: row[0])
         if not near:
             return ""
@@ -2410,7 +2420,25 @@ class Faces:
 
 class _Curved(NoAnswer):
     """The mesh with its elements' sides curved onto the parts' faces has an element turned
-    inside out, or none at all: it's meshed again with them straight."""
+    inside out, or none at all: it's meshed again with them straight. With the pairs of faces
+    the curved try found close (mqucifer/print-shop#346), so the straight one starts from them:
+    the same parts at the same mesh, and gmsh's triangles cross the same way."""
+
+    def __init__(self, said: str, closes: list[close_faces.Close] | None = None) -> None:
+        super().__init__(said)
+        self.closes = list(closes or [])
+
+
+def curved_said(why: str) -> str:
+    """Why the curved try didn't stand, in a few words, for the step that follows it: what met
+    it, never a figure or a name."""
+    if why.startswith("CalculiX"):
+        return "CalculiX found an element turned inside out"
+    if "made no curved mesh" in why:
+        return "gmsh made no curved mesh" + (
+            ", with faces meshed finer where they're close" if "meshed again" in why else ""
+        )
+    return "it didn't stand"
 
 
 def _solved(
@@ -2443,14 +2471,18 @@ def _solved(
         with _quiet():
             return _read_solved(assembly, model(False), doc, size)
     except _Curved as curved:
-        why = str(curved)
+        why, closes = str(curved), curved.closes
     # Meshed again outside the `except`, so what the curved try held, its model and its mesh,
     # which its traceback keeps, is let go first (mqucifer/print-shop#336): held through the
     # straight try, a design run's whole table had 0.8 GiB more in use there.
     give_back()
+    with step(f"meshing again straight-sided, as the curved mesh didn't stand: {curved_said(why)}"):
+        pass
     doc = App.newDocument("Load")
+    straight = model(True)
+    straight.closes = closes
     with _quiet():
-        found = _read_solved(assembly, model(True), doc, size)
+        found = _read_solved(assembly, straight, doc, size)
     found["straight"] = why
     return found
 

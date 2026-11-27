@@ -1732,6 +1732,27 @@ def test_a_cap_a_hair_from_its_counterbore_names_both_faces_and_how_far_apart(ca
     assert "Draw each pair meeting face to face" in why
 
 
+def test_a_straight_try_after_a_curved_one_is_meshed_finer_from_the_start(cae: Any) -> None:
+    """mqucifer/print-shop#346: on a design run's table the curved try was refused, meshed
+    finer and turned away, and the straight try met the same refusal, searched again and was
+    killed for memory as it meshed finer. Now the straight try starts from the pairs the curved
+    one found: one mesh, finer from the start, and the step says why the curved try didn't
+    stand."""
+    shutil.copy(CASES / "load_forced.py", cae.work / "load_forced.py")
+    said: list[str] = []
+    done = host.run(["load_forced.py", "turned-away", "load", "capped/capped.json", *CAPPED],
+                    cae.work, python=True, image=host.CAE_IMAGE, trace=said)  # fmt: skip
+    assert done.stdout.startswith("verdict: OK"), done.stdout
+    assert "its elements second-order with straight sides" in done.stdout, done.stdout
+    assert done.stdout.count(", finer, to at most") >= 2, done.stdout
+    steps = [line for line in said if line.startswith(host.STEP_LINE)]
+    assert any("meshing again straight-sided, as the curved mesh didn't stand: CalculiX found "
+               "an element turned inside out" in line for line in steps), steps  # fmt: skip
+    # The curved try's search, once on each mesh, and none in the straight try.
+    searches = [line for line in steps if "closer than the mesh's sag" in line]
+    assert len(searches) == 2, steps
+
+
 def test_where_gmsh_still_refuses_the_faces_nearest_its_crossing_are_named(cae: Any) -> None:
     """mqucifer/print-shop#346: where gmsh's triangles still cross, the reply says gmsh's own
     words and then the faces nearest where it says they cross, with their parts, so a design

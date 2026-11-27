@@ -15,6 +15,8 @@ Nothing here changes how the bench reads anything else.
   with two of its mid-side nodes given the other way round, as FreeCAD's order would be were
   it wrong (mqucifer/print-shop#320); `unshared` the same, with the checks of its sides' shared
   nodes and of where they lie turned off, as for a swap they can't tell;
+- `turned-away`: the curved mesh, finer where faces are close, turned away after its solve as
+  if an element were inside out, so the straight one starts from the pairs it found;
 - `unsized`: the faces found close where gmsh's triangles cross given no local size, so gmsh
   refuses them as it did (mqucifer/print-shop#346).
 """
@@ -134,6 +136,18 @@ elif mode in ("misordered", "unshared"):
     if mode == "unshared":
         # A swap neither the sides' shared nodes nor where they lie tells: the balance must.
         load.misordered = lambda wired, points: np.zeros(len(wired), dtype=bool)
+elif mode == "turned-away":
+    # The curved try meshed finer where faces are close and solved, then turned away as if
+    # CalculiX had found an element turned inside out (mqucifer/print-shop#346).
+    solve = load._Model.solve
+
+    def turned_away(self: Any, doc: Any) -> None:
+        solve(self, doc)
+        if not self.straight:
+            raise load._Curved("CalculiX found an element of the curved mesh turned inside out "
+                               f"({FORCED})", self.closes)  # fmt: skip
+
+    load._Model.solve = turned_away
 elif mode == "unsized":
     # Faces that meet nowhere found close where gmsh's triangles cross, but given no local size
     # (mqucifer/print-shop#346), as where the sizes don't part them.
