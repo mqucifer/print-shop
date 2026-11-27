@@ -27,7 +27,9 @@ from print_shop.bench.cli import parser
 from print_shop.bench.report import NoAnswer, Report
 from print_shop.rounds import end_checks, reports, transcript
 from print_shop.rounds.run import Run
+from tests import test_end_checks
 from tests.rounds_fakes import Scripted, tool
+from tests.rounds_fakes import flat as flat_on_bed
 
 PARTS = '''
 import math
@@ -175,7 +177,25 @@ def test_the_reply_lists_every_placement_by_its_part_and_says_a_file_read_severa
     found = placed_module.of(["slice.step"], assembly, ["s1", "s3"])
     placed_module.say_placed(report, found, assembly, ["slice.step"], ["s1", "s3"])
     assert set(report.numbers["placed"]) == {"slice.step as s1", "slice.step as s3"}
-    assert "read as the 2 of its parts" in "\n".join(report.facts)
+    assert "and it's read as the 2 that --part names: s1, s3" in "\n".join(report.facts)
+
+
+def test_the_part_a_reading_moves_is_said_as_the_one_that_moves(flat: Path) -> None:
+    """`fit-on`'s moving file, read as the one part `--as` names: said as that, of the
+    assembly's three, and not as a file named in one part to narrow with --part."""
+    report = Report("fit-on", [])
+    mine = placed_module.of(["slice.step"], "ring.json")["slice.step"]
+    moved = placed_module.one_moving("slice.step", mine, "s3", "ring.json", "fit-on")
+    assert moved is not None and moved.read_as == "slice.step as s3"
+    placed_module.say_placed(
+        report, {"slice.step": [moved]}, "ring.json", ["slice.step"], [], moved
+    )
+    said = "\n".join(report.facts)
+    assert "slice.step is named in 3 parts of ring.json: it's moved as s3" in said, said
+    assert "none of its other parts is read here" in said and "--part" not in said, said
+    assert "1 parts" not in said
+    with pytest.raises(NoAnswer, match=r"in 3 parts, s1, s2, s3, and --slide moves one of them"):
+        placed_module.one_moving("slice.step", mine, None, "ring.json", "--slide")
 
 
 def test_each_command_takes_the_parts_it_reads() -> None:
@@ -280,6 +300,27 @@ def test_a_reading_of_some_of_the_parts_reads_only_those(work: Path) -> None:
     [pair] = record["numbers"]["pairs"]
     assert {pair["a"], pair["b"]} == {"slice.step as s1", "slice.step as s3"}
     assert pair["gap_mm"] == pytest.approx(chord(60), abs=1e-3)
+
+
+@pytest.mark.bench
+def test_a_slide_or_lift_of_a_file_in_several_parts_moves_the_part_as_names(work: Path) -> None:
+    """Before mqucifer/print-shop#343's review, `--slide` and `--lift` moved the last copy read,
+    and the others were never moved. Now one is moved, the one `--as` names, or none."""
+    for moves in (["--slide", "+z"], ["--lift", "2"]):
+        text, record = ask(work, "clearance", "slice.step", *moves, "--placed", "ring.json")
+        assert record["verdict"] == "NO ANSWER", text
+        assert placed_module.SEVERAL_MOVING in record["why"], text
+    text, record = ask(
+        work, "clearance", "slice.step", "--lift", "2", "--as", "s1", "--placed", "ring.json"
+    )
+    assert record["numbers"]["lift"]["file"] == "slice.step as s1", text
+    assert len(record["numbers"]["pairs"]) == 3 and len(record["numbers"]["placed"]) == 3
+    assert "it's moved as s1, the part --as names" in text, text
+    text, record = ask(
+        work, "clearance", "slice.step", "--slide", "+z", "--as", "s2", "--placed", "ring.json"
+    )
+    assert record["verdict"] not in ("NO ANSWER", "DISAGREE"), text
+    assert "slice.step as s2" in text and len(record["numbers"]["pairs"]) == 3, text
 
 
 @pytest.mark.bench
@@ -434,3 +475,131 @@ def test_done_takes_a_whole_assembly_need_and_reads_it_once_a_part(
         frozenset((f"{slices}1", f"{slices}2")),
         *(frozenset((f"{slices}{k}", f"{ribs}{k}")) for k in (1, 2, 3)),
     }
+
+
+# The end checks' way on, for a held part made from a file in several parts.
+
+
+class Copies(test_end_checks.Bench):
+    """`fit-on` answered as the bench does with `--placed`: where its moving file is in several
+    parts and no `--as` says which, `NO ANSWER`; else by the part it's moved as."""
+
+    def __init__(self, work: Path, by_part: dict[str, Any], expand: bool = True) -> None:
+        super().__init__(work, {})
+        self.by_part = by_part
+        self.expand = expand
+        self.ways: list[list[str]] = []
+
+    def bench(self, args: list[str], where: Path | None = None, timeout: int | None = None) -> Any:
+        out = args.index("--out") if "--out" in args else -2
+        words = [a for i, a in enumerate(args) if i not in (out, out + 1)]
+        if words[0] != "fit-on":
+            return super().bench(args, where, timeout)
+        self.ways.append(words)
+        moving_as = words[words.index("--as") + 1] if "--as" in words else ""
+        self.fit = {words[1]: self.by_part.get(moving_as, "NO ANSWER")}
+        done = super().bench(args, where, timeout)
+        if not moving_as:
+            record = (where or self.work) / "bench-out" / f"{len(self.asked)}.json"
+            found = json.loads(record.read_text())
+            found["why"] = (
+                f"table.json names {words[1]} in 2 parts, st1, st2, and fit-on "
+                f"{placed_module.SEVERAL_MOVING}"
+            )
+            record.write_text(json.dumps(found))
+        return done
+
+
+def _strips_run(root: Path, box_of: Any) -> tuple[Run, Any]:
+    """A channel holding a given strip, the strip named in two parts of the run's assembly: the
+    way on is the strip's, and it's read once for each."""
+    given = root / "given" / "strip.step"
+    given.parent.mkdir(parents=True)
+    given.write_text("a strip, made up")
+    model = Scripted(
+        [
+            tool(
+                "done",
+                part=["channel.step"],
+                on_bed=flat_on_bed("channel.step"),
+                **test_end_checks.DONE,
+            )
+        ],
+        [tool("blocked", reason="Out of turns.")],
+    )
+    run = Run.start(
+        root / "runs", "r", test_end_checks.STRIP_REQUEST, [given], model, sleep=lambda _: None
+    )
+    parts = [
+        {"name": "c", "file": "channel.step", "layers": "z"},
+        {"name": "st1", "file": "references/strip.step", "layers": "z", "at": [0, 0, 0]},
+        {"name": "st2", "file": "references/strip.step", "layers": "z", "at": [0, 50, 0]},
+    ]
+    (run.work / "table.json").write_text(json.dumps({"parts": parts}))
+    box = box_of(run)
+    box.makes = ("channel.step",)
+    box.placing = run._placed_argv if box.expand else None
+    test_end_checks._in_rounds(
+        run, box, test_end_checks.CAUGHT, ("channel", "strip"), "a catch on the channel's wall"
+    )
+    return run, box
+
+
+def test_a_held_part_named_in_two_parts_has_its_way_on_read_as_each(tmp_path: Path) -> None:
+    """Before mqucifer/print-shop#343's review, the way was read with no `--as`: `NO ANSWER`,
+    which `done` took for a way it can't tell, and was met with both copies' ways unread."""
+    run, box = _strips_run(
+        tmp_path, lambda run: Copies(run.work, {"st1": "CLEAR", "st2": "CLEAR"})
+    )
+    assert run.drive().name == "met"
+    asked = [w[w.index("--as") + 1] if "--as" in w else "" for w in box.ways]
+    assert asked == ["st1", "st2"], box.ways
+    stop = (run.folder / "approvals" / "1" / "stop.md").read_text()
+    assert "`references/strip.step as st1`" in stop and "`references/strip.step as st2`" in stop
+    assert "can't tell: `fit-on" not in stop, stop
+    assert stop.count(", ok: `fit-on references/strip.step") == 2, stop
+
+
+def test_each_copy_s_way_is_judged_on_its_own_and_named_by_its_part(tmp_path: Path) -> None:
+    catch = {
+        "file": "channel.step",
+        "box": [[4.7, -20, 4], [5, 20, 5]],
+        "depth_mm": 0.3,
+        "across": [1.0, 0.0, 0.0],
+        "out_mm": 2.0,
+        "seated": False,
+    }
+    blocked = ("BLOCKED", {"places": [catch], "depth_mm": 0.3, "moving": "x"})
+    run, box = _strips_run(
+        tmp_path, lambda run: Copies(run.work, {"st1": "CLEAR", "st2": blocked})
+    )
+    ending = run.drive()
+    kept = json.loads((run.folder / "rounds" / "001" / "end.json").read_text())
+    verdicts = {w["command"].rsplit(" ", 1)[-1]: w["verdict"] for w in kept["ways"]}
+    assert verdicts == {"st1": "CLEAR", "st2": "BLOCKED"}, kept
+    # A given strip pushed past a printed catch with no arm found is a person's to judge, as for
+    # one strip: met, and the stop names the copy.
+    assert ending.name == "met"
+    stop = (run.folder / "approvals" / "1" / "stop.md").read_text()
+    assert "`references/strip.step as st2`" in stop and "for a person to judge" in stop, stop
+
+
+def test_a_way_left_unread_for_several_copies_is_never_passed_as_cant_tell(
+    tmp_path: Path,
+) -> None:
+    """Where `fit-on` still says which copy to move, `done` isn't met: copies went unread."""
+    run, box = _strips_run(
+        tmp_path, lambda run: Copies(run.work, {}, expand=False)
+    )
+    assert run.drive().name == "blocked"
+    kept = json.loads((run.folder / "rounds" / "001" / "end.json").read_text())
+    (way,) = kept["ways"]
+    assert way["verdict"] == "NO ANSWER" and way["refused"] and not way["unsure"], way
+    note = run.state.end_sent["note"]  # type: ignore[index]
+    assert "DOESN'T PASS" in note and placed_module.SEVERAL_MOVING in note, note
+    stood = rows_of(run, "SELECT passed, unsure FROM standing WHERE check_name='way-on'")
+    assert stood == [{"passed": 0, "unsure": 0}]
+
+
+def rows_of(run: Run, sql: str) -> list[dict[str, Any]]:
+    return [dict(r) for r in run.ledger.rows(sql)]

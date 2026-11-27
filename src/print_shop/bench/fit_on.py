@@ -274,27 +274,6 @@ def _box(shape: Any) -> tuple[np.ndarray, np.ndarray]:
     return np.array([box.XMin, box.YMin, box.ZMin]), np.array([box.XMax, box.YMax, box.ZMax])
 
 
-def _moving(file: str, every: list[Any], moving_as: str | None, given: str | None) -> Any:
-    """Where the moving file is read: as the part `--as` names, where the assembly names its
-    file in several parts; or nowhere placed, where it places none (mqucifer/print-shop#343)."""
-    if moving_as:
-        chosen = [one for one in every if one.part == moving_as]
-        if not chosen:
-            parts = ", ".join(one.part for one in every) or "none"
-            raise NoAnswer(
-                f"--as names {moving_as}, and {given} names {file} in no part of that name: its "
-                f"parts are {parts}"
-            )
-        return chosen[0]
-    if len(every) > 1:
-        raise NoAnswer(
-            f"{given} names {file} in {len(every)} parts, {', '.join(o.part for o in every)}, "
-            "and fit-on moves one: name which with --as PART, and its other parts are read as "
-            "ones it could meet where --onto names its file too"
-        )
-    return every[0] if every else None
-
-
 class Way:
     """The moving part, what it goes onto, and its way on."""
 
@@ -311,11 +290,12 @@ class Way:
         # and a file the assembly names in several parts once as each (mqucifer/print-shop#343).
         given = getattr(args, "placed", None)
         self.parts = list(getattr(args, "parts", None) or [])
-        moving_as = getattr(args, "moving_as", None)
-        if moving_as and not given:
-            raise NoAnswer(f"--as names {moving_as}, a part of an assembly: give it with --placed")
         mine = placed_module.of([args.moving], given).get(args.moving, [])
-        moving = _moving(args.moving, mine, moving_as, given)
+        moving = placed_module.one_moving(
+            args.moving, mine, getattr(args, "moving_as", None), given, "fit-on"
+        )
+        #: The moving file's copy, where it's placed.
+        self.moved = moving
         onto = placed_module.of(args.onto, given, self.parts)
         #: Each file read placed, and each place it's read at: the moving part's first.
         self.placed = {f: list(every) for f, every in onto.items()}
@@ -544,7 +524,12 @@ class Rays:
 def run(args: Any, report: Report) -> None:
     way = Way(args)
     say_placed(
-        report, way.placed, getattr(args, "placed", None), [args.moving, *args.onto], way.parts
+        report,
+        way.placed,
+        getattr(args, "placed", None),
+        [args.moving, *args.onto],
+        way.parts,
+        way.moved,
     )
     every = [piece for out in way.offsets for piece in way.pieces(out)]
     places = []

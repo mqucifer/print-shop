@@ -643,11 +643,29 @@ def run(args: Any, report: Report) -> None:
     # (mqucifer/print-shop#343).
     given = getattr(args, "placed", None)
     named_parts = getattr(args, "parts", None) or []
-    placed = placed_module.of(args.files, given, named_parts)
-    parts = [placed_module.load(path, one) for path, one in placed_module.each(args.files, placed)]
-    say_placed(report, placed, given, args.files, named_parts)
     lift = getattr(args, "lift", None)
     along = getattr(args, "along", "z")
+    placed = placed_module.of(args.files, given, named_parts)
+    copies = placed_module.each(args.files, placed)
+    # `--lift` and `--slide` move one part, the last named: where the assembly names its file in
+    # several parts, `--as` says which, and its others stay where they sit.
+    moves = "--lift" if lift is not None else "--slide" if getattr(args, "slide", None) else ""
+    moving_as = getattr(args, "moving_as", None)
+    moved = None
+    if moving_as and not moves:
+        raise NoAnswer("--as names the part --slide or --lift moves, and neither is given")
+    if moves:
+        last = args.files[-1]
+        mine = placed_module.of([last], given).get(last, [])
+        moved = placed_module.one_moving(last, mine, moving_as, given, moves)
+    if moved is not None:
+        it = (moved.file, moved.part)
+        copies = [(f, one) for f, one in copies if one is None or (one.file, one.part) != it]
+        copies.append((args.files[-1], moved))
+        rest = [one for one in placed.get(args.files[-1], []) if one.part != moved.part]
+        placed[args.files[-1]] = [*rest, moved]
+    parts = [placed_module.load(path, one) for path, one in copies]
+    say_placed(report, placed, given, args.files, named_parts, moved)
     if lift is not None:
         moved = parts[-1].name
         parts[-1] = lifted(parts[-1], along, lift)

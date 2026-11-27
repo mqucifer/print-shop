@@ -347,6 +347,14 @@ def parser() -> Parser:
     )
     _placed_options(clearance)
     clearance.add_argument(
+        "--as",
+        dest="moving_as",
+        metavar="PART",
+        help="with --placed and --slide or --lift: the part the last file named is moved as, "
+        "where the assembly names its file in several parts. Its other parts stay where they "
+        "sit, read as ones it could meet. Without it, such a file is moved as none of them",
+    )
+    clearance.add_argument(
         "--facing",
         dest="facings",
         action="append",
@@ -1683,7 +1691,8 @@ def gaps_given(args: Any, top: Parser) -> None:
     slides(args, top)
     if args.lift is None:
         return
-    if len(args.files) < 2:
+    # With --placed one file may be several parts: the bench reads which (mqucifer/print-shop#343).
+    if len(args.files) < 2 and not args.placed:
         top.error("clearance: --lift moves the last file named, so it takes two files or more")
     limits = [g for g in (args.min_gap, args.max_gap) if g is not None]
     if args.lift == 0 or any(abs(args.lift) <= g for g in limits):
@@ -1704,7 +1713,7 @@ def slides(args: Any, top: Parser) -> None:
         if args.hold is not None:
             top.error("clearance: --hold is how far a --slide may go before it's held: add --slide")
         return
-    if len(args.files) < 2:
+    if len(args.files) < 2 and not args.placed:
         top.error(
             "clearance: --slide moves the last file named past the others, so it takes two files "
             "or more: the part, then the bought part it holds"

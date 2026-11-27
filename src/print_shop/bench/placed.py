@@ -89,6 +89,12 @@ class Placed:
         }
 
 
+#: What `fit-on` and `clearance --slide`/`--lift` answer where the file they move is named in
+#: several parts and no `--as` says which: the end checks never take it for a way they can't tell
+#: (mqucifer/print-shop#343).
+SEVERAL_MOVING = "moves one of them: name which with --as PART"
+
+
 def _plain(path: str) -> str:
     return os.path.normpath(path.removeprefix("/work/"))
 
@@ -165,48 +171,93 @@ def by_name(placed: dict[str, list[Placed]]) -> dict[str, Placed]:
     return {one.read_as: one for every in placed.values() for one in every}
 
 
+def one_moving(
+    file: str, every: Sequence[Placed], moving_as: str | None, given: str | None, moves: str
+) -> Placed | None:
+    """Where the file a reading moves is read: as the part `--as` names, where the assembly
+    names it in several parts; or unplaced, where it places none of it. `moves` is what moves
+    it, `fit-on`, `--slide` or `--lift`: with several parts and no `--as` it moves none, as
+    copies would go unread (mqucifer/print-shop#343)."""
+    if moving_as:
+        if not given:
+            raise NoAnswer(f"--as names {moving_as}, a part of an assembly: give it with --placed")
+        chosen = [one for one in every if one.part == moving_as]
+        if not chosen:
+            parts = ", ".join(one.part for one in every) or "none"
+            raise NoAnswer(
+                f"--as names {moving_as}, and {given} names {file} in no part of that name: its "
+                f"parts are {parts}"
+            )
+        return chosen[0]
+    if len(every) > 1:
+        raise NoAnswer(
+            f"{given} names {file} in {len(every)} parts, {', '.join(o.part for o in every)}, and "
+            f"{moves} {SEVERAL_MOVING}. Its other parts are read where they sit, as ones it "
+            "could meet"
+        )
+    return every[0] if every else None
+
+
 def say_placed(
     report: Report,
     placed: dict[str, list[Placed]],
     path: str | None,
     files: Sequence[str],
     parts: Sequence[str] = (),
+    moved: Placed | None = None,
 ) -> None:
     """Which files a reading placed, and how: a line, and `placed` in its numbers, each
-    placement by the name it's read by. A file read as several parts is said, with how to read
-    fewer. Where `--placed` names an assembly that places none of them, that's said too, so the
-    reading isn't taken for a placed one."""
-    if placed:
-        every = by_name(placed)
-        report.numbers["placed"] = {name: one.plain() for name, one in every.items()}
-        report.line(
-            "placed: "
-            + "; ".join(one.said for one in every.values())
-            + ". Each is read where it sits among the others, and its file stays as it's built"
-        )
-        for file, copies in placed.items():
-            if len(copies) < 2 and not copies[0].name.startswith(f"{file} as "):
-                continue
-            names = ", ".join(one.part for one in copies)
-            twice = sum(1 for f in files if f == file)
-            given = "named " + (f"{twice} times" if twice > 1 else "once") + " here"
-            if parts and any(one.part in parts for one in copies):
-                report.line(
-                    f"{file}, {given}, is read as the {len(copies)} of its parts in {path} that "
-                    f"--part names: {names}, each by its name, `{file} as PART`"
-                )
-                continue
+    placement by the name it's read by. A file the assembly names in several parts is said, with
+    how many of them are read and how to read fewer, or, for the file a reading moves, `moved`,
+    which part moves. Where `--placed` names an assembly that places none of them, that's said
+    too, so the reading isn't taken for a placed one."""
+    if not placed:
+        if path:
+            report.numbers["placed"] = {}
             report.line(
-                f"{file}, {given}, is named in {len(copies)} parts of {path}, so it's read "
-                f"{len(copies)} times, once as each: {names}, each by its name, `{file} as "
-                "PART`, and each pair between them is read like any other. To read it as only "
-                "some of them, name each with --part"
+                f"placed: nothing. {path} names none of {', '.join(dict.fromkeys(files))} as a "
+                "part or in a part's `with`, so each is read where it's built"
             )
-    elif path:
-        report.numbers["placed"] = {}
+        return
+    every = by_name(placed)
+    report.numbers["placed"] = {name: one.plain() for name, one in every.items()}
+    report.line(
+        "placed: "
+        + "; ".join(one.said for one in every.values())
+        + ". Each is read where it sits among the others, and its file stays as it's built"
+    )
+    whole = read(path) if path else {}
+    for file, copies in placed.items():
+        total = len(whole.get(_plain(file), copies))
+        if total < 2:
+            continue
+        in_all = f"{file} is named in {total} parts of {path}"
+        if moved is not None and any(one.file == moved.file for one in copies):
+            others = [one.part for one in copies if one.part != moved.part]
+            report.line(
+                f"{in_all}: it's moved as {moved.part}, the part --as names, `{file} as "
+                f"{moved.part}`"
+                + (
+                    f", and read where it sits as {', '.join(others)}, each by `{file} as PART`"
+                    if others
+                    else ", and none of its other parts is read here"
+                )
+            )
+            continue
+        names = ", ".join(one.part for one in copies)
+        if parts and any(one.part in parts for one in copies):
+            report.line(
+                f"{in_all}, and it's read as the {len(copies)} that --part names: {names}, each "
+                f"by `{file} as PART`"
+            )
+            continue
+        twice = sum(1 for f in files if f == file)
+        given = "named " + (f"{twice} times" if twice > 1 else "once") + " here"
         report.line(
-            f"placed: nothing. {path} names none of {', '.join(dict.fromkeys(files))} as a part "
-            "or in a part's `with`, so each is read where it's built"
+            f"{file}, {given}, is named in {total} parts of {path}, so it's read {len(copies)} "
+            f"times, once as each: {names}, each by `{file} as PART`, and each pair between "
+            "them is read like any other. To read it as only some of them, name each with "
+            "--part"
         )
 
 
