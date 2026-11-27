@@ -173,3 +173,24 @@ jobs:
       - run: zstd -d --stdout cae-image.tar.zst | docker load && rm cae-image.tar.zst
       - run: uv run python scripts/bench.py check
       - run: uv run pytest -q -m "cae and assembly and not proof" -n 2 -rps --durations=20
+
+  # TEMPORARY, mqucifer/print-shop#348's probe: removed before the PR is ready.
+  probe-348:
+    needs: [image, cae-image]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          python-version: "3.12"
+      - run: uv sync --locked
+      - uses: actions/download-artifact@v4
+        with:
+          name: bench-image
+      - run: zstd -d --stdout bench-image.tar.zst | docker load && rm bench-image.tar.zst
+      - uses: actions/download-artifact@v4
+        with:
+          name: cae-image
+      - run: zstd -d --stdout cae-image.tar.zst | docker load && rm cae-image.tar.zst
+      - run: uv run python .github/probe-348/probe.py "$RUNNER_TEMP/probe" 12
