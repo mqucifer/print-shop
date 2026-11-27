@@ -856,19 +856,24 @@ class _Model:
         doc.recompute()
         began = time.time()
         tools = self._gmsh(GmshTools, mesh, "")
-        words = None if mesh.FemMesh.VolumeCount else _gmsh_said(tools)
-        if words is not None and CROSSED.search(words):
+        said = None if mesh.FemMesh.VolumeCount else _gmsh_said(tools)
+        for _ in range(RETRIES):
+            if said is None or not CROSSED.search(said):
+                break
             # gmsh's triangles on one face cross another's (mqucifer/print-shop#346): where two
             # faces that meet nowhere lie closer than their sag, it's meshed again finer there.
             with step("finding faces closer than the mesh's sag, where gmsh's triangles cross"):
-                sizes = self._close(int(mesh.MeshSizeFromCurvature), words)
-            if sizes:
-                tools = self._gmsh(GmshTools, mesh, sizes)
-                words = None if mesh.FemMesh.VolumeCount else _gmsh_said(tools)
-                if words is not None:
-                    words += f"; meshed again {self._finer_words()}, and refused again"
-            if words is not None and CROSSED.search(words):
-                words += self._near_said(words)
+                sizes, more = self._close(int(mesh.MeshSizeFromCurvature), said)
+            if not more:
+                break
+            tools = self._gmsh(GmshTools, mesh, sizes)
+            said = None if mesh.FemMesh.VolumeCount else _gmsh_said(tools)
+        words = said
+        if said is not None:
+            if self.closes:
+                words = f"{words}; meshed again {self._finer_words()}, and refused again"
+            if CROSSED.search(said):
+                words = f"{words}{self._near_said(said)}"
         self.mesh_s = round(time.time() - began, 2)
         self.fem = fem = mesh.FemMesh
         if words is not None:
@@ -971,15 +976,19 @@ class _Model:
         tidy_mesh(tools)
         return tools
 
-    def _close(self, per_turn: int, words: str) -> str:
+    def _close(self, per_turn: int, words: str) -> tuple[str, bool]:
         """Where gmsh's triangles crossed, the pairs of faces that meet nowhere and lie closer
-        than their mesh's sag (`close_faces`), and gmsh's local sizes for them. A pair that would
-        need elements finer than `close_faces.LEAST` is the parts' to fix: where one is within
-        the mesh of where gmsh's triangles crossed, it's said, with its parts, its faces and
-        how far apart they are, and nothing is meshed; elsewhere, it's left as gmsh meshed it."""
-        found = close_faces.found(self.shape, self.size, per_turn, _measured(self.shape))
-        refused = close_faces.too_close(found)
+        than their mesh's sag (`close_faces`): every such pair of two parts' faces, and any
+        near where they crossed; gmsh's local sizes for them and the pairs found before, and
+        whether any is new. A pair that would need elements finer than `close_faces.LEAST` is
+        the parts' to fix: where one is within the mesh of where gmsh's triangles crossed, it's
+        said, with its parts, its faces and how far apart they are, and nothing is meshed;
+        elsewhere, it's left as gmsh meshed it."""
         point = _crossed_at(words)
+        found = close_faces.found(
+            self.shape, self.size, per_turn, _measured(self.shape), self._face_owners(), point
+        )
+        refused = close_faces.too_close(found)
         faces = self.shape.Faces
         here = [
             c for c in refused
@@ -996,8 +1005,10 @@ class _Model:
                 + close_faces.said(faces, refused, self._owners, lambda f: _xyz(f.CenterOfMass))
                 + ". Draw each pair meeting face to face, or further apart"
             )
-        self.closes = [c for c in found if c not in refused]
-        return close_faces.fields(self.closes, self.size)
+        before = {(c.first, c.second) for c in self.closes}
+        new = [c for c in found if c not in refused and (c.first, c.second) not in before]
+        self.closes += new
+        return close_faces.fields(self.closes, self.size), bool(new)
 
     def _finer_words(self) -> str:
         finer = self.finer_said()
@@ -1025,25 +1036,32 @@ class _Model:
             for d, f in near[:NEAREST]
         )
 
+    def _face_owners(self) -> list[frozenset[int]]:
+        """Each face of the joined shape's parts, by their number from 0, in the shape's order:
+        two where they meet, and none for a core's."""
+        if getattr(self, "_owners_by_face", None) is None:
+            owned: list[set[int]] = [set() for _ in self.shape.Faces]
+            for k, solid in enumerate(self.solids):
+                for face in solid.Faces:
+                    owned[int(self._face_name(face).removeprefix("Face")) - 1].add(k)
+                close_faces._let_go(solid)
+            self._owners_by_face = [frozenset(o) for o in owned]
+        return self._owners_by_face
+
     def _owners(self, face: Any) -> list[str]:
         """The parts a face of the joined shape is a face of: two where they meet."""
-        if getattr(self, "_owned_by", None) is None:
-            self._owned_by = [
-                (part.name, Faces(list(solid.Faces)))
-                for part, solid in zip(self.assembly.parts, self.solids, strict=True)
-            ]
-        return [name for name, faces in self._owned_by if faces.has(face)] or ["a core"]
+        number = int(self._face_name(face).removeprefix("Face"))
+        names = [self.assembly.parts[k].name for k in sorted(self._face_owners()[number - 1])]
+        return names or ["a core"]
 
     def finer_said(self) -> dict[str, Any] | None:
         """What's meshed finer where faces are close, for the reply: none where nothing is."""
         if not self.closes:
             return None
         faces = {n for c in self.closes for n in c.faces}
-        edges = {n for c in self.closes for n in c.edges}
         return {
             "pairs": len(self.closes),
             "faces": len(faces),
-            "edges": len(edges),
             "closest_mm": round(min(c.apart for c in self.closes), 4),
             "finest_mm": round(close_faces.stepped(min(c.finest for c in self.closes)), 4),
         }
@@ -2117,6 +2135,9 @@ _SUMMED = re.compile(
 CROSSED = re.compile(r"intersect", re.I)
 #: How many of the faces nearest where gmsh's triangles cross are named.
 NEAREST = 4
+#: How many times the parts are meshed again finer where gmsh's triangles cross, each time
+#: where it says they cross again.
+RETRIES = 4
 
 
 def _gmsh_said(tools: Any) -> str:
@@ -2316,10 +2337,7 @@ def keep(shapes: list[Any]) -> None:
 
 def forget() -> None:
     """What FreeCAD cached of the kept shapes' faces, let go: it's read again as it's asked."""
-    for shape in _kept:
-        clear = getattr(shape, "clearCache", None)
-        if clear is not None:
-            clear()
+    close_faces._let_go(*_kept)
 
 
 #: The parts joined, by the shapes joined, while one `load` runs (mqucifer/print-shop#336): each
@@ -2493,9 +2511,9 @@ def _finer_said(solved: dict[str, Any]) -> str:
     if not finer:
         return ""
     return (
-        f", finer, to at most {finer['finest_mm']:g} mm, on {finer['faces']} face(s) and "
-        f"{finer['edges']} edge(s) where {finer['pairs']} pair(s) of faces that meet nowhere lie "
-        f"closer than its triangles' sag, the closest {finer['closest_mm']:g} mm apart"
+        f", finer, to at most {finer['finest_mm']:g} mm, on {finer['faces']} face(s) where "
+        f"{finer['pairs']} pair(s) of faces that meet nowhere lie closer than its triangles' "
+        f"sag, the closest {finer['closest_mm']:g} mm apart"
     )
 
 

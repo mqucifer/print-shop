@@ -1702,9 +1702,9 @@ def test_a_cap_in_its_counterbore_with_play_round_it_meshes_curved_and_straight(
         assert answer.verdict == "OK", answer.text
         assert answer.numbers["joints"]["top+cap"]["force_n"] == pytest.approx([0, 0, -G], abs=0.01)
         assert re.search(
-            r"a mesh of at most 3 mm \([^)]*\), finer, to at most [\d.]+ mm, on 2 face\(s\) and "
-            r"\d+ edge\(s\) where \d+ pair\(s\) of faces that meet nowhere lie closer than its "
-            r"triangles' sag, the closest 0\.15 mm apart",
+            r"a mesh of at most 3 mm \([^)]*\), finer, to at most [\d.]+ mm, on 2 face\(s\) where "
+            r"\d+ pair\(s\) of faces that meet nowhere lie closer than its triangles' sag, the "
+            r"closest 0\.15 mm apart",
             answer.text,
         ), answer.text
         assert "a mesh of at most 4.5 mm (" in answer.text and answer.text.count(", finer,") >= 2
