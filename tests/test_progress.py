@@ -307,3 +307,77 @@ def test_a_load_in_two_passes_asked_for_is_given_the_larger_memory_and_nothing_e
     for memory, said in ((None, "3g"), ("4g", "4g")):
         argv = real(tmp_path, ["x"], "n", memory=memory)
         assert argv[argv.index("--memory") + 1] == argv[argv.index("--memory-swap") + 1] == said
+
+
+def test_a_design_round_sets_what_load_says_as_it_goes_aside_before_its_output_is_counted(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """mqucifer/print-shop#336, the cold review: `Box` keeps the last 256,000 bytes of output, and
+    a long `--parts` read says some 210 KB as it goes. Counted, it would push the reply's start
+    out, cut mid line, and a killed run's reply wouldn't start with its verdict. Set aside as
+    it's read, the reply is whole, whatever was said before it."""
+    from print_shop.rounds import box
+
+    noise = "".join(
+        f"bench: step {k}.0 reading the joint j{k}\nbench: memory {k}.5 current=1 peak=2\n"
+        for k in range(8000)
+    )
+    assert len(noise) > box.KEEP
+    child = (
+        f"import sys; sys.stderr.write({noise!r}); sys.stderr.flush(); "
+        "print('verdict: NO ANSWER: the reply'); sys.stdout.flush(); "
+        f"sys.stderr.write({SAID!r}); sys.exit({host.KILLED})"
+    )
+    monkeypatch.setattr(host, "image_id", lambda image=host.IMAGE: "sha256:x")
+    monkeypatch.setattr(host, "container", lambda *_, **__: [sys.executable, "-c", child])
+    ran = box.Box(tmp_path, 60).bench(["load", "a.json", "--parts"])
+    assert ran.output.startswith("verdict: NO ANSWER: the reply\n"), ran.output[:200]
+    assert ran.dropped == 0, "nothing of the reply is dropped"
+    assert "bench: " not in ran.output and "ory " not in ran.output.split("\n")[0]
+    assert ran.output.endswith(host.killed(SAID.splitlines(), "4g"))
+
+
+def test_progress_is_told_from_the_output_across_any_chunk_s_edge() -> None:
+    """A line of what `load` says, split across reads, is still set aside whole; any other line
+    is passed on as it comes, one of any length with no end of its own too."""
+    from print_shop.rounds import box
+
+    text = (
+        b"one\nbench: step 1.0 joining the parts\nbe it so\n"
+        b"bench: memory 2.0 current=5 peak=6\ntwo"
+    )
+    for size in (1, 2, 3, 7, len(text)):
+        progress = box._Progress()
+        out = b"".join(progress.take(text[k : k + size]) for k in range(0, len(text), size))
+        out += progress.end()
+        assert out == b"one\nbe it so\ntwo", size
+        assert progress.said() == [
+            "bench: step 1.0 joining the parts", "bench: memory 2.0 current=5 peak=6",
+        ]  # fmt: skip
+    # A line that isn't one is passed on as it's read, not held to its end.
+    progress = box._Progress()
+    assert progress.take(b"x" * 10_000) == b"x" * 10_000
+    assert progress.take(b"y\nbench: st") == b"y\n" and progress.end() == b"bench: st"
+
+
+def test_load_takes_each_option_only_in_full() -> None:
+    """The host gives `--parts` the hour and its memory by its words: `--part` isn't read as it,
+    by the host or by `load`."""
+    from print_shop.bench import cli
+
+    assert cli.parser().parse_args(["load", "a.json", "--parts"]).parts
+    with pytest.raises(SystemExit):
+        cli.parser().parse_args(["load", "a.json", "--part"])
+    assert not host.asks_two_passes(["load", "a.json", "--part"])
+
+
+def test_the_memory_s_thread_has_ended_once_it_s_stopped(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    import threading
+
+    monkeypatch.setattr(progress, "CGROUP", _cgroup(tmp_path, GIB, GIB, 0))
+    progress.watch(0.05)
+    progress.stop()
+    assert not any(t.name == "bench-memory" for t in threading.enumerate())
+    capsys.readouterr()

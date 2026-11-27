@@ -2168,6 +2168,8 @@ def _ccx(fea: Any, size: float) -> None:
 #: on a design run's whole table, reading the faces of its 37 parts once, as the bolts' ways
 #: do, took 1.6 GiB, held until the parts were.
 _kept: list[Any] = []
+#: Of them, the parts as placed, kept for the whole read whatever else is let go.
+_placed_now: list[Any] = []
 
 
 def keep(shapes: list[Any]) -> None:
@@ -2208,7 +2210,9 @@ def unjoined(placed: list[Any]) -> None:
     """The join of `placed` let go, once nothing more is read from it."""
     let_go = _joined.pop(tuple(id(s) for s in placed), None)
     if let_go is not None:
-        _kept[:] = [s for s in _kept if all(s is not t for t in (*let_go[0], let_go[1]))]
+        # A part the squaring left as it was is a part as placed still, and stays kept.
+        gone = [t for t in (*let_go[0], let_go[1]) if all(t is not b for b in _placed_now)]
+        _kept[:] = [s for s in _kept if all(s is not t for t in gone)]
 
 
 class Faces:
@@ -2354,6 +2358,7 @@ def run(args: Any, report: Report) -> None:
         _clock["now"] = None
         _joined.clear()
         _kept.clear()
+        _placed_now.clear()
         progress.stop()
 
 
@@ -2490,6 +2495,7 @@ def _run(
     # Each read places its parts afresh: what an earlier one joined isn't read again.
     _joined.clear()
     _kept.clear()
+    _placed_now.clear()
     args.lift = getattr(args, "lift", None)
     if args.lift is not None and (args.weight is not None or args.at):
         raise NoAnswer(
@@ -2518,6 +2524,7 @@ def _run(
     _one_pass(assembly, report.started, two_pass, without_bands)
     placed = _placed(assembly, without_bands)
     keep(placed)
+    _placed_now[:] = placed
     # Each through-bolt's way through both parts, before anything is solved.
     with step("finding each through joint's bolts' way through its parts"):
         ways = load_through.ways(assembly, placed)

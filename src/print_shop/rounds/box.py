@@ -70,6 +70,66 @@ BENCHED = 200
 BENCHED_BYTES = 4_000_000
 
 
+#: What `load` says as it goes (`host.STEP_LINE`, `host.MEMORY_LINE`): set aside as it's read,
+#: never counted against `KEEP`, and the longest such line held back to be told, in bytes.
+PROGRESS = (f"{host.STEP_LINE} ".encode(), f"{host.MEMORY_LINE} ".encode())
+PROGRESS_LONGEST = 4096
+
+
+class _Progress:
+    """What a command's output says as it goes, taken out of it as it's read
+    (mqucifer/print-shop#336): a long `--parts` read says about 400 steps and its memory every
+    5 s, some 210 KB, and counted against `KEEP` it would push the reply's start out, cut mid
+    line. Each line that starts as one of `PROGRESS` is held until it ends and set aside, the
+    last step and the last memory kept to say where a killed command was; every other line is
+    passed on as it comes, a line of any length with it."""
+
+    def __init__(self) -> None:
+        self.line = b""
+        #: Whether the line being read is passed on as it comes: it isn't one of `PROGRESS`.
+        self.through = False
+        self.last: dict[bytes, str] = {}
+
+    def take(self, data: bytes) -> bytes:
+        out = bytearray()
+        while data:
+            cut = data.find(b"\n")
+            piece, data = (data, b"") if cut < 0 else (data[: cut + 1], data[cut + 1 :])
+            ended = piece.endswith(b"\n")
+            if self.through:
+                out += piece
+            else:
+                line = self.line + piece
+                self.line = b""
+                if ended:
+                    out += self._told(line)
+                elif len(line) <= PROGRESS_LONGEST and any(
+                    p.startswith(line) or line.startswith(p) for p in PROGRESS
+                ):
+                    self.line = line
+                else:
+                    out += line
+                    self.through = True
+            if ended:
+                self.through = False
+        return bytes(out)
+
+    def _told(self, line: bytes) -> bytes:
+        kind = next((p for p in PROGRESS if line.startswith(p)), None)
+        if kind is None:
+            return line
+        self.last[kind] = line.rstrip(b"\n").decode("utf-8", errors="replace")
+        return b""
+
+    def end(self) -> bytes:
+        """What's left at the output's end, a line with no end of its own."""
+        line, self.line = self.line, b""
+        return self._told(line)
+
+    def said(self) -> list[str]:
+        return [self.last[p] for p in PROGRESS if p in self.last]
+
+
 class Gone(RuntimeError):
     """Docker didn't answer: the infrastructure's failure, and nothing about the part."""
 
@@ -180,6 +240,17 @@ class Box:
         lines_seen = ((TAKEN_LINE, taken), (ABLE_LINE, able))
         reach = max(len(one) for one, _ in lines_seen)
 
+        progress = _Progress()
+
+        def keep(chunk: bytes) -> None:
+            if not chunk:
+                return
+            kept.append(chunk)
+            size[0] += len(chunk)
+            while size[0] - len(kept[0]) >= KEEP:
+                size[0] -= len(kept[0])
+                size[1] += len(kept.popleft())
+
         def drain() -> None:
             assert process.stdout is not None
             descriptor = process.stdout.fileno()
@@ -191,11 +262,8 @@ class Box:
                         if one in window:
                             seen.set()
                     carry = window[-reach:]
-                kept.append(chunk)
-                size[0] += len(chunk)
-                while size[0] - len(kept[0]) >= KEEP:
-                    size[0] -= len(kept[0])
-                    size[1] += len(kept.popleft())
+                keep(progress.take(chunk))
+            keep(progress.end())
 
         reader = threading.Thread(target=drain, daemon=True)
         reader.start()
@@ -232,8 +300,9 @@ class Box:
             lines = text.splitlines(keepends=True)
             text = "".join(one for one in lines if one.rstrip("\n") not in (host.TAKEN, host.ABLE))
         # What `load` says as it goes, its steps and the container's memory, is the harness's
-        # too: kept only to say where it was, if it's killed (mqucifer/print-shop#336).
-        text, said = host.progress_lines(text)
+        # too, set aside as it was read: kept only to say where it was, if it's killed
+        # (mqucifer/print-shop#336).
+        said = progress.said()
         seconds = round(time.monotonic() - began, 1)
         if code == DOCKER_FAILED and not timed_out:
             raise Gone(f"docker couldn't run the container: {text[-400:]}")
