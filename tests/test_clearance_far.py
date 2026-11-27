@@ -1,4 +1,4 @@
-"""A pair farther apart than any gap a reading judges is read by its boxes
+"""A pair farther apart than any gap a reading judges is read by its bounds
 (mqucifer/print-shop#354).
 
 `clearance` read every pair by its exact distance, so a whole assembly of alike parts placed by
@@ -134,12 +134,12 @@ def test_a_need_on_a_pair_read_by_its_boxes_says_so_and_to_read_it_exactly() -> 
     )  # fmt: skip
     pairs = [
         {"a": "s0", "b": "s1", "verdict": "TOUCHING", "gap_mm": 0.0},
-        {"a": "s0", "b": "s2", "verdict": "CLEAR", "read_by": "boxes", "box_gap_mm": 3.1},
+        {"a": "s0", "b": "s2", "verdict": "CLEAR", "read_by": "bounds", "bound_gap_mm": 3.1},
     ]
     record = {"verdict": "TOUCHING", "why": "", "numbers": {"pairs": pairs}}
     found = needs.judge(need, 0, "verdict: TOUCHING: ok\n", record)
     assert not found.passed
-    assert "`pairs.1` was read by its boxes" in found.why, found.why
+    assert "`pairs.1` was read by its bounds" in found.why, found.why
     assert "at least 3.1 mm, so it has no `gap_mm`" in found.why
     assert "add `--exact`" in found.why
 
@@ -280,19 +280,19 @@ FIGURES = (
 
 
 def same_as_exact(boxed: dict[str, Any], exact: dict[str, Any]) -> list[dict[str, Any]]:
-    """Each pair read by its boxes is CLEAR and its box gap no more than its exact gap; every other
-    pair's figures are the exact reading's own. Returns the pairs read by their boxes."""
+    """Each pair read by its bounds is CLEAR and its box gap no more than its exact gap; every other
+    pair's figures are the exact reading's own. Returns the pairs read by their bounds."""
     assert boxed["verdict"] == exact["verdict"]
     one, two = boxed["numbers"]["pairs"], exact["numbers"]["pairs"]
     assert [(p["a"], p["b"]) for p in one] == [(p["a"], p["b"]) for p in two]
     far_off = []
     for mine, theirs in zip(one, two, strict=True):
         assert "read_by" not in theirs
-        if mine.get("read_by") == "boxes":
+        if mine.get("read_by") == "bounds":
             far_off.append(mine)
             assert mine["verdict"] == theirs["verdict"] == "CLEAR"
             assert "gap_mm" not in mine
-            assert 0 < mine["box_gap_mm"] <= theirs["gap_mm"]
+            assert 0 < mine["bound_gap_mm"] <= theirs["gap_mm"]
             for name, place in (mine.get("places") or {}).items():
                 assert place["verdict"] == theirs["places"][name]["verdict"] == "NOT CAUGHT"
             continue
@@ -309,23 +309,23 @@ def test_a_ring_s_far_pairs_are_read_by_their_boxes_and_its_neighbours_exactly(w
     far_off = same_as_exact(record, exact)
     pairs = record["numbers"]["pairs"]
     assert len(pairs) == SLICES * (SLICES - 1) // 2
-    read = [p for p in pairs if p.get("read_by") != "boxes"]
+    read = [p for p in pairs if p.get("read_by") != "bounds"]
     # Only the neighbours are read exactly, each touching, as the reading of every pair says.
     assert all(neighbours(p) for p in read), [(p["a"], p["b"]) for p in read]
     assert len(read) == SLICES and len(far_off) == len(pairs) - SLICES
     assert all(p["verdict"] == "TOUCHING" for p in read)
     assert record["verdict"] == "TOUCHING", text
-    by = record["numbers"]["by_boxes"]
-    least = min(p["box_gap_mm"] for p in far_off)
-    assert by["pairs"] == len(far_off) and by["least_box_gap_mm"] == least
-    assert pairs[by["least"]]["box_gap_mm"] == least
+    by = record["numbers"]["by_bounds"]
+    least = min(p["bound_gap_mm"] for p in far_off)
+    assert by["pairs"] == len(far_off) and by["least_bound_gap_mm"] == least
+    assert pairs[by["least"]]["bound_gap_mm"] == least
     assert least <= NEXT
     exact_least = min(p["gap_mm"] for p in exact["numbers"]["pairs"] if not neighbours(p))
     assert exact_least == pytest.approx(NEXT, abs=1e-3)
     said = f"{len(far_off)} pair(s) farther apart than any gap judged"
-    assert said in text and f"least box gap {least:.4f} mm" in text, text
-    assert f"{len(pairs)} pair(s): {SLICES} touching, {len(far_off)} clear by their boxes" in text
-    assert "read by their boxes" not in exact_text and "by_boxes" not in exact["numbers"]
+    assert said in text and f"least bound gap at least {least:.4f} mm" in text, text
+    assert f"{len(pairs)} pair(s): {SLICES} touching, {len(far_off)} clear by their bounds" in text
+    assert "read by their bounds" not in exact_text and "by_bounds" not in exact["numbers"]
     assert reports.unlike("clearance", record["numbers"]) == []
     # The time falls with the far pairs: 252 of 276 are read by their bounds alone.
     assert record["numbers"]["pairs_s"] < 0.5 * exact["numbers"]["pairs_s"], (
@@ -337,14 +337,14 @@ def test_a_ring_s_far_pairs_are_read_by_their_boxes_and_its_neighbours_exactly(w
 @pytest.mark.bench
 def test_pairs_within_any_gap_judged_are_read_exactly(work: Path) -> None:
     """With `--min-gap` past the next slice but one, those pairs are read exactly, `TOO CLOSE` as
-    the reading of every pair says, and only pairs farther apart than it are read by their boxes.
+    the reading of every pair says, and only pairs farther apart than it are read by their bounds.
     `--max-gap` holds each pair's least gap, so a far pair is too loose: every pair is exact."""
     text, record = ask(work, "--min-gap", "6")
     _, exact = ask(work, "--min-gap", "6", "--exact")
     far_off = same_as_exact(record, exact)
     assert record["verdict"] == "TOO CLOSE", text
-    assert record["numbers"]["by_boxes"]["beyond_mm"] == 6
-    assert all(p["box_gap_mm"] > 6 for p in far_off)
+    assert record["numbers"]["by_bounds"]["beyond_mm"] == 6
+    assert all(p["bound_gap_mm"] > 6 for p in far_off)
     # The neighbours touch, and the slices next but one are NEXT apart: both are too close.
     close = [p for p in record["numbers"]["pairs"] if p["verdict"] == "TOO CLOSE"]
     apart = [p for p in close if not neighbours(p)]
@@ -354,7 +354,7 @@ def test_pairs_within_any_gap_judged_are_read_exactly(work: Path) -> None:
     text, loose = ask(work, "--max-gap", "1", "--part", *(f"s{k}" for k in range(5)))
     assert loose["verdict"] == "TOO LOOSE", text
     assert not any(p.get("read_by") for p in loose["numbers"]["pairs"])
-    assert "by_boxes" not in loose["numbers"]
+    assert "by_bounds" not in loose["numbers"]
 
 
 @pytest.mark.bench
@@ -443,15 +443,17 @@ def test_a_rod_through_a_ring_is_read_by_their_meshes_and_a_buried_pin_exactly(
     assert record["verdict"] == "INTERFERE", text
     # The rod's box and hull lie through the ring's; its mesh is 1.5 mm from the ring's.
     threaded_pair = pair_of(record, "ring.step", "rod.step")
-    assert threaded_pair["read_by"] == "boxes" and threaded_pair["box_by"] == "mesh"
-    # Searched for only 0.5 mm past the gap judged, touching, so a bound of half a millimetre.
-    assert threaded_pair["box_gap_mm"] == pytest.approx(0.5, abs=1e-3)
+    assert threaded_pair["read_by"] == "bounds" and threaded_pair["bound"] == "mesh"
+    # Searched for only 0.5 mm past the gap judged, touching: a floor of half a millimetre, said.
+    assert threaded_pair["bound_gap_mm"] == pytest.approx(0.5, abs=1e-3)
+    assert threaded_pair["bound_at_search"] is True
+    assert "least bound gap at least" in text and "as far as its meshes were searched" in text
     assert pair_of(exact, "ring.step", "rod.step")["gap_mm"] == pytest.approx(1.5, abs=1e-4)
     # The pin's surface is nowhere near the block's, and it's wholly inside it: read exactly.
     buried = pair_of(record, "block.step", "pin.step")
     assert "read_by" not in buried and buried["verdict"] == "INTERFERE"
     assert buried["overlap_mesh_mm3"] == pytest.approx(1.0, abs=0.01)
-    assert len(far_off) == 9 and record["numbers"]["by_boxes"]["by_mesh"] == 1
+    assert len(far_off) == 9 and record["numbers"]["by_bounds"]["by_mesh"] == 1
     assert "1 by meshes" in text, text
     # Read exactly, the rod and ring are apart by OCCT's distance and the mesh's, with no overlap
     # by the mesh, so OCCT's common and cut aren't run; the buried pin's distance is 0, and they
@@ -472,7 +474,7 @@ def test_a_plan_says_how_the_pairs_would_be_read_and_judges_nothing(threaded: Pa
     assert record["verdict"] == "NO ANSWER", text
     assert "a plan, which judges nothing: 10 pairs: " in record["why"], record["why"]
     plan = record["numbers"]["plan"]
-    by = read_all["numbers"]["by_boxes"]
+    by = read_all["numbers"]["by_bounds"]
     assert plan["pairs"] == 10 and plan["exact"] == 1
     assert [plan[f"by_{w}"] for w in ("box", "hull", "mesh")] == [
         by[f"by_{w}"] for w in ("box", "hull", "mesh")
@@ -516,7 +518,7 @@ def test_a_reading_that_projects_past_its_limit_takes_up_the_offer_and_states_it
     assert record["verdict"] == "TOUCHING", text
     limit = record["numbers"]["limit"]
     assert limit["limit_s"] == 1 and limit["offered_s"] == 3600
-    assert limit["taken_after"] == 1 and 1 < limit["stated_s"] < 3600
+    assert 1 <= limit["taken_after"] < 24 and 1 < limit["stated_s"] < 3600
     assert "so it took up the longer limit offered, 3600 s, and stated" in text, text
     assert record["ran"]["limit_s"] == int(limit["stated_s"]), "the `ran:` line's limit"
     assert host.TAKEN not in text
@@ -527,7 +529,10 @@ def test_a_reading_with_no_longer_limit_offered_stops_itself_before_its_own(work
     text, record, waited = under_limit(work, 1, None)
     assert waited == 600
     assert record["verdict"] == "NO ANSWER", text
-    assert "it stopped itself before its 1 s limit, having read 1 of the 24 pairs" in text, text
+    # How many it reads first is the machine's speed: fewer than all, and said.
+    said = r"it stopped itself before its 1 s limit, having read (\d+) of the 24 pairs"
+    read = re.search(said, text)
+    assert read and 1 <= int(read.group(1)) < 24, text
     assert "--plan says the split and its time" in text
 
 
@@ -596,3 +601,139 @@ def test_a_washer_seated_on_a_b_spline_plate_touches_and_a_buried_cube_still_int
     [pair] = record["numbers"]["pairs"]
     assert pair["overlap_occt_cut_mm3"] == pytest.approx(0.5, abs=1e-5)
     assert pair["overlap_occt_common_mm3"] == pytest.approx(pair["overlap_occt_cut_mm3"], abs=1e-6)
+
+
+def test_a_reading_with_nothing_left_to_read_is_never_stopped() -> None:
+    """A whole reading done inside its last 20 s was thrown away for its margin."""
+    from print_shop.bench import pace
+
+    assert pace.Pace(600, None).after(elapsed=585, done=24, spent=500, left=0) is None
+    assert pace.Pace(600, None).after(elapsed=585, done=23, spent=480, left=1) == "stop"
+
+
+# Swept splines, whose meshes BRepMesh lays farther off the surface than it's asked
+# (mqucifer/print-shop#354). Made here: a tube 4 mm round swept along a spline in xz, and a copy
+# moved along y, so the two are as near as the move less 8 mm, along their length.
+
+SWEPT = """
+import cadquery as cq
+
+path = cq.Workplane("XZ").spline([(0, 0), (10, 15), (-5, 30), (8, 45)], includeCurrent=False)
+tube = cq.Workplane("XY").circle(4).sweep(path)
+cq.exporters.export(tube, "sweep.step")
+cq.exporters.export(tube.translate((0, 9, 0)), "beside.step")
+cq.exporters.export(cq.Workplane("XY").box(5, 5, 5).translate((80, 0, 0)), "far1.step")
+cq.exporters.export(cq.Workplane("XY").box(5, 5, 5).translate((-80, 0, 0)), "far2.step")
+"""
+
+#: What a script in the image reads of the bench's own code: which mesh the mesh bound reads,
+#: the pad it gives a body, what that mesh's triangulation says it's off the surface, and the
+#: threads OCCT's distance runs on after a reading, against the container's CPUs.
+SWEPT_READ = """
+import json, sys
+sys.path.insert(0, "/opt/bench")
+from OCP.BRep import BRep_Tool
+from OCP.OSD import OSD_ThreadPool
+from OCP.TopLoc import TopLoc_Location
+from bench import clearance, shapes
+from bench.cli import main
+
+a, b = shapes.load("sweep.step"), shapes.load("beside.step")
+asked = []
+plain = shapes.Part.manifold
+def spy(self, fine=True):
+    asked.append(fine)
+    return plain(self, fine)
+shapes.Part.manifold = spy
+clearance.by_meshes(a, b, 0.1, 0.5)
+shapes.Part.manifold = plain
+pad = clearance.bounds_of(a).pad
+shapes._tessellated(a.shape, shapes.FINE if asked[0] else shapes.COARSE)
+recorded = max(
+    BRep_Tool.Triangulation_s(f.wrapped, TopLoc_Location()).Deflection() for f in a.shape.Faces()
+)
+try:
+    main(["--out", "probe", "clearance", "sweep.step", "beside.step"])
+except SystemExit:
+    pass
+quota, period = open("/sys/fs/cgroup/cpu.max").read().split()[:2]
+print("READ " + json.dumps({
+    "fine": asked[0], "pad": pad, "recorded": recorded,
+    "threads": OSD_ThreadPool.DefaultPool_s().NbThreads(), "cpus": -(-int(quota) // int(period)),
+}))
+"""
+
+
+@pytest.fixture(scope="module")
+def swept(tmp_path_factory: pytest.TempPathFactory) -> Path:
+    if host.image_id() is None:
+        pytest.fail(f"no image {host.IMAGE}: run `scripts/bench.py build` first")
+    found = tmp_path_factory.mktemp("swept")
+    (found / "parts.py").write_text(SWEPT, encoding="utf-8")
+    made = host.run(["parts.py"], found, python=True)
+    assert made.returncode == 0, made.stdout + made.stderr
+    return found
+
+
+@pytest.mark.bench
+def test_a_bodys_pad_covers_what_the_mesh_its_bound_reads_says_it_is_off(swept: Path) -> None:
+    """The mesh bound read the coarse mesh, padded 0.05 mm, where a swept spline's coarse
+    triangulation says it's 0.05 mm off: twice that is the pad it needs. And OCCT's pool ran 8
+    threads in a 2-CPU container."""
+    (swept / "read.py").write_text(SWEPT_READ, encoding="utf-8")
+    done = host.run(["read.py"], swept, python=True)
+    line = next((x for x in done.stdout.splitlines() if x.startswith("READ ")), None)
+    assert line, done.stdout + done.stderr
+    read = json.loads(line[len("READ "):])
+    assert read["pad"] >= 2 * read["recorded"], read
+    assert read["fine"], "the fine mesh, which the exact reads use too"
+    assert read["threads"] == read["cpus"], read
+
+
+@pytest.mark.bench
+def test_two_swept_splines_just_inside_a_gap_judged_are_read_exactly(swept: Path) -> None:
+    files = ("sweep.step", "beside.step", "far1.step", "far2.step")
+
+    def ask_swept(*args: str) -> tuple[str, dict[str, Any]]:
+        done = host.run(["clearance", *files, *args], swept)
+        saved = re.search(r"saved: (\S+)\.txt and \.json", done.stdout)
+        assert saved, f"nothing saved: {done.stdout}{done.stderr}"
+        return done.stdout, json.loads((swept / f"{saved.group(1)}.json").read_text())
+
+    _, exact = ask_swept("--exact")
+    gap = pair_of(exact, "sweep.step", "beside.step")["gap_mm"]
+    assert 0.9 < gap < 1.1, gap
+    # Judged a hair past the true gap, less than the coarse mesh is off: too close, read exactly.
+    text, record = ask_swept("--min-gap", f"{gap + 0.005:.4f}")
+    near = pair_of(record, "sweep.step", "beside.step")
+    assert near["verdict"] == "TOO CLOSE" and "read_by" not in near, text
+    assert record["verdict"] == "TOO CLOSE"
+    # Judged a hair short of it: clear, and never by a bound past the true gap.
+    text, record = ask_swept("--min-gap", f"{gap - 0.005:.4f}")
+    near = pair_of(record, "sweep.step", "beside.step")
+    assert near["verdict"] == "CLEAR", text
+    assert near.get("bound_gap_mm", 0.0) <= gap
+
+
+@pytest.mark.bench
+def test_a_plans_timed_reads_are_held_to_its_limit(work: Path) -> None:
+    text, record, waited = under_limit(work, 1, None, "--plan")
+    assert record["verdict"] == "NO ANSWER", text
+    sampled = record["numbers"]["plan"]["sampled"]
+    assert 1 <= sampled < 3, record["numbers"]["plan"]
+    assert f"the plan stopped timing after {sampled} exact read(s), before its 1 s limit" in text
+
+
+def test_a_readings_clock_is_its_process_age_as_the_kernel_says(tmp_path: Path) -> None:
+    """The host's limit runs from the container's start; a reading's own clock started only once
+    its modules were imported, seconds later. A made-up /proc: started 1,000 ticks after boot,
+    up 25 s."""
+    from print_shop.bench import progress
+
+    ticks = os.sysconf("SC_CLK_TCK")
+    fields = ["S", *["0"] * 18, str(10 * ticks)]
+    (tmp_path / "self").mkdir()
+    (tmp_path / "self" / "stat").write_text(f"42 (python (bench)) {' '.join(fields)} 0 0\n")
+    (tmp_path / "uptime").write_text("25.00 40.00\n")
+    assert progress.since(tmp_path) == pytest.approx(15.0)
+    assert progress.since(tmp_path / "none") >= 0.0, "since the module was imported, where not"

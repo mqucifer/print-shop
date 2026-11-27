@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import contextlib
 import ctypes
+import os
 import sys
 import threading
 import time
@@ -120,9 +121,17 @@ def step(what: str) -> Iterator[None]:
         _say(STEP_LINE, _steps[-1] if _steps else f"between steps, after {done}")
 
 
-def since() -> float:
-    """Seconds since the command began, as its lines say them."""
-    return time.monotonic() - _began
+def since(proc: Path = Path("/proc")) -> float:
+    """Seconds since the command's process began, as the host's limit counts them: its age, by
+    the kernel, where it says, as a reading's own clock starts only once its modules are
+    imported; else since this module was."""
+    try:
+        stat = (proc / "self" / "stat").read_text()
+        started = int(stat.rsplit(")", 1)[1].split()[19])
+        uptime = float((proc / "uptime").read_text().split()[0])
+        return max(0.0, uptime - started / os.sysconf("SC_CLK_TCK"))
+    except (OSError, ValueError, IndexError):
+        return time.monotonic() - _began
 
 
 def again(what: str) -> None:

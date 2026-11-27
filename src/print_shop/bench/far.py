@@ -14,9 +14,13 @@ from dataclasses import dataclass
 
 import numpy as np
 
-#: How far a STEP body's surface may lie outside its fine mesh's hull, in mm: 25 times the mesh's
-#: chord (`shapes.FINE`, 0.002 mm), so a bound read from the mesh is never more than the exact gap.
+#: The least a STEP body is padded by, in mm, for the curve between its fine mesh's chords. Each
+#: body is padded by `PAD_TIMES` what its own triangulation says it's off the surface, where
+#: that's more (`clearance.pad_of`): BRepMesh misses its nominal 0.002 mm on B-spline faces, by
+#: up to 11 times on a swept spline (mqucifer/print-shop#354).
 HULL_PAD = 0.05
+#: How many times its triangulation's own deflection a body is padded by.
+PAD_TIMES = 2.0
 
 
 @dataclass

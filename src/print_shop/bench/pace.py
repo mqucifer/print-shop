@@ -81,7 +81,8 @@ class Pace:
                 self.limit = higher
                 # The `ran:` line's limit is the one it's under from here on.
                 os.environ[TIMEOUT] = str(int(higher))
-        if elapsed > self.limit - self.margin(self.limit):
+        # A reading with nothing left to read is done: it's never thrown away for its margin.
+        if left > 0 and elapsed > self.limit - self.margin(self.limit):
             return "stop"
         return said
 

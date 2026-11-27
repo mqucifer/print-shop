@@ -45,7 +45,7 @@ REPORTS: dict[str, tuple[str, ...]] = {
     ),
     "clearance": (
         "bodies",
-        "by_boxes",
+        "by_bounds",
         "exact_s",
         "lift",
         "limit",
@@ -791,8 +791,8 @@ SHAPES: dict[str, dict[str, Any]] = {
                     # A pair read by its bounds alone, far apart: `boxes`, its bound and which
                     # ruled it out, and no `gap_mm` (mqucifer/print-shop#354).
                     "read_by": TEXT,
-                    "box_gap_mm": NUMBER,
-                    "box_by": TEXT,
+                    "bound_gap_mm": NUMBER,
+                    "bound": TEXT,
                     # How long each step of an exact read took, in s, and where OCCT's common
                     # and cut weren't run, as two other methods read the pair apart.
                     "seconds": Keyed(NUMBER),
@@ -802,14 +802,14 @@ SHAPES: dict[str, dict[str, Any]] = {
         ),
         # How many pairs were read by their bounds, past which gap, and the least of their bound
         # gaps, at which pair (mqucifer/print-shop#354).
-        "by_boxes": Row(
+        "by_bounds": Row(
             {
                 "pairs": NUMBER,
                 "by_box": NUMBER,
                 "by_hull": NUMBER,
                 "by_mesh": NUMBER,
                 "beyond_mm": NUMBER,
-                "least_box_gap_mm": NUMBER,
+                "least_bound_gap_mm": NUMBER,
                 "least": NUMBER,
             },
             closed=True,

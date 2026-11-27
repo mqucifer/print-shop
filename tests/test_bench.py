@@ -3096,13 +3096,13 @@ def test_a_file_of_several_bodies_is_said_first_and_an_overlap_where_it_lies(ben
     assert piece["box"][1] == pytest.approx([15, 1, 2], abs=1e-3)
     assert "1.000 mm³ from (14.5, -1, 1) to (15, 1, 2), inside the box left" in answer.text
     assert bad[0]["overlap_occt_box"] == [[14.5, -1.0, 1.0], [15.0, 1.0, 2.0]]
-    # The 9 pairs clear of both boxes and far apart are read by their boxes
+    # The 9 pairs clear of both boxes and far apart are read by their bounds
     # (mqucifer/print-shop#354).
-    assert "4 touching, 1 clear, 9 clear by their boxes; at the places" in answer.record["why"]
+    assert "4 touching, 1 clear, 9 clear by their bounds; at the places" in answer.record["why"]
     assert "5 other pair(s) with nothing to report (1 clear, 4 touching" in answer.text
     assert "9 pair(s) farther apart than any gap judged" in answer.text
     assert answer.text.count("pairs.") < 8, "the quiet pairs aren't listed one by one"
-    # 2,000 until the 9 far pairs' count and least box gap joined the quiet line, 171 characters
+    # 2,000 until the 9 far pairs' count and least bound gap joined the quiet line, 171 characters
     # (mqucifer/print-shop#354): still a tenth of the 21k it was.
     assert len(answer.text) < 2200, len(answer.text)
     alone = bench("clearance", "where/lid5.step", "where/fan.step",

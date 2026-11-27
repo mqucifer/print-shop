@@ -732,7 +732,7 @@ EXACT = "--exact"
 
 def read_argv(need: Need) -> list[str]:
     """The command a need's check runs. A `clearance` need on a figure under `pairs.` reads every
-    pair exactly: past 3 pairs, a pair far apart is otherwise read by its boxes, with a bound and
+    pair exactly: past 3 pairs, a pair far apart is otherwise read by its bounds, with a bound and
     no gap, and a need holds the gap itself (mqucifer/print-shop#354)."""
     words = need.argv()
     if words[:1] == ["clearance"] and need.number.startswith("pairs.") and EXACT not in words:
@@ -740,7 +740,7 @@ def read_argv(need: Need) -> list[str]:
     return words
 
 
-def _read_by_boxes(numbers: Any, path: str) -> str | None:
+def _read_by_bounds(numbers: Any, path: str) -> str | None:
     """Why `clearance`'s `pairs.N...` has no figure where that pair was read by its bounds alone,
     far apart, with no exact gap (mqucifer/print-shop#354); else None."""
     parts = path.split(".")
@@ -750,11 +750,11 @@ def _read_by_boxes(numbers: Any, path: str) -> str | None:
         pair = number_at(numbers, ".".join(parts[:2]))
     except LookupError:
         return None
-    if not isinstance(pair, dict) or pair.get("read_by") != "boxes":
+    if not isinstance(pair, dict) or pair.get("read_by") != "bounds":
         return None
     return (
-        f"`{'.'.join(parts[:2])}` was read by its boxes, farther apart than any gap the command "
-        f"judges, at least {pair.get('box_gap_mm')} mm, so it has no `{'.'.join(parts[2:])}`: "
+        f"`{'.'.join(parts[:2])}` was read by its bounds, farther apart than any gap the command "
+        f"judges, at least {pair.get('bound_gap_mm')} mm, so it has no `{'.'.join(parts[2:])}`: "
         "add `--exact` to the command to read every pair by its exact distance"
     )
 
@@ -862,7 +862,7 @@ def _judge_number(need: Need, reading: Reading, record: dict[str, Any]) -> Readi
     except LookupError:
         names = ", ".join(sorted(numbers)) or "none"
         reading.why = f"this answer has no number `{need.number}`: it has {names}"
-        boxed = _read_by_boxes(numbers, need.number)
+        boxed = _read_by_bounds(numbers, need.number)
         if boxed is not None:
             reading.why = boxed
         return reading
