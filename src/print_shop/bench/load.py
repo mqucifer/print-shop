@@ -126,6 +126,7 @@ import numpy as np
 
 from . import (
     as_printed,
+    classify,
     close_faces,
     dovetail,
     infill,
@@ -511,23 +512,20 @@ def _aniso(tensor: np.ndarray) -> str:
     return "*ELASTIC, TYPE=ANISO\n" + "\n".join(lines) + "\n"
 
 
-def _cores(assembly: Assembly, without_bands: bool = False) -> dict[str, list[Any]]:
-    """Each printed part's cells (`as_printed.cells`, mqucifer/print-shop#337), made in its own
-    axes and placed with it: by part, its cells, each with its core's solids where the assembly
-    puts them. Where its walls and shells fill a cell, the cell has no core, and is solid."""
+def _cores(assembly: Assembly, without_bands: bool = False) -> dict[str, Any]:
+    """Each printed part read layer by layer as Orca slices it, in its own axes
+    (`classify.Layered`, mqucifer/print-shop#363): by part. Its mesh's elements are read by it
+    once meshed (`_Model._classify`); nothing is cut from it."""
     folder = Path(assembly.path).parent
-    found: dict[str, list[Any]] = {}
+    found: dict[str, Any] = {}
     for part in assembly.parts:
         if part.printed is None:
             continue
-        with step(f"making the part {part.name}'s skin and core from its print settings"):
+        with step(f"reading the part {part.name}'s layers from its print settings"):
             own = _one_placed(dataclasses.replace(part, turn=(), at=(0.0, 0.0, 0.0)), folder,
                               without_bands)
-            cells = as_printed.cells(own, part.printed, AXES.index(part.layers), folder,
-                                     part.name)
-            found[part.name] = [
-                (cell, [_moved(s.copy(), part) for s in cell.core]) for cell in cells
-            ]
+            found[part.name] = classify.Layered(own, part.printed, AXES.index(part.layers),
+                                                part.name, folder)  # fmt: skip
     return found
 
 
@@ -552,12 +550,16 @@ class _Model:
         straight: bool = False,
         two_pass: bool = False,
         spread: bool = True,
-        cores: dict[str, list[Any]] | None = None,
+        cores: dict[str, Any] | None = None,
     ) -> None:
         self.assembly, self.placed, self.args, self.size = assembly, placed, args, size
-        #: Each printed part's cells and their cores, placed (`_cores`, mqucifer/print-shop#337):
-        #: none for a part read solid.
+        #: Each printed part read by its layers (`_cores`, mqucifer/print-shop#363): none for a
+        #: part read solid.
         self.cores = cores or {}
+        #: Each mixed or core element's step of core share, 0 for skin, `classify.STEPS` for
+        #: core, -1 for a part read solid; and each printed part's cells as read (`_classify`).
+        self.element_step: np.ndarray | None = None
+        self.printed_cells: dict[str, list[dict[str, Any]]] = {}
         #: Each core's solid in the joined shape, by its index there, with its part's name, its
         #: cell and the cell's figures (`infill.core`): filled by `join`.
         self.core_solids: list[tuple[int, str, Any, Any]] = []
@@ -632,9 +634,6 @@ class _Model:
             if abs(near.Volume - solid.Volume) > 1e-3 * solid.Volume + 1e-3:
                 raise NoAnswer(f"joined, the part {part.name} isn't the solid it was")
             self.solids.append(near)
-        if self.cores:
-            self._cored()
-            shape = self.shape
         names = [p.name for p in self.assembly.parts]
         self.met: dict[frozenset[str], list[Any]] = {}
         faces = [solid.Faces for solid in self.solids]
@@ -670,77 +669,168 @@ class _Model:
                 load_dovetail.check(joint, self.joint_faces[joint.name], tail)
         self.between = [f for faces in self.met.values() for f in faces]
 
-    def _cored(self) -> None:
-        """Each printed part as its skin round its cores, one body still (mqucifer/print-shop#337):
-        the cores are fused into the joined parts, so the mesh has a face where each skin meets
-        its core, and every element is the skin's or a core's, never half of each. Each part's
-        solid is then its skin, which has every face the part has: the faces it meets other
-        parts by, is held by and is loaded on."""
-        given = [(name, k, cell, solid)
-                 for name, cells in self.cores.items()
-                 for k, (cell, solids) in enumerate(cells)
-                 for solid in solids]  # fmt: skip
-        if not given:
-            return
-        whole = self.shape.generalFuse([solid for *_, solid in given])[0]
-        self.feature.Shape = whole
-        self.shape = self.feature.Shape
-        self.whole = whole
-        solids = self.shape.Solids
-        if len(solids) != len(whole.Solids):
-            raise NoAnswer("the parts with their cores fused in couldn't be read back")
-
-        def within(piece: Any, of: Any) -> bool:
-            """Whether most of `piece` is in `of`: the fuse's pieces don't overlap."""
-            return bool(of.BoundBox.intersect(piece.BoundBox)
-                        and of.common(piece).Volume > 0.5 * piece.Volume)
-
-        cores: dict[int, tuple[str, Any]] = {}
-        for index, piece in enumerate(solids):
-            found = next(((name, cell) for name, _, cell, solid in given if within(piece, solid)),
-                         None)
-            if found is not None:
-                cores[index] = found
-        names = [p.name for p in self.assembly.parts]
-        skins: dict[str, list[int]] = {}
-        for index, solid in enumerate(solids):
-            if index in cores:
-                continue
-            owner = next(
-                (n for n, part in zip(names, self.solids, strict=True) if within(solid, part)),
-                None,
-            )
-            if owner is None:
-                raise NoAnswer("a piece of the parts with their cores fused in is in none of them")
-            skins.setdefault(owner, []).append(index)
-        for k, name in enumerate(names):
-            mine = skins.get(name, [])
-            if len(mine) != 1:
-                raise NoAnswer(
-                    f"the part {name} with its cores fused in is {len(mine)} skins: a printed "
-                    "part's walls and shells are one piece round its core"
-                )
-            self.solids[k] = solids[mine[0]]
-        self.core_solids = [
-            (index, name, cell, infill.core(cell.settings, self.assembly.part(name).material))
-            for index, (name, cell) in sorted(cores.items())
-        ]
-        self.core_tensors = []
-        for _, name, _, figures in self.core_solids:
-            part = self.assembly.part(name)
-            self.core_tensors.append(figures.stiffness(*_frame(part)))
-
     def _pieces(self, k: int, solid: Any) -> list[Any]:
-        """The part `k`'s solids in the joined shape: its own, and a printed part's cores."""
-        if not self.core_solids:
-            return [solid]
-        name = self.assembly.parts[k].name
-        cores = [self.shape.Solids[i] for i, owner, *_ in self.core_solids if owner == name]
-        return [solid, *cores]
+        """The part `k`'s solids in the joined shape: its own. A printed part's is one solid
+        as well, its skin and core read from its layers (mqucifer/print-shop#363)."""
+        return [solid]
+
+    def _near_walls(self, sizes: str) -> str:
+        """gmsh's local sizes, `sizes`, and each printed part's faces meshed at `NEAR` of its
+        walls, out to its walls' depth and growing to the mesh's own past it, so that its
+        walls' band is a few elements deep (mqucifer/print-shop#363): the least of them all."""
+        if not self.cores:
+            return sizes
+        walls = min(layered.cells[0].walls_mm for layered in self.cores.values())
+        near = self.size_near()
+        if near >= self.size:
+            return sizes
+        surfaces = sorted({
+            int(self._face_name(face).removeprefix("Face"))
+            for part, solid in zip(self.assembly.parts, self.solids, strict=True)
+            if part.name in self.cores
+            for face in solid.Faces
+        })
+        taken = [int(n) for n in re.findall(r"^Field\[(\d+)\]", sizes, re.M)]
+        distance = max(taken, default=0) + 1
+        threshold = distance + 1
+        lines = [
+            "// the printed parts' faces, meshed at their walls (mqucifer/print-shop#363)",
+            f"Field[{distance}] = Distance;",
+            f"Field[{distance}].SurfacesList = {{{', '.join(map(str, surfaces))}}};",
+            f"Field[{distance}].Sampling = {close_faces.SAMPLING};",
+            f"Field[{threshold}] = Threshold;",
+            f"Field[{threshold}].InField = {distance};",
+            f"Field[{threshold}].SizeMin = {near:.6g};",
+            f"Field[{threshold}].SizeMax = {self.size:.6g};",
+            f"Field[{threshold}].DistMin = {walls:.6g};",
+            f"Field[{threshold}].DistMax = {walls + close_faces.GRADE * (self.size - near):.6g};",
+            f"Field[{threshold}].StopAtDistMax = 1;",
+        ]
+        least = re.search(r"^Field\[(\d+)\] = Min;\nField\[\1\]\.FieldsList = \{([^}]*)\};",
+                          sizes, re.M)  # fmt: skip
+        if least is None:
+            return "\n".join([*lines, f"Background Field = {threshold};", ""]) + sizes
+        listed = f"{least.group(2)}, {threshold}"
+        joined = sizes.replace(least.group(0), f"Field[{least.group(1)}] = Min;\n"
+                               f"Field[{least.group(1)}].FieldsList = {{{listed}}};")
+        return "\n".join(lines) + "\n" + joined
+
+    def _classify(self) -> None:
+        """Each element of each printed part read by its layers (`classify.shares`,
+        mqucifer/print-shop#363): skin, core, or a share of each in `classify.STEPS` steps. A
+        mixed element whose skin and core lie in layers along the nearest face, a band of walls
+        or shells, is their laminate across that face's normal (`classify.laminate`), in series
+        across it and side by side along it, the exact mix of a layered band; one where two
+        bands meet, its layering not clean, is in series every way (`classify.reuss`), the
+        weaker. Each step of each cell, each way, a set of its own; and each part's cells, as
+        said."""
+        from .infill import isotropic
+
+        fem = self.fem
+        order = sorted(self.nodes)
+        row = {n: i for i, n in enumerate(order)}
+        points = np.array([self.nodes[n] for n in order])
+        elements = list(fem.Volumes)
+        numbers = np.array([fem.getElementNodes(e)[:4] for e in elements])
+        corner_rows = np.vectorize(row.__getitem__)(numbers)
+        owned = self._owned(corner_rows, row, points)
+        steps = np.full(len(elements), -1, dtype=int)
+        kinds = np.full(len(elements), -1, dtype=int)
+        groups: list[tuple[int, str, Any, Any]] = []
+        tensors: list[np.ndarray] = []
+        material = self.assembly.parts[0].material
+        skin = isotropic(material.modulus_mpa, material.poisson)
+        self.printed_cells = {}
+        for k, part in enumerate(self.assembly.parts):
+            layered = self.cores.get(part.name)
+            if layered is None:
+                continue
+            mine = np.flatnonzero(owned[k])
+            turn, at = part.matrix(), np.array(part.at, dtype=float)
+
+            def to_own(given: np.ndarray, turn: np.ndarray = turn, at: np.ndarray = at
+                       ) -> np.ndarray:
+                return np.asarray((given - at) @ turn)
+
+            corners = points[corner_rows[mine]]
+            own = to_own(corners.reshape(-1, 3)).reshape(-1, 4, 3)
+            read = classify.shares(layered, corners, to_own)
+            step_of = classify.step_of(read.share)
+            steps[mine] = step_of
+            mixed = (step_of > 0) & (step_of < classify.STEPS)
+            faces, normals = classify.boundary(own, numbers[mine])
+            ways, clean = classify.band_normals(read, mixed, own.mean(axis=1), faces, normals)
+            way_bin, spread = classify.way_groups(ways)
+            # Each way in the assembly's axes, where the part's stiffness is.
+            assembly_ways = spread @ turn.T
+            frame = _frame(part)
+            for c in np.unique(read.cells):
+                cell = layered.cells[int(c)]
+                figures = infill.core(cell.settings, part.material)
+                core = figures.stiffness(*frame)
+                in_cell = read.cells == c
+                for number in range(1, classify.STEPS + 1):
+                    share = number / classify.STEPS
+                    at_step = in_cell & (step_of == number)
+                    keys: list[tuple[int | None, np.ndarray]]
+                    if number == classify.STEPS:
+                        keys = [(None, at_step)]
+                    else:
+                        keys = [(None, at_step & ~clean)]
+                        keys += [(int(b), at_step & clean & (way_bin == b))
+                                 for b in np.unique(way_bin[at_step & clean])]
+                    for way, hit in keys:
+                        if not hit.any():
+                            continue
+                        kinds[mine[hit]] = len(groups)
+                        groups.append((number, part.name, cell, figures))
+                        tensors.append(classify.reuss(skin, core, share) if way is None else
+                                       classify.laminate(skin, core, share,
+                                                         assembly_ways[way]))  # fmt: skip
+            edges = own[:, 1:] - own[:, :1]
+            volume = np.abs(np.einsum("ni,ni->n", np.cross(edges[:, 0], edges[:, 1]),
+                                      edges[:, 2])) / 6  # fmt: skip
+            bands = classify.checked(layered, own, read, classify.band_for(self.size_near()))
+            said = []
+            for c in np.unique(read.cells):
+                cell = layered.cells[int(c)]
+                in_cell = read.cells == c
+                said.append({
+                    "cell": cell.name,
+                    "settings": cell.settings.given(),
+                    "said": cell.settings.said(),
+                    "walls_mm": round(cell.walls_mm, 3),
+                    "top_mm": round(cell.top_mm, 3),
+                    "bottom_mm": round(cell.bottom_mm, 3),
+                    "volume_mm3": round(float(volume[in_cell].sum()), 1),
+                    "core_mm3": round(float((read.share * volume)[in_cell].sum()), 1),
+                    "elements": int(in_cell.sum()),
+                    "skin_elements": int((in_cell & (step_of == 0)).sum()),
+                    "core_elements": int((in_cell & (step_of == classify.STEPS)).sum()),
+                    "laminate_elements": int((in_cell & mixed & clean).sum()),
+                    "corner_elements": int((in_cell & mixed & ~clean).sum()),
+                    "layers_unread": bands.unread,
+                    "bands": bands.bands,
+                    "band_mm": classify.band_for(self.size_near()),
+                    "band_short_pct": round(100 * bands.short, 2),
+                    "band_over_pct": round(100 * bands.over, 2),
+                    **infill.core(cell.settings, part.material).said(),
+                })
+            self.printed_cells[part.name] = said
+        self.element_step = steps
+        self.element_core = kinds
+        self.core_solids = groups
+        self.core_tensors = tensors
+
+    def size_near(self) -> float:
+        """The mesh's size at a printed part's faces (`_near_walls`), in mm."""
+        if not self.cores:
+            return self.size
+        walls = min(float(layered.cells[0].walls_mm) for layered in self.cores.values())
+        return float(min(self.size, NEAR * walls))
 
     def _face_name(self, face: Any) -> str:
-        # Numbered from the joined shape as it is now: a printed part's cores are fused in after
-        # the parts are joined (`_cored`).
+        # Numbered from the joined shape as it is now.
         if getattr(self, "_numbered", None) is not self.shape:
             self._numbered = self.shape
             self._numbers: dict[int, list[tuple[int, Any]]] = {}
@@ -869,7 +959,8 @@ class _Model:
         # Where the curved try found faces close, the straight one is meshed finer there from
         # the start (mqucifer/print-shop#346).
         tools = self._gmsh(
-            GmshTools, mesh, close_faces.fields(self.closes, self.size, self.local_scale)
+            GmshTools, mesh,
+            self._near_walls(close_faces.fields(self.closes, self.size, self.local_scale)),
         )
         said = None if mesh.FemMesh.VolumeCount else _gmsh_said(tools)
         for _ in range(RETRIES):
@@ -887,7 +978,7 @@ class _Model:
                 raise NoAnswer(f"{stopped}; gmsh had refused the mesh: {said[:300]}") from stopped
             if not more:
                 break
-            tools = self._gmsh(GmshTools, mesh, sizes)
+            tools = self._gmsh(GmshTools, mesh, self._near_walls(sizes))
             said = None if mesh.FemMesh.VolumeCount else _gmsh_said(tools)
         words = said
         if said is not None:
@@ -919,6 +1010,9 @@ class _Model:
             row = {n: i for i, n in enumerate(order)}
             corners = np.array([[row[n] for n in fem.getElementNodes(e)[:4]] for e in fem.Volumes])
             self._owned(corners, row, np.array([self.nodes[n] for n in order]))
+        if self.cores:
+            with step("reading each element of the printed parts by their layers"):
+                self._classify()
         fea = ccxtools.FemToolsCcx(analysis, solver)
         fea.update_objects()
         fea.setup_working_dir(tempfile.mkdtemp(prefix="load-"))
@@ -1152,7 +1246,8 @@ class _Model:
         FreeCAD's own sets, one material to several solids, left elements out of every one."""
         from .infill import isotropic
 
-        kinds = self._core_elements()
+        assert self.element_core is not None
+        kinds = self.element_core
         text = Path(path).read_text()
         sections = list(re.finditer(r"^\*SOLID SECTION,\s*ELSET=(\S+),\s*MATERIAL=(\S+)\s*$",
                                     text, re.M))
@@ -1174,12 +1269,6 @@ class _Model:
         lines = f"*SOLID SECTION, ELSET=SKINS, MATERIAL={material}\n"
         for number, tensor in enumerate(self.core_tensors):
             mine = [e for e, k in zip(order, kinds, strict=True) if k == number]
-            if not mine:
-                _, name, cell, _ = self.core_solids[number]
-                raise NoAnswer(
-                    f"the part {name}'s core in {cell.name} has no element of the mesh of its "
-                    f"own, at a mesh of at most {self.size:g} mm: give a finer --mesh"
-                )
             written += elements(f"CORE{number}", mine)
             written += f"*MATERIAL, NAME=CORE{number}\n" + _aniso(tensor)
             lines += f"*SOLID SECTION, ELSET=CORE{number}, MATERIAL=CORE{number}\n"
@@ -1187,58 +1276,10 @@ class _Model:
         text = text[:start] + written + lines.rstrip("\n") + text[end:]
         Path(path).write_text(text)
         material_of = self.assembly.parts[0].material
-        self.element_core = kinds
         self.element_tensor = np.array(
             [isotropic(material_of.modulus_mpa, material_of.poisson), *self.core_tensors]
         )
         self.element_kind = kinds + 1
-
-    def _core_elements(self) -> np.ndarray:
-        """Which core each element is in, by its place in `core_solids`, or -1 for a skin or a
-        part read solid, in FreeCAD's order of the elements: the elements reached from one
-        another without crossing a core's faces are one piece, and which core that is, if any,
-        is asked of the solids once, at one element's middle (as `_owned` parts the parts)."""
-        import FreeCAD as App
-
-        cores = [(number, self.shape.Solids[index])
-                 for number, (index, *_) in enumerate(self.core_solids)]  # fmt: skip
-        walls = {
-            tuple(sorted(nodes[:3]))
-            for _, solid in cores
-            for face in solid.Faces
-            for nodes in self._on_face(face)
-        }
-        order = list(self.fem.Volumes)
-        corners = [tuple(self.fem.getElementNodes(e)[:4]) for e in order]
-        beside: dict[tuple[int, ...], list[int]] = {}
-        for element, four in enumerate(corners):
-            for skip in range(4):
-                face = tuple(sorted(four[:skip] + four[skip + 1 :]))
-                if face not in walls:
-                    beside.setdefault(face, []).append(element)
-        next_to: list[list[int]] = [[] for _ in order]
-        for pair in beside.values():
-            if len(pair) == 2:
-                next_to[pair[0]].append(pair[1])
-                next_to[pair[1]].append(pair[0])
-        kinds = np.full(len(order), -2, dtype=int)
-        for start in range(len(order)):
-            if kinds[start] != -2:
-                continue
-            middle = App.Vector(*np.mean([self.nodes[n] for n in corners[start]], axis=0))
-            kind = next(
-                (number for number, solid in cores
-                 if solid.BoundBox.isInside(middle) and solid.isInside(middle, 1e-6, False)),
-                -1,
-            )  # fmt: skip
-            kinds[start] = kind
-            todo = [start]
-            while todo:
-                for other in next_to[todo.pop()]:
-                    if kinds[other] == -2:
-                        kinds[other] = kind
-                        todo.append(other)
-        return kinds
 
     def _stiff(self, rows: slice | None = None) -> tuple[Any, Any, np.ndarray | None]:
         """The elements' stiffness for `element_forces`, of `rows`: the material's modulus and
@@ -1474,10 +1515,13 @@ class _Model:
         if not self.two_pass:
             self._balanced(wired, owned)
         self.part_rows = {name: np.unique(wired[owned[k]]) for k, name in enumerate(names)}
-        if self.element_core is not None:
+        if self.element_core is not None and self.element_step is not None:
+            # A mixed element is read as skin and as core, each against its own limits: the
+            # weaker side of it holds (mqucifer/print-shop#363).
             for k, name in enumerate(names):
                 if name in self.cores:
-                    self.skin_rows[name] = np.unique(wired[owned[k] & (self.element_core < 0)])
+                    skin = owned[k] & (self.element_step < classify.STEPS)
+                    self.skin_rows[name] = np.unique(wired[skin])
             for number in range(len(self.core_solids)):
                 self.core_rows[number] = np.unique(wired[self.element_core == number])
         self.within = {}
@@ -1860,18 +1904,17 @@ class _Model:
         found["nodes"] = len(self.part_rows[part.name])
         way, first, second = _frame(part)
         cores = []
+        by_cell: dict[str, tuple[Any, Any, list[int]]] = {}
         for number, (_, name, cell, figures) in enumerate(self.core_solids):
-            if name != part.name:
-                continue
-            assert self.element_core is not None
-            mine = self._wired()[self.element_core == number]
-            if not len(mine):
-                raise NoAnswer(
-                    f"the part {part.name}'s core in {cell.name} has no element of the mesh "
-                    f"of its own, at a mesh of at most {self.size:g} mm: give a finer --mesh"
-                )
+            if name == part.name:
+                by_cell.setdefault(cell.name, (cell, figures, []))[2].append(number)
+        for cell, figures, numbers in by_cell.values():
+            assert self.element_core is not None and self.element_step is not None
+            which = np.isin(self.element_core, numbers)
+            mine = self._wired()[which]
             # Its own elements' strain, at their integration points, from each node's movement
-            # to CalculiX's seven figures where it printed them, never averaged with its skin's.
+            # to CalculiX's seven figures where it printed them, never averaged with its skin's;
+            # a mixed element's too, against the core's limits (mqucifer/print-shop#363).
             moved = self.printed if self.printed is not None else self.moved
             strain, at = element_strains(self.points[mine], moved[mine], POINTS + NODES)
             read = figures.read(strain.reshape(-1, 3, 3), way, first, second)
@@ -1879,10 +1922,13 @@ class _Model:
                 read[key] = _list(at.reshape(-1, 3)[read.pop(key)], 3)
             # And CalculiX's own, the mean at each node of every element there, for what it's
             # worth beside it: never more than the core's own at its nodes.
-            rows = self.core_rows.get(number, np.array([], dtype=int))
+            rows = np.unique(np.concatenate([self.core_rows.get(n, np.array([], dtype=int))
+                                             for n in numbers]))  # fmt: skip
             averaged = np.einsum("i,nij,j->n", way, self.strain[rows], way) if rows.size else [0]
             read["averaged_across_layers_pct"] = 100 * max(float(np.max(averaged)), 0.0)
-            cores.append({"cell": cell.name, "elements": len(mine), **figures.said(), **read})
+            mixed = int((which & (self.element_step < classify.STEPS)).sum())
+            cores.append({"cell": cell.name, "elements": len(mine), "mixed_elements": mixed,
+                          **figures.said(), **read})  # fmt: skip
         found["cores"] = cores
         return found
 
@@ -2213,6 +2259,10 @@ _SUMMED = re.compile(
 CROSSED = re.compile(r"intersect", re.I)
 #: How many of the faces nearest where gmsh's triangles cross are named.
 NEAREST = 4
+#: A printed part's faces are meshed at this many times its walls (`_Model._near_walls`,
+#: mqucifer/print-shop#363): its walls' band a few elements deep, a part's skin read mostly
+#: by elements all skin or laminates of it.
+NEAR = 2.0
 #: CalculiX's words for each element it finds turned inside out, with its number.
 INVERTED = re.compile(r"determinant in element\s+(\d+)")
 #: How many times the parts are meshed again finer where gmsh's triangles cross, each time
@@ -2620,6 +2670,7 @@ def _read_solved(assembly: Assembly, model: _Model, doc: Any, size: float) -> di
             "closes": (model.closes, model.tight),
             "iterated": model.iterated,
             "planes": model.planes,
+            "printed": model.printed_cells,
             **({"tractions": model.tractions()} if model.two_pass else {}),
         }
     finally:
@@ -3085,7 +3136,7 @@ def _run(
     sources = sorted({p.material.source for p in assembly.parts})
     report.line("the limits are from " + "; ".join(sources))
     if cores:
-        _as_printed(assembly, report, cores)
+        _as_printed(assembly, report, fine["printed"])
     solid = [p.name for p in assembly.parts if p.printed is None]
     if args.lift is not None:
         report.note(
@@ -3166,46 +3217,33 @@ def _run(
         )
 
 
-def _as_printed(assembly: Assembly, report: Report, cores: dict[str, list[Any]]) -> None:
-    """What a read as printed assumed (mqucifer/print-shop#337): each printed part's cells, its
-    walls and shells, its cores' figures and their source, that no print has checked them, and
-    what of it is still read solid."""
+def _as_printed(assembly: Assembly, report: Report, printed: dict[str, list[dict[str, Any]]]
+                ) -> None:
+    """What a read as printed assumed (mqucifer/print-shop#337, mqucifer/print-shop#363): each
+    printed part's cells, its walls and shells, how its mesh's elements were read by its layers
+    and checked against them, its cores' figures and their source, that no print has checked
+    them, and what of it is still read solid."""
     found: dict[str, Any] = {}
     for part in assembly.parts:
-        if part.name not in cores:
+        if part.name not in printed:
             continue
-        cells = []
-        for cell, solids in cores[part.name]:
-            figures = infill.core(cell.settings, part.material)
-            cells.append({
-                "cell": cell.name,
-                "settings": cell.settings.given(),
-                "walls_mm": round(cell.walls_mm, 3),
-                "top_mm": round(cell.top_mm, 3),
-                "bottom_mm": round(cell.bottom_mm, 3),
-                "volume_mm3": round(cell.volume_mm3, 1),
-                "core_mm3": round(cell.core_mm3, 1),
-                "core_box": cell.core_box,
-                "cut": cell.cut,
-                **({"cut_planes": cell.check.planes, "cut_planes_read": cell.check.read,
-                    "cut_short_walls_pct": round(100 * cell.check.short, 2),
-                    "cut_over_walls_pct": round(100 * cell.check.over, 2)}
-                   if cell.check is not None else {}),
-                **figures.said(),
-            })
+        cells = printed[part.name]
+        for cell in cells:
             report.line(
-                f"the part {part.name} as printed, {cell.name}: {cell.settings.said()}; so walls "
-                f"{cell.walls_mm:.2f} mm thick, as many of Orca's beads' spacing, its classic "
-                f"walls' and Arachne's alike, {cell.top_mm:.2f} mm of shells under each top "
-                f"face and {cell.bottom_mm:.2f} mm over each bottom one, round a core of "
-                f"{cell.core_mm3:.0f} mm³ of its {cell.volume_mm3:.0f}"
-                + ("" if solids else ": its walls and shells fill it, so it's solid")
-                + (f"; its walls cut by {cell.cut}, and held to each layer's own outline "
-                   f"offset in by them, as Orca slices it, at {cell.check.read} of its layers' "
-                   f"planes: its core short of it by {100 * cell.check.short:.1f}% of its walls "
-                   f"at most, within {100 * as_printed.SHORT:.0f}%, and over it by "
-                   f"{100 * cell.check.over:.1f}%, within {100 * as_printed.AGREE:.0f}%"
-                   if cell.check is not None else "")
+                f"the part {part.name} as printed, {cell['cell']}: {cell['said']}; so walls "
+                f"{cell['walls_mm']:.2f} mm thick, as many of Orca's beads' spacing, its classic "
+                f"walls' and Arachne's alike, {cell['top_mm']:.2f} mm of shells under each top "
+                f"face and {cell['bottom_mm']:.2f} mm over each bottom one, round a core of "
+                f"{cell['core_mm3']:.0f} mm³ of its {cell['volume_mm3']:.0f}"
+                + ("" if cell["core_mm3"] > 0 else ": its walls and shells fill it, so it's solid")
+                + f"; its mesh read element by element as Orca's layers lay it: "
+                f"{cell['skin_elements']} all skin, {cell['core_elements']} all core, "
+                f"{cell['laminate_elements']} a laminate of the two along the nearest face and "
+                f"{cell['corner_elements']} in series where two bands meet; held to Orca's "
+                f"layers' core in {cell['bands']} bands {cell['band_mm']:g} mm thick, short by "
+                f"{cell['band_short_pct']:.1f}% of a band at most, within "
+                f"{100 * as_printed.SHORT:.0f}%, and over by {cell['band_over_pct']:.1f}%, "
+                f"within {100 * as_printed.AGREE:.0f}%"
             )
         found[part.name] = cells
         joined = [j.name for j in assembly.joints

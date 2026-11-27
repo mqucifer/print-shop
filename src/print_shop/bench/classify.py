@@ -7,9 +7,10 @@ prints in, and skin anywhere else (`Layered.core`): the layer's section, each fa
 in by its walls, opened as Orca opens it before it lays infill, less what its top and bottom
 shells take, grown across the layer as Orca grows them (`as_printed.layer_core`). So its walls
 are a distance in its layer's plane, and its shells a distance along its layers; a thin spot is
-all skin by itself, and nothing is refused for its shape. An element's share of core is its 8
-sub-tetrahedra's, each read at its middle (`shares`), as STORMFEA reads an element's share of
-its walls' band (MIT, github.com/micahtstoll-ai/STORMFEA; its idea, not its code).
+all skin by itself, and nothing is refused for its shape. An element's share of core is its 64
+points', the middles of its 8 sub-tetrahedra's 8 each (`shares`), as STORMFEA reads an
+element's share of its walls' band from sub-tetrahedra (MIT,
+github.com/micahtstoll-ai/STORMFEA; its idea, not its code).
 
 An element that's part skin and part core is a blend of the two, and the blend is the weaker
 one: the Reuss bound, skin and core in series, their compliances added by their shares
@@ -312,16 +313,39 @@ def sub_middles(corners: np.ndarray) -> np.ndarray:
     return np.stack([points[:, list(sub)].mean(axis=1) for sub in _SUB], axis=1)
 
 
-def shares(layered: Layered, corners: np.ndarray, to_own: Any) -> tuple[np.ndarray, np.ndarray]:
+def fine_middles(corners: np.ndarray) -> np.ndarray:
+    """Each element's 64 sub-sub-tetrahedra's middles, from its 4 corners: `[element, 64, 3]`,
+    each an eighth of an eighth of it."""
+    mids = np.stack([(corners[:, i] + corners[:, j]) / 2 for i, j in _MIDS], axis=1)
+    points = np.concatenate([corners, mids], axis=1)
+    subs = np.stack([points[:, list(sub)] for sub in _SUB], axis=1)
+    return sub_middles(subs.reshape(-1, 4, 3)).reshape(len(corners), 64, 3)
+
+
+#: How many points each element is read at: the middles of its 8 sub-tetrahedra's 8 each.
+POINTS = 64
+
+
+@dataclass(frozen=True)
+class Read:
+    """A part's elements as read by their layers (`shares`): each one's cell, its share of
+    core, its `POINTS` points in the part's own axes and which of them are core."""
+
+    cells: np.ndarray
+    share: np.ndarray
+    points: np.ndarray
+    core: np.ndarray
+
+
+def shares(layered: Layered, corners: np.ndarray, to_own: Any) -> Read:
     """Each element's cell and its share of core, from its 4 corners in the assembly's axes,
     `to_own` taking points there to the part's own: its cell is its middle's, and its share
-    its 8 sub-tetrahedra's middles' (`sub_middles`) in the sparse area of their layers."""
-    middles = sub_middles(corners)
-    own = to_own(middles.reshape(-1, 3))
-    centre = to_own(corners.mean(axis=1))
-    cells = layered.cell_of(centre)
-    core = layered.core(own, np.repeat(cells, len(_SUB)))
-    return cells, core.reshape(len(corners), len(_SUB)).mean(axis=1)
+    its `POINTS` points' (`fine_middles`) in the sparse area of their layers, each an equal
+    part of it."""
+    points = to_own(fine_middles(corners).reshape(-1, 3))
+    cells = layered.cell_of(to_own(corners.mean(axis=1)))
+    core = layered.core(points, np.repeat(cells, POINTS)).reshape(len(corners), POINTS)
+    return Read(cells, core.mean(axis=1), points.reshape(len(corners), POINTS, 3), core)
 
 
 # The blend
@@ -364,6 +388,138 @@ def reuss(skin: np.ndarray, core: np.ndarray, share: float) -> np.ndarray:
     return _tensor(np.linalg.inv(compliance))
 
 
+def _turned(tensor: np.ndarray, turn: np.ndarray) -> np.ndarray:
+    """A stiffness C_ijkl in axes turned by `turn`, whose rows are the new axes in the old."""
+    return np.asarray(np.einsum("ai,bj,ck,dl,ijkl->abcd", turn, turn, turn, turn, tensor))
+
+
+def _frame_of(normal: np.ndarray) -> np.ndarray:
+    """Axes whose third is `normal`: as rows, in the given axes."""
+    third = normal / np.linalg.norm(normal)
+    other = np.eye(3)[int(np.argmin(np.abs(third)))]
+    first = np.cross(other, third)
+    first /= np.linalg.norm(first)
+    return np.array([first, np.cross(third, first), third])
+
+
+#: A stiffness's Mandel entries along a layer's plane, (11, 22, 12), and across it, (33, 23, 13).
+_ALONG, _ACROSS = [0, 1, 5], [2, 3, 4]
+
+
+def laminate(skin: np.ndarray, core: np.ndarray, share: float, normal: np.ndarray) -> np.ndarray:
+    """Skin and core as layers square to `normal`, `share` of it core: what's along the layers
+    strains alike in both, and what's across them carries the same stress in both, so the
+    strain along and the stress across are averaged by share, exactly, and turned back into a
+    stiffness (mqucifer/print-shop#363). For a band of walls or shells, layers along the face,
+    it's their own mix: across the face as soft as Reuss's series, and along it no stiffer than
+    their shares side by side, Voigt's."""
+    if share <= 0:
+        return skin
+    if share >= 1:
+        return core
+    turn = _frame_of(np.asarray(normal, dtype=float))
+    mixed = np.zeros((6, 6))
+    for tensor, weight in ((skin, 1 - share), (core, share)):
+        m = _mandel(_turned(tensor, turn))
+        pp, pn = m[np.ix_(_ALONG, _ALONG)], m[np.ix_(_ALONG, _ACROSS)]
+        np_, nn = m[np.ix_(_ACROSS, _ALONG)], m[np.ix_(_ACROSS, _ACROSS)]
+        soft = np.linalg.inv(nn)
+        block = np.zeros((6, 6))
+        block[:3, :3] = pp - pn @ soft @ np_
+        block[:3, 3:] = pn @ soft
+        block[3:, :3] = -soft @ np_
+        block[3:, 3:] = soft
+        mixed += weight * block
+    a, b, c, d = mixed[:3, :3], mixed[:3, 3:], mixed[3:, :3], mixed[3:, 3:]
+    stiff = np.linalg.inv(d)
+    m = np.zeros((6, 6))
+    m[np.ix_(_ACROSS, _ACROSS)] = stiff
+    m[np.ix_(_ACROSS, _ALONG)] = -stiff @ c
+    m[np.ix_(_ALONG, _ACROSS)] = b @ stiff
+    m[np.ix_(_ALONG, _ALONG)] = a - b @ stiff @ c
+    return np.asarray(_turned(_tensor(m), turn.T))
+
+
+#: How finely the ways across mixed elements' bands are told apart, in degrees: a laminate's
+#: shear across its layers is its core's, so soft that layers turned a few degrees from a face
+#: read far softer along it, and a degree's half costs half a percent (mqucifer/print-shop#363).
+WAY_DEGREES = 1.0
+
+
+def way_groups(ways: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """Each way as a group of ways within `WAY_DEGREES` of one another, either way round, and
+    each group's own, its members' mean: the faces' own normals on flat faces, which the ways
+    are snapped to (`band_normals`), exactly."""
+    turned = ways * np.where(ways[np.arange(len(ways)), np.abs(ways).argmax(axis=1)] < 0,
+                             -1.0, 1.0)[:, None]  # fmt: skip
+    tilt = np.degrees(np.arccos(np.clip(turned[:, 2], -1.0, 1.0)))
+    round_ = np.degrees(np.arctan2(turned[:, 1], turned[:, 0]))
+    keys = (np.rint(tilt / WAY_DEGREES) * 1000 + np.rint(round_ / WAY_DEGREES)).astype(np.int64)
+    _, groups = np.unique(keys, return_inverse=True)
+    count = int(groups.max()) + 1 if len(groups) else 0
+    mean = np.zeros((count, 3))
+    np.add.at(mean, groups, turned)
+    mean /= np.maximum(np.linalg.norm(mean, axis=1), 1e-12)[:, None]
+    return groups, mean
+
+
+#: How many of the part's nearest boundary triangles a mixed element's way across its band is
+#: chosen from.
+NEAREST = 16
+
+
+def band_normals(read: Read, mixed: np.ndarray, centres: np.ndarray, faces: np.ndarray,
+                 normals: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """Each mixed element's way across its band, and whether its layering is clean
+    (mqucifer/print-shop#363). Its core points and its skin points are parted by the way that
+    best parts them, Fisher's, their mean apart over their spread; that's clean where it parts
+    every one, as in a band of walls or shells, and not where two bands meet at a corner or an
+    edge. The way is then the normal of whichever of the part's `NEAREST` nearest boundary
+    triangles, by their middles `faces` from the element's middle `centres`, lies most along
+    it: the nearest face's own, which Fisher's, from 64 points of a skinny element, misses by
+    some degrees. All in the part's own axes."""
+    ways = np.zeros((len(read.share), 3))
+    clean = np.zeros(len(read.share), dtype=bool)
+    for e in np.flatnonzero(mixed):
+        points, core = read.points[e], read.core[e]
+        mean_core, mean_skin = points[core].mean(axis=0), points[~core].mean(axis=0)
+        spread = np.cov(np.vstack([points[core] - mean_core, points[~core] - mean_skin]).T)
+        way = np.linalg.solve(spread + 1e-9 * np.eye(3), mean_skin - mean_core)
+        size = np.linalg.norm(way)
+        if size == 0:
+            continue
+        way /= size
+        along = points @ way
+        ways[e] = way
+        clean[e] = bool(along[core].max() < along[~core].min())
+    chosen = np.flatnonzero(mixed & clean)
+    count = min(NEAREST, len(faces))
+    for start in range(0, len(chosen), 256):
+        chunk = chosen[start : start + 256]
+        apart = ((centres[chunk][:, None, :] - faces[None]) ** 2).sum(axis=2)
+        near = np.argpartition(apart, count - 1, axis=1)[:, :count]
+        dots = np.abs(np.einsum("nk,nmk->nm", ways[chunk], normals[near]))
+        ways[chunk] = normals[near[np.arange(len(chunk)), dots.argmax(axis=1)]]
+    return ways, clean
+
+
+def boundary(corners: np.ndarray, numbers: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """A part's boundary triangles, from its elements' corners and their nodes' numbers: each
+    element face no other of its elements shares, its middle and its unit normal."""
+    seen: dict[tuple[int, ...], tuple[int, int]] = {}
+    for e, four in enumerate(numbers.tolist()):
+        for skip in range(4):
+            face = tuple(sorted(four[:skip] + four[skip + 1 :]))
+            seen[face] = (-1, -1) if face in seen else (e, skip)
+    kept = [(e, skip) for e, skip in seen.values() if e >= 0]
+    if not kept:
+        return np.zeros((0, 3)), np.zeros((0, 3))
+    tri = np.array([[corners[e, i] for i in range(4) if i != skip] for e, skip in kept])
+    normal = np.cross(tri[:, 1] - tri[:, 0], tri[:, 2] - tri[:, 0])
+    normal /= np.linalg.norm(normal, axis=1)[:, None]
+    return tri.mean(axis=1), normal
+
+
 def step_of(share: np.ndarray) -> np.ndarray:
     """Each share as its step, 0 for skin to `STEPS` for core: an eighth's of 8 middles."""
     return np.clip(np.rint(share * STEPS), 0, STEPS).astype(int)
@@ -372,81 +528,58 @@ def step_of(share: np.ndarray) -> np.ndarray:
 # The check
 
 
-def _slice(corners: np.ndarray, axis: int, at: float) -> list[np.ndarray | None]:
-    """Each tetrahedron's section at `at` along `axis`, as its polygon's corners, or none."""
-    found: list[np.ndarray | None] = []
-    for four in corners:
-        heights = four[:, axis] - at
-        points = []
-        for i in range(4):
-            for j in range(i + 1, 4):
-                a, b = heights[i], heights[j]
-                if (a < 0) != (b < 0) and a != b:
-                    t = a / (a - b)
-                    points.append(four[i] + t * (four[j] - four[i]))
-        if len(points) >= 3:
-            ring = np.array(points)
-            middle = ring.mean(axis=0)
-            others = [a for a in range(3) if a != axis]
-            angle = np.arctan2(ring[:, others[1]] - middle[others[1]],
-                               ring[:, others[0]] - middle[others[0]])  # fmt: skip
-            found.append(ring[np.argsort(angle)])
-        else:
-            found.append(None)
-    return found
+#: How thick each band of layers is that the mesh's core is held to Orca's in, in mm, at the
+#: least, and as a share of the mesh's size at the part's faces: an element smears its share
+#: of core over its own height, so a band thinner than a few elements reads that smearing,
+#: not the core (mqucifer/print-shop#363).
+BAND = 2.0
+BAND_SHARE = 3.0
 
 
-def checked(layered: Layered, corners_own: np.ndarray, cells: np.ndarray, share: np.ndarray,
-            walls: float) -> as_printed.Check:
-    """The mesh held to the layers it's read by, in the part's own axes: at each of the
-    planes `as_printed.heights` picks, each element crossing it is held to the layer's own
-    share of core across its section there, read at its section's corners and the middles of
-    its triangles from its middle; and what it's short of, and over, summed over the plane,
-    as a share of the part's walls along the section's outline, the most of any plane."""
+def band_for(near: float) -> float:
+    """How thick the bands are, for a mesh `near` at the part's faces, in mm."""
+    return max(BAND, BAND_SHARE * near)
+
+
+@dataclass(frozen=True)
+class Bands:
+    """The mesh's core held to Orca's band by band of layers (`checked`): how many bands, and
+    the most any one's core is short of Orca's and over it, as a share of the band's volume."""
+
+    bands: int
+    short: float
+    over: float
+    unread: int
+
+    def fails(self) -> str | None:
+        """Why it doesn't hold, in words, or None where it does."""
+        if self.short > as_printed.SHORT:
+            return (f"its mesh's core is short of Orca's in a band of its layers by "
+                    f"{100 * self.short:.1f}% of the band, past {100 * as_printed.SHORT:.0f}%: "
+                    "the part would read stronger than printed")
+        if self.over > as_printed.AGREE:
+            return (f"its mesh's core is over Orca's in a band of its layers by "
+                    f"{100 * self.over:.1f}% of the band, past {100 * as_printed.AGREE:.0f}%")
+        return None
+
+
+def checked(layered: Layered, corners_own: np.ndarray, read: Read, band: float = BAND) -> Bands:
+    """The mesh's core held to Orca's, band by band of the part's layers, `band` thick
+    (mqucifer/print-shop#363): in each band, the mesh's core, each element's share spread
+    evenly over it, against Orca's, each element read at its points in their own layers;
+    what's short and over as a share of the part's volume in the band."""
     axis = layered.layers
-    first, second = (a for a in range(3) if a != axis)
-    planes = read = 0
-    short = over = 0.0
-    for at in as_printed.heights(layered.part, axis):
-        section = as_printed._section(layered.part, axis, at)
-        if section is None:
-            continue
-        planes += 1
-        outline = float(sum(w.Length for w in section.Wires))
-        crossing = np.flatnonzero((corners_own[:, :, axis].min(axis=1) < at)
-                                  & (corners_own[:, :, axis].max(axis=1) > at))  # fmt: skip
-        if not len(crossing):
-            continue
-        rings = _slice(corners_own[crossing], axis, at)
-        samples: list[np.ndarray] = []
-        owners: list[int] = []
-        areas: list[tuple[int, float, int]] = []
-        for element, ring in zip(crossing.tolist(), rings, strict=True):
-            if ring is None:
-                continue
-            middle = ring.mean(axis=0)
-            two = ring[:, [first, second]]
-            area = 0.5 * abs(float(np.dot(two[:, 0], np.roll(two[:, 1], -1))
-                                   - np.dot(two[:, 1], np.roll(two[:, 0], -1))))  # fmt: skip
-            points = [*ring, *[(middle + a + b) / 3 for a, b in zip(ring, np.roll(ring, -1, 0),
-                                                                    strict=True)]]  # fmt: skip
-            samples += points
-            owners += [element] * len(points)
-            areas.append((element, area, len(points)))
-        if not samples:
-            continue
-        sampled = np.array(samples)
-        owner = np.array(owners)
-        core = layered.core(sampled, cells[owner])
-        missed = extra = 0.0
-        start = 0
-        for element, area, n in areas:
-            wanted = float(core[start : start + n].mean())
-            start += n
-            missed += max(wanted - share[element], 0.0) * area
-            extra += max(share[element] - wanted, 0.0) * area
-        read += 1
-        if outline > 0 and walls > 0:
-            short = max(short, missed / (outline * walls))
-            over = max(over, extra / (outline * walls))
-    return as_printed.Check(planes, read, short, over)
+    edges = corners_own[:, 1:] - corners_own[:, :1]
+    volume = np.abs(np.einsum("ni,ni->n", np.cross(edges[:, 0], edges[:, 1]), edges[:, 2])) / 6
+    where = np.floor((read.points[:, :, axis] - layered.low) / band).astype(int)
+    count = int(where.max()) + 1 if where.size else 0
+    each = np.repeat(volume / POINTS, POINTS)
+    flat = where.ravel()
+    part = np.bincount(flat, weights=each, minlength=count)
+    orca = np.bincount(flat, weights=each * read.core.ravel(), minlength=count)
+    mesh = np.bincount(flat, weights=each * np.repeat(read.share, POINTS), minlength=count)
+    full = part > 0
+    ratio = np.where(full, part, 1.0)
+    short = float(np.max(np.where(full, (orca - mesh) / ratio, 0.0), initial=0.0))
+    over = float(np.max(np.where(full, (mesh - orca) / ratio, 0.0), initial=0.0))
+    return Bands(int(full.sum()), max(short, 0.0), max(over, 0.0), len(layered.unread))
