@@ -512,9 +512,10 @@ def band_normals(read: Read, mixed: np.ndarray, centres: np.ndarray, faces: np.n
     shells, it's a laminate across the normal of whichever of the part's `NEAREST` nearest
     boundary triangles, by their middles `faces` from the element's middle `centres`, lies most
     along it: the nearest face's own, which Fisher's, from 64 points of a skinny element,
-    misses by some degrees. Where it doesn't, two bands meet: along the edge their faces share,
+    misses by some degrees. Where it doesn't, and one face is all there is near it, it's that
+    face's laminate still; where two faces are, two bands meet, and along the edge they share,
     the two nearby normals furthest apart, it's a column (`column`); where a third face leans
-    along that edge, or no second face is found, it's in series every way (`reuss`)."""
+    along that edge, a corner of three, it's in series every way (`reuss`)."""
     ways = np.zeros((len(read.share), 3))
     kinds = np.full(len(read.share), SERIES, dtype=int)
     clean = np.zeros(len(read.share), dtype=bool)
@@ -548,6 +549,9 @@ def band_normals(read: Read, mixed: np.ndarray, centres: np.ndarray, faces: np.n
             others = nearby[row]
             cos = np.abs(others @ first[row])
             if cos.min() > apart_cos:
+                # One face is all there is near it: its band's, which its 64 points part
+                # only roughly, not a corner.
+                ways[e], kinds[e] = first[row], LAMINATE
                 continue
             second = others[cos.argmin()]
             edge = np.cross(first[row], second)
@@ -626,8 +630,12 @@ def checked(layered: Layered, corners_own: np.ndarray, read: Read, band: float =
     axis = layered.layers
     edges = corners_own[:, 1:] - corners_own[:, :1]
     volume = np.abs(np.einsum("ni,ni->n", np.cross(edges[:, 0], edges[:, 1]), edges[:, 2])) / 6
-    where = np.floor((read.points[:, :, axis] - layered.low) / band).astype(int)
-    count = int(where.max()) + 1 if where.size else 0
+    # Bands of one thickness, the nearest to `band` that fills the part's height: no thin band
+    # at its end, where an element's smearing would read large against little.
+    count = max(1, round((layered.high - layered.low) / band))
+    band = (layered.high - layered.low) / count
+    where = np.clip(np.floor((read.points[:, :, axis] - layered.low) / band), 0,
+                    count - 1).astype(int)  # fmt: skip
     each = np.repeat(volume / POINTS, POINTS)
     flat = where.ravel()
     part = np.bincount(flat, weights=each, minlength=count)
