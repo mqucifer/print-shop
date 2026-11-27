@@ -148,3 +148,100 @@ def test_an_element_s_64_points_are_each_an_equal_part_of_it() -> None:
     assert points.shape == (1, 64, 3)
     assert np.allclose(points[0].mean(axis=0), corners[0].mean(axis=0))
     assert len({tuple(np.round(p, 9)) for p in points[0]}) == 64
+
+
+@pytest.mark.parametrize("share", [0.125, 0.5, 0.875])
+@pytest.mark.parametrize("kind", [classify.LAMINATE, classify.COLUMN, classify.SERIES])
+def test_a_mixed_element_s_core_strain_is_the_one_its_blend_gives_it(
+    phases: tuple[np.ndarray, np.ndarray], share: float, kind: int
+) -> None:
+    """A mixed element's core is judged at its own strain (`classify.core_strain`,
+    mqucifer/print-shop#363), the weaker side by its own limits: with the skin's the rest of
+    the element's, the two phases' stresses by share are the blend's at the element's strain;
+    along a laminate's face and a column's edge both are strained alike, and what's across
+    carries the same stress in both."""
+    skin, core = phases
+    way = {classify.LAMINATE: np.array([0.3, -0.5, 0.81]), classify.COLUMN: ALONG,
+           classify.SERIES: None}[kind]
+    if way is not None:
+        way = way / np.linalg.norm(way)
+    blend = {classify.LAMINATE: classify.laminate, classify.COLUMN: classify.column}
+    tensor = (blend[kind](skin, core, share, way) if way is not None
+              else classify.reuss(skin, core, share))
+    strain = np.array([[1.0, 0.3, 0.2], [0.3, -0.4, 0.1], [0.2, 0.1, -0.2]]) * 1e-3
+    own = np.einsum("ijkl,kl->ij", classify.core_strain(kind, skin, core, share, way), strain)
+    rest = (strain - share * own) / (1 - share)
+    stress_core = np.einsum("ijkl,kl->ij", core, own)
+    stress_skin = np.einsum("ijkl,kl->ij", skin, rest)
+    assert np.allclose(share * stress_core + (1 - share) * stress_skin,
+                       np.einsum("ijkl,kl->ij", tensor, strain), atol=1e-12)
+    if way is None:
+        assert np.allclose(stress_core, stress_skin, atol=1e-12)
+        return
+    turn = classify._frame_of(way) if kind == classify.LAMINATE else classify._frame_of(way)[
+        [2, 0, 1]]
+    along, across = ((classify._ALONG, classify._ACROSS) if kind == classify.LAMINATE
+                     else (classify._AXIS, classify._AROUND))
+
+    def mandel(t: np.ndarray) -> np.ndarray:
+        """A strain or stress as Mandel's six, in axes `turn`."""
+        m = turn @ t @ turn.T
+        r = math.sqrt(2)
+        return np.array([m[0, 0], m[1, 1], m[2, 2], r * m[1, 2], r * m[0, 2], r * m[0, 1]])
+
+    assert np.allclose(mandel(own)[along], mandel(rest)[along], atol=1e-12)
+    assert np.allclose(mandel(stress_core)[across], mandel(stress_skin)[across], atol=1e-12)
+    assert np.allclose(classify.core_strain(kind, skin, core, 1.0, way),
+                       np.einsum("ik,jl->ijkl", np.eye(3), np.eye(3)))
+
+
+def grid_points(low: tuple[float, ...], high: tuple[float, ...], step: float) -> np.ndarray:
+    axes = [np.arange(a + step / 2, b, step) for a, b in zip(low, high, strict=True)]
+    return np.stack(np.meshgrid(*axes, indexing="ij"), axis=-1).reshape(-1, 3)
+
+
+def test_a_core_s_strain_is_averaged_over_its_own_cell_and_only_its_core() -> None:
+    """mqucifer/print-shop#363: a core's strain is read no finer than its own cell
+    (`classify.Cells`): a strain the same throughout is read as it is, every voxel's cell
+    full of core in the middle; a spike at one point is spread over its cell, at the core's
+    corner as in its middle, as a lattice's cell lies in its core, not centred on its edge;
+    and the cell is clipped to the core, so a core thinner than its cell is read over what
+    core there is, its fill saying so."""
+    cell, step = 4.0, 0.2
+    points = grid_points((0, 0, 0), (20, 20, 12), step)
+    weights = np.full(len(points), step**3)
+    even = np.tile(np.diag([1e-3, -4e-4, 2e-4]), (len(points), 1, 1))
+    cells = classify.Cells(np.zeros(3), np.array([20.0, 20, 12]), cell)
+    cells.add(points, even, weights)
+    read = cells.averaged()
+    assert np.allclose(read.strain, even[0])
+    middle = np.all(np.abs(read.at - [10, 10, 6]) < 1, axis=1)
+    assert np.allclose(read.fill[middle], 1.0)
+    # A thick core is read in whole cells, none centred on its edge or its corner.
+    assert read.fill.min() >= classify.FULLEST and read.fill.max() <= 1 + 1e-9
+    # A spike of 1% at one point, in strain otherwise 0, is its cell's mean, its volume's share,
+    # in the core's middle and at its very corner alike.
+    for where in ([10.1, 10.1, 6.1], [0.1, 0.1, 0.1]):
+        spiked = np.zeros((len(points), 3, 3))
+        spiked[np.argmin(np.linalg.norm(points - where, axis=1))] = np.diag([1e-2, 0, 0])
+        cells = classify.Cells(np.zeros(3), np.array([20.0, 20, 12]), cell)
+        cells.add(points, spiked, weights)
+        peak = cells.averaged().strain[:, 0, 0].max()
+        assert peak == pytest.approx(1e-2 * step**3 / cell**3, rel=0.01), where
+    # A core 1 mm thick, a quarter of its cell: its average is its own, its fill a quarter.
+    thin = grid_points((0, 0, 0), (20, 1, 12), step)
+    cells = classify.Cells(np.zeros(3), np.array([20.0, 20, 12]), cell)
+    cells.add(thin, np.tile(even[0], (len(thin), 1, 1)), np.full(len(thin), step**3))
+    read = cells.averaged()
+    assert np.allclose(read.strain, even[0])
+    assert read.fill.max() == pytest.approx(1 / 4, abs=0.06)
+    assert np.all(read.at[:, 1] < 1)
+
+
+def test_a_core_s_cell_is_its_lines_spacing_over_the_density_each_layer_holds() -> None:
+    """Grid shares each layer between its two sets, rectilinear lays one a layer at the whole
+    density, triangles three a layer (`infill.cell_mm`)."""
+    assert infill.cell_mm("grid", 20, 0.407) == pytest.approx(4.07)
+    assert infill.cell_mm("rectilinear", 20, 0.407) == pytest.approx(2.035)
+    assert infill.cell_mm("triangles", 20, 0.407) == pytest.approx(6.105)
+    assert infill.cell_mm("grid", 60, 0.407) == pytest.approx(4.07 / 3)

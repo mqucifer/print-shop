@@ -55,6 +55,7 @@ markers = [
     "cae: runs the bench's second image, with FreeCAD, built by scripts/bench.py build cae (deselect with -m 'not cae')",
     "assembly: a cae test of a whole furniture assembly, run by CI in a job of its own (mqucifer/print-shop#295)",
     "proof: a cae proof too long for CI's job, run by hand on the Mac with -m proof (mqucifer/print-shop#325)",
+    "printed: a cae test reading a part as printed, minutes a read, in CI's cae-printed job (mqucifer/print-shop#363)",
 ]
 
 [tool.ruff]

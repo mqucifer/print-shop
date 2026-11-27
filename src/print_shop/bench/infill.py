@@ -474,6 +474,18 @@ class Core:
         }
 
 
+def cell_mm(pattern: str, density_pct: float, spacing: float) -> float:
+    """The core's own cell, in mm (mqucifer/print-shop#363): how far apart its lines lie in a
+    layer, `spacing` over the density each layer's sparsest set holds. Grid shares each layer
+    between its two sets, so at 20% its lines each way are 5 spacings apart; rectilinear lays
+    one set a layer at the whole density. Its stiffness and strain are its cell's mean, so it's
+    read no finer than that (`classify.cell_averaged`). Gyroid, not lines, by its density."""
+    sets = LINES.get(pattern, ())
+    alternate = [s for s in sets if not s[2]]
+    shares = [s[1] if s[2] else s[1] * len(alternate) for s in sets] or [1.0]
+    return float(spacing / (density_pct / 100 * min(shares)))
+
+
 def core(settings: Settings, material: Any) -> Core:
     """A cell's core from its settings and the part's material.
 

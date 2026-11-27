@@ -3,6 +3,7 @@ what an answer is."""
 
 from __future__ import annotations
 
+import json
 import subprocess
 from pathlib import Path
 
@@ -307,3 +308,26 @@ def test_a_rounds_run_without_the_second_image_is_told_and_goes_on(
     monkeypatch.setattr(host, "image_id", lambda image=host.IMAGE: None)
     done = Box(tmp_path).bench(["fit-on", "lid.step", "--onto", "box.step"])
     assert done.code == 3 and "scripts/bench.py build cae" in done.output
+
+
+def test_a_load_reading_a_part_as_printed_has_its_own_memory_and_time(tmp_path: Path) -> None:
+    """mqucifer/print-shop#363: a `load` of an assembly that gives a part a `print` is meshed
+    fine at its faces and runs under `PRINTED_MEMORY` and `PRINTED`, in one pass, no longer
+    one offered; one that gives none, or any other command, keeps its own."""
+    (tmp_path / "printed.json").write_text(json.dumps(
+        {"parts": [{"name": "a", "print": {"walls": 2}}, {"name": "b"}]}))
+    (tmp_path / "solid.json").write_text(json.dumps({"parts": [{"name": "a"}]}))
+    printed = ["load", "printed.json", "--weight", "1", "--at", "0,0,0"]
+    solid = ["load", "solid.json", "--weight", "1", "--at", "0,0,0"]
+    assert host.reads_printed(printed, tmp_path)
+    assert not host.reads_printed(solid, tmp_path)
+    assert not host.reads_printed(printed, None)
+    assert not host.reads_printed(["load", "missing.json"], tmp_path)
+    assert host.memory_for(printed, True) == host.PRINTED_MEMORY
+    assert host.timeout_for(printed, True) == host.PRINTED
+    assert host.offered(printed, True) is None
+    assert host.memory_for(solid, False) == host.MEMORY
+    assert host.offered(solid, False) == host.TWO_PASSES
+    # Two passes keep their own, as `--parts` asks.
+    assert host.memory_for([*printed, "--parts"], True) == host.TWO_PASSES_MEMORY
+    assert host.memory_for(["clearance", "printed.json"], True) == host.MEMORY

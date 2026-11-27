@@ -467,6 +467,42 @@ def column(skin: np.ndarray, core: np.ndarray, share: float, axis: np.ndarray) -
     return _mixed(skin, core, share, turn, _AXIS, _AROUND)
 
 
+def _core_part(skin: np.ndarray, core: np.ndarray, share: float, turn: np.ndarray,
+               along: list[int], across: list[int]) -> np.ndarray:
+    """What of a mixed element's strain is its core's own, as a map from its strain to its
+    core's (`_mixed`'s mix, in axes `turn`): the strains `along` its core's, the same in both;
+    and across, where both carry the same stress and the element's is their shares' sum, its
+    core's, ε_core = M⁻¹((C_s - C_c) ε_along + C_s ε / (1 - f)), M = C_c + C_s f / (1 - f),
+    of the across block C_nn and its coupling C_np to the along. As a tensor, in the given
+    axes."""
+    m_skin, m_core = _mandel(_turned(skin, turn)), _mandel(_turned(core, turn))
+    pp = np.ix_(across, across)
+    pn = np.ix_(across, along)
+    weight = share / (1 - share)
+    lead = np.linalg.inv(m_core[pp] + weight * m_skin[pp])
+    mapped = np.zeros((6, 6))
+    mapped[np.ix_(along, along)] = np.eye(len(along))
+    mapped[pn] = lead @ (m_skin[pn] - m_core[pn])
+    mapped[pp] = lead @ m_skin[pp] / (1 - share)
+    return np.asarray(_turned(_tensor(mapped), turn.T))
+
+
+def core_strain(kind: int, skin: np.ndarray, core: np.ndarray, share: float,
+                way: np.ndarray | None) -> np.ndarray:
+    """A map from a mixed element's strain to its core's own (mqucifer/print-shop#363), by the
+    blend its stiffness is (`laminate`, `column`, `reuss`): so its core is judged by its own
+    limits at its own strain, the weaker side of the element, and not at the element's mean,
+    which an element mostly skin holds well under its core's. All core, the strain itself."""
+    if share >= 1:
+        return np.asarray(np.einsum("ik,jl->ijkl", np.eye(3), np.eye(3)))
+    if kind == LAMINATE and way is not None:
+        return _core_part(skin, core, share, _frame_of(way), _ALONG, _ACROSS)
+    if kind == COLUMN and way is not None:
+        return _core_part(skin, core, share, _frame_of(way)[[2, 0, 1]], _AXIS, _AROUND)
+    blended = _mandel(reuss(skin, core, share))
+    return np.asarray(_tensor(np.linalg.inv(_mandel(core)) @ blended))
+
+
 #: How finely the ways across mixed elements' bands are told apart, in degrees: a laminate's
 #: shear across its layers is its core's, so soft that layers turned a few degrees from a face
 #: read far softer along it, and a degree's half costs half a percent (mqucifer/print-shop#363).
@@ -646,3 +682,109 @@ def checked(layered: Layered, corners_own: np.ndarray, read: Read, band: float =
     short = float(np.max(np.where(full, (orca - mesh) / ratio, 0.0), initial=0.0))
     over = float(np.max(np.where(full, (mesh - orca) / ratio, 0.0), initial=0.0))
     return Bands(int(full.sum()), max(short, 0.0), max(over, 0.0), len(layered.unread))
+
+
+#: How many voxels across a core's cell its strain is summed in (`cell_averaged`): odd, so a
+#: cell is centred on its own voxel.
+VOXELS = 5
+#: How near to the fullest cell round it a cell's core must be for it to be read (`Cells`).
+FULLEST = 0.9
+#: The most voxels a part's box is read in; past it, fewer a cell.
+MOST_VOXELS = 40_000_000
+
+
+@dataclass
+class Averaged:
+    """A core's strain averaged over its own cell (`cell_averaged`): each voxel's that holds
+    core, its middle, and the share of its cell that's core."""
+
+    strain: np.ndarray
+    at: np.ndarray
+    fill: np.ndarray
+
+
+class Cells:
+    """A core's strain summed into voxels a fifth of its cell (`infill.cell_mm`) across, over a
+    box in the part's own axes, a share at a time (`add`), then averaged over the cell round
+    each voxel (`averaged`), mqucifer/print-shop#363. Its stiffness is homogenised over that
+    cell, so a peak resolved finer than it, as an idealised clamp's corner is on a fine mesh,
+    isn't a figure the core has; a real overload spans many cells. Only core is summed: never
+    skin, never outside the part. Where the core is thinner than a cell, its average is over
+    what core there is, and its fill says how much."""
+
+    def __init__(self, low: np.ndarray, high: np.ndarray, cell: float) -> None:
+        self.cell = float(cell)
+        voxels = VOXELS
+        while voxels > 1:
+            size = self.cell / voxels
+            shape = np.maximum(np.ceil((high - low) / size).astype(int) + 1, 1)
+            if int(np.prod(shape)) <= MOST_VOXELS:
+                break
+            voxels -= 2
+        self.voxels, self.size = voxels, self.cell / voxels
+        self.low = np.asarray(low, dtype=float)
+        self.shape = tuple(int(n) for n in np.maximum(
+            np.ceil((high - low) / self.size).astype(int) + 1, 1))
+        count = int(np.prod(self.shape))
+        self.weight = np.zeros(count)
+        self.strain = np.zeros((count, 9))
+        self.place = np.zeros((count, 3))
+
+    def add(self, points: np.ndarray, strains: np.ndarray, weights: np.ndarray) -> None:
+        """Core `points` in the part's own axes, their `strains` and the volumes they stand for."""
+        index = np.clip(((points - self.low) / self.size).astype(int), 0,
+                        np.array(self.shape) - 1)
+        flat = np.ravel_multi_index(index.T, self.shape)
+        self.weight += np.bincount(flat, weights, len(self.weight))
+        for k in range(9):
+            self.strain[:, k] += np.bincount(flat, weights * strains.reshape(-1, 9)[:, k],
+                                             len(self.weight))
+        for k in range(3):
+            self.place[:, k] += np.bincount(flat, weights * points[:, k], len(self.weight))
+
+    def averaged(self) -> Averaged:
+        """The core's own cells: each voxel's whose cell, the box round it a cell across, holds
+        as much core as any within a cell of it does, to `FULLEST`, its strain averaged over
+        the core in that cell, its own core's middle, and its cell's share that's core. A
+        lattice's cell lies in its core, not centred on its edge: where the core is thick, a
+        cell centred on its edge or its corner is mostly skin's room, and is read in the
+        whole cells beside it instead, which hold all of the core but its outermost voxel;
+        where it's thinner than a cell, every cell is partly core, and each is read over what
+        core it holds."""
+        both = np.concatenate([self.weight[:, None], self.strain], axis=1)
+        summed = _boxed(both.reshape(*self.shape, 10), self.voxels)
+        fill = summed[..., 0] / self.cell**3
+        fullest = _most(fill, self.voxels)
+        read = ((self.weight.reshape(self.shape) > 0)
+                & (fill >= FULLEST * fullest)).reshape(-1)
+        summed = summed.reshape(-1, 10)[read]
+        strain = (summed[:, 1:] / summed[:, :1]).reshape(-1, 3, 3)
+        at = self.place[read] / self.weight[read, None]
+        return Averaged(strain, at, summed[:, 0] / self.cell**3)
+
+
+def _most(values: np.ndarray, width: int) -> np.ndarray:
+    """Each voxel's most over the `width` voxels each way centred on it, the box's own only."""
+    half = width // 2
+    for axis in range(3):
+        pad = [(0, 0)] * values.ndim
+        pad[axis] = (half, half)
+        padded = np.pad(values, pad, constant_values=-np.inf)
+        n = values.shape[axis]
+        values = np.max([np.take(padded, np.arange(k, k + n), axis=axis)
+                         for k in range(width)], axis=0)
+    return values
+
+
+def _boxed(values: np.ndarray, width: int) -> np.ndarray:
+    """Each voxel's sum over the `width` voxels each way centred on it, zero past the box."""
+    half = width // 2
+    for axis in range(3):
+        pad = [(0, 0)] * values.ndim
+        pad[axis] = (half + 1, half)
+        summed = np.cumsum(np.pad(values, pad), axis=axis)
+        n = values.shape[axis]
+        upper = np.take(summed, np.arange(width, width + n), axis=axis)
+        lower = np.take(summed, np.arange(0, n), axis=axis)
+        values = upper - lower
+    return values

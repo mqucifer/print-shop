@@ -147,7 +147,7 @@ jobs:
           name: cae-image
       - run: zstd -d --stdout cae-image.tar.zst | docker load && rm cae-image.tar.zst
       - run: uv run python scripts/bench.py check
-      - run: uv run pytest -q -m "cae and not assembly and not proof" -n 2 -rps --durations=20
+      - run: uv run pytest -q -m "cae and not assembly and not printed and not proof" -n 2 -rps --durations=20
 
   # The `-m cae` tests of a whole furniture assembly (mqucifer/print-shop#295), in a job of their
   # own beside `cae`: a traced glass frame alone and joined, posts with turned latches, a table
@@ -173,3 +173,34 @@ jobs:
       - run: zstd -d --stdout cae-image.tar.zst | docker load && rm cae-image.tar.zst
       - run: uv run python scripts/bench.py check
       - run: uv run pytest -q -m "cae and assembly and not proof" -n 2 -rps --durations=20
+
+  # The `-m cae` tests that read a part as printed (mqucifer/print-shop#363), in a job of their
+  # own: each element is read as its layers have it, the mesh fine at the part's faces, a few
+  # minutes a read under `host.PRINTED_MEMORY`, about twenty of them. In three parts, each two
+  # at once, 6 GiB each on a 16 GiB runner. `scripts/check_shards.py` holds the parts to the
+  # whole.
+  cae-printed:
+    needs: [image, cae-image]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          python-version: "3.12"
+      - run: uv sync --locked
+      - uses: actions/download-artifact@v4
+        with:
+          name: bench-image
+      - run: zstd -d --stdout bench-image.tar.zst | docker load && rm bench-image.tar.zst
+      - uses: actions/download-artifact@v4
+        with:
+          name: cae-image
+      - run: zstd -d --stdout cae-image.tar.zst | docker load && rm cae-image.tar.zst
+      - run: uv run python scripts/bench.py check
+      - run: uv run python scripts/check_shards.py 3 -m "cae and printed and not proof"
+      - run: uv run pytest -q -m "cae and printed and not proof" --shard ${{ matrix.shard }}/3 -n 2 -rps --durations=20
