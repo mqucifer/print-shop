@@ -13,7 +13,9 @@ square to an axis reads as the axis form does. Nothing is any Sponsor's design.
 
 from __future__ import annotations
 
+import argparse
 import json
+import math
 import re
 from pathlib import Path
 from typing import Any
@@ -43,6 +45,11 @@ cq.exporters.export(plate(-4, 0), "lower.step")
 cq.exporters.export(plate(0.2, 4.2), "upper.step")
 cq.exporters.export(cq.Workplane("XY").circle(2.5).extrude(8.2).translate((0, 0, -4)), "pin.step")
 cq.exporters.export(cq.Workplane("XY").box(10, 10, 10).translate((5, 5, 5)), "cube.step")
+# A round of radius 50 along z, turned a quarter degree so its mesh's chord, not a corner, faces
+# +x, and a flat 0.25 mm beyond it, square to x.
+round_ = cq.Workplane("XY").circle(50).extrude(40).translate((0, 0, -20))
+cq.exporters.export(round_.rotate((0, 0, 0), (0, 0, 1), 0.25), "round.step")
+cq.exporters.export(cq.Workplane("XY").box(10, 20, 40).translate((55.25, 0, 0)), "flat.step")
 """
 
 #: Each picture's pixels of one exact colour, and the colour at a pixel, in the image.
@@ -240,6 +247,8 @@ def test_the_gaps_on_the_cut_are_clearances_and_lie_where_it_says(work: Path) ->
                 assert abs(local[0] - x) == pytest.approx(radius, abs=CHORDS), (name, local)
                 assert low - 1e-3 <= local[2] <= high + 1e-3, (name, local)
     assert "least gap lower.step | upper.step 0.200 mm by OCCT, from u,v" in text, text
+    # A gap on a plane is never less than in 3D, and more on a slant: said beside the gaps.
+    assert "each gap is read in the plane: never less than the parts' least gap in 3D" in text
     assert f"least gap lower.step | {PIN1} 0.250 mm by OCCT" in text, text
 
 
@@ -281,6 +290,7 @@ def test_a_stretch_of_the_plane_reads_the_gaps_inside_it(work: Path) -> None:
         ("at=5,5,3,normal=0,0,1", "z=3"),
         ("at=7,5,5,normal=1,0,0", "x=7"),
         ("at=5,4,5,normal=0,-1,0", "y=4"),
+        ("at=5e0,5,3,normal=0,0,1e0", "z=3"),
     ],
 )
 def test_a_plane_square_to_an_axis_reads_as_the_axis_form(
@@ -349,3 +359,62 @@ def test_the_sheet_of_a_plane_cut_in_its_look_has_its_legend(work: Path) -> None
     drawn = {f["file"]: f for f in record["numbers"]["files"]}
     assert drawn[PIN1]["rgb"] == drawn[PIN2]["rgb"] == [255, 176, 0], drawn
     assert any(str(f).endswith("-sheet.png") for f in record["files"]), record["files"]
+
+
+def test_normal_plus_y_is_seen_from_plus_y_the_mirror_of_the_axis_form() -> None:
+    """`y=` is seen from -y, as the front view; `normal=0,1,0` from +y, so its right is -x. The
+    help says so, as the docs do."""
+    from print_shop.bench.cli import parser
+
+    commands = next(a for a in parser()._actions if isinstance(a, argparse._SubParsersAction))
+    helped = commands.choices["render"].format_help()
+    assert "normal=0,1,0 is seen from +y, the mirror of y=" in " ".join(helped.split())
+    assert "never less than clearance's least gap in 3D" in " ".join(helped.split())
+
+
+def test_normal_plus_y_reads_mirrored(work: Path) -> None:
+    text, record = ask(work, "render", "cube.step", "--views", "--cut", "at=5,4,5,normal=0,1,0")
+    assert record["verdict"] == "OK", text
+    plane = the_cut(record)["plane"]
+    assert plane["u"] == pytest.approx([-1, 0, 0], abs=1e-9)
+    assert plane["v"] == pytest.approx([0, 0, 1], abs=1e-9)
+
+
+#: The slant: the plane's normal this far off the round's axis, so the plane meets the round and
+#: the flat 4° off along them, and the 0.25 mm between them is 0.25 / cos 86° on it.
+SLANT = 86.0
+
+
+def test_a_slanting_cut_allows_each_outline_the_chords_its_slant_gives(work: Path) -> None:
+    """A round of r 50 beside a flat 0.25 mm off it, cut 86° off square: OCCT reads the true
+    3.5839 mm, the outlines more, by the round's chords over the slant's sine. A fixed band of
+    0.0041 mm, right on a square cut, failed this right picture (mqucifer/print-shop#355's
+    review)."""
+    turn = math.radians(SLANT)
+    cut = f"at=50.125,0,0,normal={math.sin(turn):.9g},0,{math.cos(turn):.9g},u=-8:8,v=-8:8"
+    text, record = ask(
+        work, "render", "round.step", "flat.step", "--views", "--cut", cut, "--gaps",
+        "--size", "256", "--renders-out", "slant",
+    )  # fmt: skip
+    assert record["verdict"] == "OK", text
+    (gap,) = the_cut(record)["gaps"]
+    assert gap["gap_mm"] == pytest.approx(0.25 / math.cos(turn), abs=1e-4), gap
+    off = abs(gap["gap_outline_mm"] - gap["gap_mm"])
+    # Past the square cut's band, and within the slant's: 2 x 0.002 / sin 4°, and a little.
+    assert off > 2 * 0.002 + 1e-4, gap
+    assert gap["gap_band_mm"] == pytest.approx(2 * 0.002 / math.cos(turn) + 1e-4, rel=0.02), gap
+    assert off <= gap["gap_band_mm"], gap
+
+
+@pytest.mark.parametrize(
+    "cut", ["y=0,x=-8.75:0", "at=-6,0,-2,normal=0,-1,0,u=-2.75:4,v=-2:4"]
+)
+def test_a_window_whose_edge_lies_on_a_face_draws(work: Path, cut: str) -> None:
+    """The lower plate's hole wall at x -8.75 on the window's edge: the plate beyond it clips to a
+    line, which Shapely gives with the area as a collection with no boundary, and the cut crashed,
+    in the axis form too (mqucifer/print-shop#355's review)."""
+    text, record = ask(
+        work, "render", "lower.step", "pin.step", "--views", "--cut", cut, "--gaps",
+        "--size", "256", "--renders-out", "edge",
+    )  # fmt: skip
+    assert record["verdict"] == "OK", text

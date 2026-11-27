@@ -75,16 +75,28 @@ PLANE_AXES = ("u", "v")
 LEVEL_DEG = 30.0
 #: Closer than this, in mm, two files' sections touch: `clearance`'s figure.
 TOUCHING = 1e-4
+#: A plane's figures, which may come from arithmetic and so carry an exponent: 1e-17, 2.5E3.
+PLANE_NUMBER = re.compile(r"[+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?")
 #: How far the outlines' gap may be from OCCT's: each outline is the fine mesh's, whose chords
-#: lie within its tolerance of the surface, on both files. `clearance`'s band.
+#: lie within its tolerance of the surface, on both files: `clearance`'s band on a cut square to
+#: both surfaces. A surface the plane meets slantwise moves on it by its chord over the sine of
+#: the angle between their normals, so each file's share is its own surface's, there.
 GAP_BAND = 2 * FINE[0] + TOUCHING
+#: The least that sine is taken as: a surface nearly in the plane has no edge on it to rely on.
+SLANT_FLOOR = 0.05
+#: What a gap read on a plane is, said wherever one's marked.
+IN_PLANE = (
+    "each gap is read in the plane: never less than the parts' least gap in 3D, which clearance "
+    "reads, and more where the plane meets them slantwise, so a joint can look looser here than "
+    "it is"
+)
 #: A gap's mark on the picture: its line and the box behind its figure.
 GAP_INK = (20, 20, 20)
 
 
 def _three(text: str) -> tuple[float, float, float] | None:
     words = text.split(",")
-    if len(words) != 3 or not all(NUMBER.fullmatch(w.strip()) for w in words):
+    if len(words) != 3 or not all(PLANE_NUMBER.fullmatch(w.strip()) for w in words):
         return None
     return (float(words[0]), float(words[1]), float(words[2]))
 
@@ -293,7 +305,7 @@ def parse_plane(words: list[str], text: str) -> Plane:
         if along not in given:
             continue
         low, _, high = given[along].partition(":")
-        if not NUMBER.fullmatch(low) or not NUMBER.fullmatch(high):
+        if not PLANE_NUMBER.fullmatch(low) or not PLANE_NUMBER.fullmatch(high):
             raise NoAnswer(f"a plane's window is {along}=FROM:TO, not {along}={given[along]!r}")
         if float(high) <= float(low):
             raise NoAnswer(f"a window runs from low to high: not {along}={given[along]}")
@@ -411,8 +423,37 @@ class Drawn:
     marks: list[tuple[int, float, float]]
 
 
+def _polygonal(found: Any) -> Any:
+    """Only the area of a clipped section. Material that only meets the window's edge, a face on
+    it, clips to a line or a point too, and Shapely gives a collection, whose boundary is None."""
+    if found.geom_type in ("Polygon", "MultiPolygon"):
+        return found
+    parts = [
+        g
+        for g in getattr(found, "geoms", [])
+        if g.geom_type in ("Polygon", "MultiPolygon") and not g.is_empty
+    ]
+    return shapely.union_all(parts) if parts else shapely.Polygon()
+
+
 def _clip(material: Any, cut: AnyCut, low: np.ndarray, high: np.ndarray) -> Any:
-    return material.intersection(shapely.box(low[0], low[1], high[0], high[1]))
+    return _polygonal(material.intersection(shapely.box(low[0], low[1], high[0], high[1])))
+
+
+def slant(parts: list[Part], point: np.ndarray, cut: AnyCut) -> float:
+    """How far a file's outline on the plane moves for its surface moving 1 mm, at a point on
+    it: one over the sine of the angle between the plane's normal and the surface's there, the
+    nearest triangle's of its fine mesh."""
+    nearest, normal = math.inf, None
+    for part in parts:
+        mesh = part.fine()
+        _, distance, triangle = trimesh.proximity.closest_point(mesh, [point])  # type: ignore[no-untyped-call]
+        if float(distance[0]) < nearest:
+            nearest, normal = float(distance[0]), np.asarray(mesh.face_normals[int(triangle[0])])
+    if normal is None:
+        return 1.0
+    across = normal - float(normal @ cut.normal) * cut.normal
+    return 1.0 / max(float(np.linalg.norm(across)), SLANT_FLOOR)
 
 
 def on_face(mesh: trimesh.Trimesh, cut: AnyCut) -> bool:
@@ -541,13 +582,18 @@ def _gaps(
             figure = occt if occt is not None else outline
             pair["gap_mm"] = figure
             pair["gap_by"] = "occt" if occt is not None else "outline"
+            band = GAP_BAND
+            if occt is not None:
+                ends = [slant(sections[n][3], at[e], cut) for e, n in ((0, i), (1, j))]
+                band = FINE[0] * sum(ends) + TOUCHING
+                pair["gap_band_mm"] = round(band, 4)
             found.append(pair)
             if occt is not None:
                 seconds.append(
                     f"{cut.label} gap {a} | {b}: {occt:.4f} mm by OCCT's sections, {outline:.4f} "
-                    "by the mesh's outlines"
+                    f"by the mesh's outlines, which the chords allow to differ by {band:.4f} here"
                 )
-                if abs(occt - outline) > GAP_BAND:
+                if abs(occt - outline) > band:
                     problems.append(
                         f"{cut.label}: the gap {a} | {b} is {occt:.4f} mm by OCCT's sections and "
                         f"{outline:.4f} by the mesh's outlines"
@@ -743,4 +789,7 @@ def draw(
         seconds += more
         problems += wrong
         _mark_gaps(paint, pixel, found)
+        if found:
+            notes.append(f"{cut.label}: {IN_PLANE}")
+            paint.text((8, 24), "gaps in-plane: never less than 3D", fill=GAP_INK)
     return Drawn(np.asarray(picture), numbers, problems, seconds, notes, marks)
