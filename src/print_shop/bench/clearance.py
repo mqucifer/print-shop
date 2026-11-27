@@ -85,6 +85,9 @@ import numpy as np
 import shapely
 import trimesh
 from OCP.BRepExtrema import BRepExtrema_DistShapeShape
+from OCP.BRepGProp import BRepGProp
+from OCP.Extrema import Extrema_ExtFlag_MIN
+from OCP.GProp import GProp_GProps
 
 from . import pace, progress
 from . import placed as placed_module
@@ -415,7 +418,7 @@ def _occt_volumes(a: Part, b: Part, skip: bool, took: dict[str, float]) -> dict[
 
     def common() -> float:
         shared = a.shape.intersect(b.shape)
-        volume = float(shared.Volume())
+        volume = _volume(shared)
         if volume > VOLUME_FLOOR:
             box = shared.BoundingBox()
             found["common_box"] = [
@@ -426,7 +429,7 @@ def _occt_volumes(a: Part, b: Part, skip: bool, took: dict[str, float]) -> dict[
 
     measures: dict[str, Callable[[], float]] = {
         "common": common,
-        "cut": lambda: float(a.shape.Volume() - a.shape.cut(b.shape).Volume()),
+        "cut": lambda: _volume(a.shape) - _volume(a.shape.cut(b.shape)),
     }
     for name, measure in measures.items():
         clock = time.monotonic()
@@ -439,10 +442,38 @@ def _occt_volumes(a: Part, b: Part, skip: bool, took: dict[str, float]) -> dict[
     return found
 
 
+#: The relative precision OCCT's volumes are integrated to, adaptively. Its default fixed-order
+#: Gauss integration is off by about 1e-5 of the whole on B-spline faces, so `cut`, two large
+#: volumes subtracted, read a flat washer seated on a NURBS plate 0.41 to 1.61 mm³ under nothing,
+#: past the ±0.001 band; at 1e-9 it reads 0.000000, and a real overlap the same as `common`, in a
+#: few ms a body (mqucifer/print-shop#354).
+VOLUME_PRECISION = 1e-9
+
+
+def _volume(shape: Any) -> float:
+    """A shape's volume by OCCT, integrated adaptively to `VOLUME_PRECISION`."""
+    props = GProp_GProps()
+    BRepGProp.VolumeProperties_s(shape.wrapped, props, VOLUME_PRECISION)
+    return float(props.Mass())
+
+
+def _distance(one: Any, two: Any) -> BRepExtrema_DistShapeShape:
+    """OCCT's exact least distance between two shapes, its minimum alone, on the container's
+    CPUs: about half the time on curved faces, and bit for bit the same figure and points, run
+    after run, as one thread reading both extrema (mqucifer/print-shop#354)."""
+    distance = BRepExtrema_DistShapeShape()
+    distance.SetMultiThread(True)
+    distance.SetFlag(Extrema_ExtFlag_MIN)
+    distance.LoadS1(one)
+    distance.LoadS2(two)
+    distance.Perform()
+    return distance
+
+
 def _occt_distance(a: Part, b: Part) -> float | None:
     """OCCT's exact least distance between two solids: 0 where they meet, overlap, or one lies
     wholly inside the other (its inner solution); None where it doesn't finish."""
-    distance = BRepExtrema_DistShapeShape(a.shape.wrapped, b.shape.wrapped)
+    distance = _distance(a.shape.wrapped, b.shape.wrapped)
     return float(distance.Value()) if distance.IsDone() else None
 
 
@@ -764,7 +795,7 @@ def _facing_faces(part: Part, toward: np.ndarray) -> list[Any]:
 
 def _gap_of(a: Any, b: Any) -> tuple[float, np.ndarray, np.ndarray] | None:
     """OCCT's exact least distance between two shapes, and the points it's between."""
-    distance = BRepExtrema_DistShapeShape(a.wrapped, b.wrapped)
+    distance = _distance(a.wrapped, b.wrapped)
     if not distance.IsDone() or distance.NbSolution() < 1:
         return None
     ends = [distance.PointOnShape1(1), distance.PointOnShape2(1)]

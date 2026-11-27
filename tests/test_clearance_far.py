@@ -529,3 +529,70 @@ def test_a_reading_with_no_longer_limit_offered_stops_itself_before_its_own(work
     assert record["verdict"] == "NO ANSWER", text
     assert "it stopped itself before its 1 s limit, having read 1 of the 24 pairs" in text, text
     assert "--plan says the split and its time" in text
+
+
+# A flat washer seated on a plate of B-spline faces, as a CAD export gives them: OCCT's default
+# volumes, off by about 1e-5 of the plate, read its cut under nothing (mqucifer/print-shop#354).
+
+SEATED = """
+import cadquery as cq
+from OCP.BRepBuilderAPI import BRepBuilderAPI_NurbsConvert
+
+
+def nurbs(shape):
+    return cq.Shape.cast(BRepBuilderAPI_NurbsConvert(shape.wrapped, True).Shape())
+
+
+plate = (
+    cq.Workplane("XY").box(120, 120, 6, centered=(True, True, False))
+    .faces(">Z").workplane().pushPoints([(10, 0)]).hole(3.2).val()
+)
+washer = cq.Workplane("XY").circle(3.5).circle(1.6).extrude(0.5).translate((10, 0, 6)).val()
+cube = cq.Workplane("XY").box(1, 1, 1).translate((-20, 0, 6)).val()
+cq.exporters.export(nurbs(plate), "plate.step")
+cq.exporters.export(washer, "washer.step")
+cq.exporters.export(cube, "cube.step")
+"""
+
+
+def seated_entry(name: str, file: str) -> dict[str, Any]:
+    return {"name": name, "file": file, "layers": "z", "turn": [["z", 37.3]],
+            "at": [12.345678, -7.654321, 3.0]}  # fmt: skip
+
+
+@pytest.fixture(scope="module")
+def seated(tmp_path_factory: pytest.TempPathFactory) -> Path:
+    if host.image_id() is None:
+        pytest.fail(f"no image {host.IMAGE}: run `scripts/bench.py build` first")
+    found = tmp_path_factory.mktemp("seated")
+    (found / "parts.py").write_text(SEATED, encoding="utf-8")
+    made = host.run(["parts.py"], found, python=True)
+    assert made.returncode == 0, made.stdout + made.stderr
+    entries = [seated_entry(n, f"{n}.step") for n in ("plate", "washer", "cube")]
+    (found / "seated.json").write_text(json.dumps({"parts": entries}), encoding="utf-8")
+    return found
+
+
+@pytest.mark.bench
+def test_a_washer_seated_on_a_b_spline_plate_touches_and_a_buried_cube_still_interferes(
+    seated: Path,
+) -> None:
+    def ask_seated(*files: str) -> tuple[str, dict[str, Any]]:
+        done = host.run(["clearance", *files, "--placed", "seated.json"], seated)
+        saved = re.search(r"saved: (\S+)\.txt and \.json", done.stdout)
+        assert saved, f"nothing saved: {done.stdout}{done.stderr}"
+        return done.stdout, json.loads((seated / f"{saved.group(1)}.json").read_text())
+
+    text, record = ask_seated("plate.step", "washer.step")
+    assert record["verdict"] == "TOUCHING", text
+    [pair] = record["numbers"]["pairs"]
+    assert pair["overlap_occt_cut_mm3"] == pytest.approx(0.0, abs=1e-6), pair
+    assert pair["overlap_occt_common_mm3"] == pytest.approx(0.0, abs=1e-6)
+    assert pair["gap_occt_mm"] == pytest.approx(0.0, abs=1e-9)
+    assert abs(pair["overlap_mesh_mm3"]) <= pair["overlap_band_mm3"]
+    # Half of a 1 mm cube in the plate: every method finds the 0.5 mm³, the cut with the rest.
+    text, record = ask_seated("plate.step", "cube.step")
+    assert record["verdict"] == "INTERFERE", text
+    [pair] = record["numbers"]["pairs"]
+    assert pair["overlap_occt_cut_mm3"] == pytest.approx(0.5, abs=1e-5)
+    assert pair["overlap_occt_common_mm3"] == pytest.approx(pair["overlap_occt_cut_mm3"], abs=1e-6)
