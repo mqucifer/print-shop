@@ -402,8 +402,40 @@ def _frame_of(normal: np.ndarray) -> np.ndarray:
     return np.array([first, np.cross(third, first), third])
 
 
-#: A stiffness's Mandel entries along a layer's plane, (11, 22, 12), and across it, (33, 23, 13).
+#: A stiffness's Mandel entries along a layer's plane, (11, 22, 12), and across it, (33, 23, 13),
+#: in axes whose third is the layers' normal; and along a column's axis, (11), and across it,
+#: in axes whose first is its axis.
 _ALONG, _ACROSS = [0, 1, 5], [2, 3, 4]
+_AXIS, _AROUND = [0], [1, 2, 3, 4, 5]
+
+
+def _mixed(skin: np.ndarray, core: np.ndarray, share: float, turn: np.ndarray,
+           along: list[int], across: list[int]) -> np.ndarray:
+    """Skin and core mixed, `share` of it core, in axes `turn`: the strains `along` alike in
+    both and the stresses `across` the same in both, so those are averaged by share, exactly,
+    and turned back into a stiffness."""
+    mixed = np.zeros((6, 6))
+    for tensor, weight in ((skin, 1 - share), (core, share)):
+        m = _mandel(_turned(tensor, turn))
+        pp, pn = m[np.ix_(along, along)], m[np.ix_(along, across)]
+        np_, nn = m[np.ix_(across, along)], m[np.ix_(across, across)]
+        soft = np.linalg.inv(nn)
+        block = np.zeros((6, 6))
+        a = len(along)
+        block[:a, :a] = pp - pn @ soft @ np_
+        block[:a, a:] = pn @ soft
+        block[a:, :a] = -soft @ np_
+        block[a:, a:] = soft
+        mixed += weight * block
+    a = len(along)
+    first, second, third, fourth = mixed[:a, :a], mixed[:a, a:], mixed[a:, :a], mixed[a:, a:]
+    stiff = np.linalg.inv(fourth)
+    m = np.zeros((6, 6))
+    m[np.ix_(across, across)] = stiff
+    m[np.ix_(across, along)] = -stiff @ third
+    m[np.ix_(along, across)] = second @ stiff
+    m[np.ix_(along, along)] = first - second @ stiff @ third
+    return np.asarray(_turned(_tensor(m), turn.T))
 
 
 def laminate(skin: np.ndarray, core: np.ndarray, share: float, normal: np.ndarray) -> np.ndarray:
@@ -417,27 +449,22 @@ def laminate(skin: np.ndarray, core: np.ndarray, share: float, normal: np.ndarra
         return skin
     if share >= 1:
         return core
-    turn = _frame_of(np.asarray(normal, dtype=float))
-    mixed = np.zeros((6, 6))
-    for tensor, weight in ((skin, 1 - share), (core, share)):
-        m = _mandel(_turned(tensor, turn))
-        pp, pn = m[np.ix_(_ALONG, _ALONG)], m[np.ix_(_ALONG, _ACROSS)]
-        np_, nn = m[np.ix_(_ACROSS, _ALONG)], m[np.ix_(_ACROSS, _ACROSS)]
-        soft = np.linalg.inv(nn)
-        block = np.zeros((6, 6))
-        block[:3, :3] = pp - pn @ soft @ np_
-        block[:3, 3:] = pn @ soft
-        block[3:, :3] = -soft @ np_
-        block[3:, 3:] = soft
-        mixed += weight * block
-    a, b, c, d = mixed[:3, :3], mixed[:3, 3:], mixed[3:, :3], mixed[3:, 3:]
-    stiff = np.linalg.inv(d)
-    m = np.zeros((6, 6))
-    m[np.ix_(_ACROSS, _ACROSS)] = stiff
-    m[np.ix_(_ACROSS, _ALONG)] = -stiff @ c
-    m[np.ix_(_ALONG, _ACROSS)] = b @ stiff
-    m[np.ix_(_ALONG, _ALONG)] = a - b @ stiff @ c
-    return np.asarray(_turned(_tensor(m), turn.T))
+    return _mixed(skin, core, share, _frame_of(np.asarray(normal, dtype=float)), _ALONG,
+                  _ACROSS)  # fmt: skip
+
+
+def column(skin: np.ndarray, core: np.ndarray, share: float, axis: np.ndarray) -> np.ndarray:
+    """Skin and core side by side along `axis` and in series every way across it, `share` of
+    it core: where two bands meet along an edge, a long edge's walls and shells, both are
+    layered along the edge, so a strain along it is alike in both, exactly, as in a laminate
+    along it, and across it they're read as the weaker blend, Reuss's (mqucifer/print-shop
+    #363)."""
+    if share <= 0:
+        return skin
+    if share >= 1:
+        return core
+    turn = _frame_of(np.asarray(axis, dtype=float))[[2, 0, 1]]
+    return _mixed(skin, core, share, turn, _AXIS, _AROUND)
 
 
 #: How finely the ways across mixed elements' bands are told apart, in degrees: a laminate's
@@ -468,17 +495,28 @@ def way_groups(ways: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
 NEAREST = 16
 
 
+#: How far apart two faces' normals must be, in degrees, to be two faces meeting at an edge,
+#: and how far a third must lean along their edge to make a corner of three.
+EDGE_DEGREES = 30.0
+
+#: A mixed element's blend: a laminate across one face's normal, a column along the edge two
+#: faces share, or in series every way where three meet or none is found.
+LAMINATE, COLUMN, SERIES = 1, 2, 0
+
+
 def band_normals(read: Read, mixed: np.ndarray, centres: np.ndarray, faces: np.ndarray,
                  normals: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
-    """Each mixed element's way across its band, and whether its layering is clean
-    (mqucifer/print-shop#363). Its core points and its skin points are parted by the way that
-    best parts them, Fisher's, their mean apart over their spread; that's clean where it parts
-    every one, as in a band of walls or shells, and not where two bands meet at a corner or an
-    edge. The way is then the normal of whichever of the part's `NEAREST` nearest boundary
-    triangles, by their middles `faces` from the element's middle `centres`, lies most along
-    it: the nearest face's own, which Fisher's, from 64 points of a skinny element, misses by
-    some degrees. All in the part's own axes."""
+    """Each mixed element's blend and its way (mqucifer/print-shop#363), in the part's own axes.
+    Its core points and its skin points are parted by the way that best parts them, Fisher's,
+    their mean apart over their spread. Where that parts every one, as in a band of walls or
+    shells, it's a laminate across the normal of whichever of the part's `NEAREST` nearest
+    boundary triangles, by their middles `faces` from the element's middle `centres`, lies most
+    along it: the nearest face's own, which Fisher's, from 64 points of a skinny element,
+    misses by some degrees. Where it doesn't, two bands meet: along the edge their faces share,
+    the two nearby normals furthest apart, it's a column (`column`); where a third face leans
+    along that edge, or no second face is found, it's in series every way (`reuss`)."""
     ways = np.zeros((len(read.share), 3))
+    kinds = np.full(len(read.share), SERIES, dtype=int)
     clean = np.zeros(len(read.share), dtype=bool)
     for e in np.flatnonzero(mixed):
         points, core = read.points[e], read.core[e]
@@ -492,15 +530,32 @@ def band_normals(read: Read, mixed: np.ndarray, centres: np.ndarray, faces: np.n
         along = points @ way
         ways[e] = way
         clean[e] = bool(along[core].max() < along[~core].min())
-    chosen = np.flatnonzero(mixed & clean)
+    chosen = np.flatnonzero(mixed)
     count = min(NEAREST, len(faces))
+    apart_cos = math.cos(math.radians(EDGE_DEGREES))
+    lean_sin = math.sin(math.radians(EDGE_DEGREES))
     for start in range(0, len(chosen), 256):
         chunk = chosen[start : start + 256]
         apart = ((centres[chunk][:, None, :] - faces[None]) ** 2).sum(axis=2)
         near = np.argpartition(apart, count - 1, axis=1)[:, :count]
-        dots = np.abs(np.einsum("nk,nmk->nm", ways[chunk], normals[near]))
-        ways[chunk] = normals[near[np.arange(len(chunk)), dots.argmax(axis=1)]]
-    return ways, clean
+        nearby = normals[near]
+        dots = np.abs(np.einsum("nk,nmk->nm", ways[chunk], nearby))
+        first = nearby[np.arange(len(chunk)), dots.argmax(axis=1)]
+        for row, e in enumerate(chunk):
+            if clean[e]:
+                ways[e], kinds[e] = first[row], LAMINATE
+                continue
+            others = nearby[row]
+            cos = np.abs(others @ first[row])
+            if cos.min() > apart_cos:
+                continue
+            second = others[cos.argmin()]
+            edge = np.cross(first[row], second)
+            edge /= np.linalg.norm(edge)
+            if np.abs(others @ edge).max() > lean_sin:
+                continue
+            ways[e], kinds[e] = edge, COLUMN
+    return ways, kinds
 
 
 def boundary(corners: np.ndarray, numbers: np.ndarray) -> tuple[np.ndarray, np.ndarray]:

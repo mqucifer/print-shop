@@ -759,7 +759,7 @@ class _Model:
             steps[mine] = step_of
             mixed = (step_of > 0) & (step_of < classify.STEPS)
             faces, normals = classify.boundary(own, numbers[mine])
-            ways, clean = classify.band_normals(read, mixed, own.mean(axis=1), faces, normals)
+            ways, blend = classify.band_normals(read, mixed, own.mean(axis=1), faces, normals)
             way_bin, spread = classify.way_groups(ways)
             # Each way in the assembly's axes, where the part's stiffness is.
             assembly_ways = spread @ turn.T
@@ -772,21 +772,27 @@ class _Model:
                 for number in range(1, classify.STEPS + 1):
                     share = number / classify.STEPS
                     at_step = in_cell & (step_of == number)
-                    keys: list[tuple[int | None, np.ndarray]]
+                    keys: list[tuple[int, int, np.ndarray]]
                     if number == classify.STEPS:
-                        keys = [(None, at_step)]
+                        keys = [(classify.SERIES, -1, at_step)]
                     else:
-                        keys = [(None, at_step & ~clean)]
-                        keys += [(int(b), at_step & clean & (way_bin == b))
-                                 for b in np.unique(way_bin[at_step & clean])]
-                    for way, hit in keys:
+                        keys = [(classify.SERIES, -1, at_step & (blend == classify.SERIES))]
+                        for kind in (classify.LAMINATE, classify.COLUMN):
+                            of = at_step & (blend == kind)
+                            keys += [(kind, int(b), of & (way_bin == b))
+                                     for b in np.unique(way_bin[of])]
+                    for kind, way, hit in keys:
                         if not hit.any():
                             continue
                         kinds[mine[hit]] = len(groups)
                         groups.append((number, part.name, cell, figures))
-                        tensors.append(classify.reuss(skin, core, share) if way is None else
-                                       classify.laminate(skin, core, share,
-                                                         assembly_ways[way]))  # fmt: skip
+                        if kind == classify.LAMINATE:
+                            tensor = classify.laminate(skin, core, share, assembly_ways[way])
+                        elif kind == classify.COLUMN:
+                            tensor = classify.column(skin, core, share, assembly_ways[way])
+                        else:
+                            tensor = classify.reuss(skin, core, share)
+                        tensors.append(tensor)
             edges = own[:, 1:] - own[:, :1]
             volume = np.abs(np.einsum("ni,ni->n", np.cross(edges[:, 0], edges[:, 1]),
                                       edges[:, 2])) / 6  # fmt: skip
@@ -807,8 +813,10 @@ class _Model:
                     "elements": int(in_cell.sum()),
                     "skin_elements": int((in_cell & (step_of == 0)).sum()),
                     "core_elements": int((in_cell & (step_of == classify.STEPS)).sum()),
-                    "laminate_elements": int((in_cell & mixed & clean).sum()),
-                    "corner_elements": int((in_cell & mixed & ~clean).sum()),
+                    "laminate_elements": int((in_cell & mixed
+                                              & (blend == classify.LAMINATE)).sum()),
+                    "column_elements": int((in_cell & mixed & (blend == classify.COLUMN)).sum()),
+                    "series_elements": int((in_cell & mixed & (blend == classify.SERIES)).sum()),
                     "layers_unread": bands.unread,
                     "bands": bands.bands,
                     "band_mm": classify.band_for(self.size_near()),
@@ -3238,8 +3246,10 @@ def _as_printed(assembly: Assembly, report: Report, printed: dict[str, list[dict
                 + ("" if cell["core_mm3"] > 0 else ": its walls and shells fill it, so it's solid")
                 + f"; its mesh read element by element as Orca's layers lay it: "
                 f"{cell['skin_elements']} all skin, {cell['core_elements']} all core, "
-                f"{cell['laminate_elements']} a laminate of the two along the nearest face and "
-                f"{cell['corner_elements']} in series where two bands meet; held to Orca's "
+                f"{cell['laminate_elements']} a laminate of the two along the nearest face, "
+                f"{cell['column_elements']} side by side along an edge where two bands meet "
+                f"and in series across it, and {cell['series_elements']} in series every way "
+                f"where three meet; held to Orca's "
                 f"layers' core in {cell['bands']} bands {cell['band_mm']:g} mm thick, short by "
                 f"{cell['band_short_pct']:.1f}% of a band at most, within "
                 f"{100 * as_printed.SHORT:.0f}%, and over by {cell['band_over_pct']:.1f}%, "
