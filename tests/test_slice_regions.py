@@ -110,6 +110,16 @@ def test_laid_as_the_file_lies_the_angle_is_the_plates() -> None:
     assert pose.plate_angle(30.0) == pytest.approx(30.0)
 
 
+def test_the_way_up_is_the_layers_axis_with_the_sign_the_pose_gives_it() -> None:
+    """Laid as the file lies, own +z is up; turned over about x, own -z is: its top shells are
+    then on its own -z faces, which `load` reads (mqucifer/print-shop#337)."""
+    box = trimesh.creation.box((10, 20, 30))
+    assert Pose.of(box, AXIS_ALIGNED[0]).up() == "+z"
+    assert Pose.of(box, (180.0, 0.0, 0.0)).up() == "-z"
+    assert Pose.of(box, (90.0, 0.0, 0.0)).up() == "+y"
+    assert Pose.of(box, (-90.0, 0.0, 0.0)).up() == "-y"
+
+
 def test_stood_on_its_side_the_layers_run_along_another_own_axis() -> None:
     """Turned 90 degrees about x, own +y is up: the layers are along y, and the angle runs from
     own +z toward +x. Own +z lies along the plate's -y."""
@@ -603,7 +613,7 @@ def test_the_part_goes_to_load_whole(sliced: RegionsSlice) -> None:
     assert whole.settings.missing() == []
     assert whole.settings == Settings(walls=2, line_width=0.45, top=5, bottom=3, infill=15.0,
                                       pattern="rectilinear", infill_angle=45.0,
-                                      layer_height=0.2)
+                                      layer_height=0.2, up="+z")
     assert [r.name for r in whole.regions] == ["dense", "ring", "lid", "band"]
 
 
