@@ -4,7 +4,7 @@ mesh's elements inside out, on an assembly of one's own (mqucifer/print-shop#356
 
 Run from the folder the assembly is in:
 
-    uv run python <print-shop>/scripts/as_printed_probe.py ASSEMBLY.json [--mesh MM]
+    uv run python <print-shop>/scripts/as_printed_probe.py ASSEMBLY.json [--mesh MM] [--thin]
 
 `--mesh` is the mesh the run gave `load`, or `load`'s own where it gave none. It runs in the
 bench's second image under `load`'s limits. For each part the assembly gives a `print`, in its
@@ -26,6 +26,14 @@ it, its elements' sides curved and straight, and how many of its elements are tu
 at any of CalculiX's four integration points, as CalculiX would find them, with the kinds of the
 faces nearest the first and whether each is narrow and is where a skin meets its core.
 
+With `--thin` (mqucifer/print-shop#363), it says instead, for each printed part, where its core
+is too thin for Orca's sparse infill: the core as it's cut now, or the copies mitred where that's
+refused, and its slivers; how many of its layers, every 0.5 mm, have a gap where the area inside
+its walls, opened as Orca opens it (`PerimeterGenerator.cpp:1658-1663`) or by a bead's width,
+leaves no infill, how many regions, and whether they stay the same from layer to layer; and for
+each sliver, whether it lies in such a gap or in an island of infill under 15 mm², which Orca's
+`minimum_sparse_infill_area` fills solid.
+
 It prints only counts, kinds of face, verdicts and seconds: each part by its number, never its
 name, and no figure of any shape or place. Nothing is written but gmsh's own files in the
 container's /tmp.
@@ -38,6 +46,7 @@ import subprocess
 import sys
 import uuid
 from pathlib import Path
+from typing import Any
 
 from print_shop.bench import host
 
@@ -45,10 +54,13 @@ from print_shop.bench import host
 WHOLE_LIMIT = 2 * host.TWO_PASSES
 
 
-def inner(assembly_file: str, mesh: float | None) -> None:  # pragma: no cover
+def inner(  # pragma: no cover
+    assembly_file: str, mesh: float | None, thin_only: bool = False
+) -> None:
     """Inside the container: each stage said as it starts, then its counts and verdicts."""
     import collections
     import dataclasses
+    import math
     import time
     import types
     from pathlib import Path
@@ -291,6 +303,127 @@ def inner(assembly_file: str, mesh: float | None) -> None:  # pragma: no cover
                     print("    merged: " + ("none left" if merged is not None else
                                             "some left"), flush=True)  # fmt: skip
 
+    def thinness(k: int, own: Any, layers: int, settings: Any) -> None:
+        """Where the core is too thin for Orca's sparse infill, layer by layer, and whether the
+        slivers the cut leaves lie there (mqucifer/print-shop#363)."""
+        bead = float(settings.line_width or 0)
+        height = float(settings.layer_height or 0)
+        walls = as_printed.wall_thickness(int(settings.walls or 0), bead, height)
+        top = float(settings.top or 0) * height
+        bottom = float(settings.bottom or 0) * height
+        up = -1.0 if (settings.up or "+")[0] == "-" else 1.0
+        spacing = bead - height * (1 - math.pi / 4)
+        # Orca's PerimeterGenerator.cpp:1658-1663: the area inside the last wall opened by half
+        # of min_perimeter_infill_spacing, 0.6 of the solid infill's spacing; and a bead's.
+        radii = {"Orca's": 0.6 * spacing / 2, "a bead's": bead / 2}
+        stage(f"part {k}: its core as cut now, or the copies mitred where that's refused")
+        try:
+            core = as_printed.cut_core(own, layers, walls, top, bottom, up, bead, f"part{k}").core
+            how = "the cut holds"
+        except Exception as exc:  # noqa: BLE001
+            how = f"refused ({type(exc).__name__}); the copies mitred instead"
+            inside = as_printed.eroded_in_plane(own, layers, walls)
+            prisms, _ = as_printed.mitres(own, layers, walls)
+            if prisms and inside is not None:
+                inside = as_printed._one(as_printed._solids(inside.cut(Part.makeCompound(prisms))))
+            shelled = as_printed.eroded_along(own, layers, top, bottom, up)
+            core = None
+            if inside is not None and shelled is not None:
+                core = as_printed._one(as_printed._solids(
+                    inside.removeSplitter().common(shelled)))
+        found = as_printed.slivers(core, bead) if core is not None else []
+        print(f"  {how}; slivers {len(found)}", flush=True)
+
+        def layer(at: float) -> tuple[list[Any], list[Any]]:
+            """The area inside the walls at `at`, and the part of it its shells leave."""
+            section = as_printed._section(own, layers, at)
+            if section is None:
+                return [], []
+            inner = []
+            for face in section.Faces:
+                try:
+                    inner += [f for f in face.makeOffset2D(-walls, 0, False, False, False).Faces
+                              if f.Area > 1e-9]
+                except Exception:  # noqa: BLE001 - nothing left of a face thinner than its walls
+                    continue
+            sparse = list(inner)
+            for along in (top * up, -bottom * up):
+                other = as_printed._section(own, layers, at + along)
+                if other is None:
+                    return inner, []
+                moved = as_printed._moved_to(other, layers, at)
+                sparse = [f for g in sparse for f in g.common(moved).Faces if f.Area > 1e-9]
+            return inner, sparse
+
+        def opened(faces: list[Any], radius: float) -> list[Any]:
+            kept = []
+            for face in faces:
+                try:
+                    smaller = face.makeOffset2D(-radius, 0, False, False, False)
+                    kept += [f for f in smaller.makeOffset2D(radius, 0, False, False, False).Faces
+                             if f.Area > 1e-9]
+                except Exception:  # noqa: BLE001 - all of it narrower than twice the radius
+                    continue
+            return kept
+
+        stage(f"part {k}: each layer's core opened as Orca opens it, every 0.5 mm")
+        low, high = as_printed._span(own, layers)
+        grid = [low + 0.25 + 0.5 * i for i in range(int((high - low) / 0.5))]
+        for name, radius in radii.items():
+            with_gaps, regions, stable, moving = 0, 0, 0, 0
+            last = None
+            for at in grid:
+                inner, _ = layer(at)
+                gap = []
+                kept = opened(inner, radius)
+                for face in inner:
+                    rest = face.cut(Part.makeCompound(kept)) if kept else face
+                    # Not the corners any opening rounds, a fifth of its radius squared each.
+                    gap += [f for f in rest.Faces if f.Area > radius**2]
+                if gap:
+                    with_gaps += 1
+                    regions += len(gap)
+                    here = Part.makeCompound(gap)
+                    if last is not None:
+                        before = as_printed._moved_to(last, layers, at)
+                        apart = here.cut(before).Area + before.cut(here).Area
+                        if apart < 0.1 * max(here.Area, 1e-9):
+                            stable += 1
+                        else:
+                            moving += 1
+                    last = here
+                else:
+                    last = None
+            print(f"  {name} opening: {with_gaps} of {len(grid)} layers have a gap, "
+                  f"{regions} gap region(s) in all; from layer to layer {stable} the same and "
+                  f"{moving} moved", flush=True)
+
+        stage(f"part {k}: where its slivers lie")
+        counted: collections.Counter[str] = collections.Counter()
+        for face in found:
+            centre = face.CenterOfMass
+            normal = face.normalAt(*face.Surface.parameter(centre))
+            point = centre - normal * 0.02
+            at = (point.x, point.y, point.z)[layers]
+            inner, sparse = layer(at)
+            here = Part.Vertex(point)
+
+            def holds(faces: list[Any], here: Any = here) -> bool:
+                return any(f.distToShape(here)[0] < 1e-3 for f in faces)
+
+            verdict = []
+            if not holds(inner):
+                verdict.append("outside the walls' own")
+            for name, radius in radii.items():
+                if holds(sparse) and not holds(opened(sparse, radius)):
+                    verdict.append(f"in a gap by {name} opening")
+            islands = [f for f in opened(sparse, radii["Orca's"]) if f.distToShape(here)[0] < 1e-3]
+            if islands and all(f.Area < 15.0 for f in islands):
+                verdict.append("in an island under 15 mm²")
+            counted["; ".join(verdict) or "in sparse infill, by any of those"] += 1
+        for words, n in counted.most_common():
+            print(f"    {n} sliver(s): {words}", flush=True)
+
     printed = [(k, part) for k, part in enumerate(made.parts, 1) if part.printed is not None]
     if not printed:
         print("verdict: no part has a `print`: load reads them all solid", flush=True)
@@ -305,6 +438,11 @@ def inner(assembly_file: str, mesh: float | None) -> None:  # pragma: no cover
         bead = float(settings.line_width or 0)
         faces_said("the part", own, bead)
         edges_said(own)
+    if thin_only:
+        for k, part in printed:
+            if not part.printed.settings.missing():
+                thinness(k, owns[k], load.AXES.index(part.layers), part.printed.settings)
+        return
     for k, part in printed:
         settings = part.printed.settings
         if settings.missing():
@@ -414,19 +552,22 @@ def inner(assembly_file: str, mesh: float | None) -> None:  # pragma: no cover
 
 def main(argv: list[str]) -> int:
     words = list(argv)
+    thin = "--thin" in words
+    if thin:
+        words.remove("--thin")
     mesh = None
     if "--mesh" in words:
         k = words.index("--mesh")
         mesh = float(words[k + 1])
         del words[k : k + 2]
     if len(words) != 1 or not words[0].endswith(".json"):
-        print("give the assembly: as_printed_probe.py ASSEMBLY.json [--mesh MM]")
+        print("give the assembly: as_printed_probe.py ASSEMBLY.json [--mesh MM] [--thin]")
         return 2
     if host.image_id(host.CAE_IMAGE) is None:
         print(host.missing(host.CAE_IMAGE))
         return 3
     code = "import sys\nfrom typing import Any\n" + inspect.getsource(inner)
-    code += f"\ninner({words[0]!r}, {mesh!r})\n"
+    code += f"\ninner({words[0]!r}, {mesh!r}, {thin!r})\n"
     name = f"print-bench-{uuid.uuid4().hex[:12]}"
     argv_ = host.container(
         Path.cwd(), [host.CAE_PYTHON, "-I", "-c", code], name, image=host.CAE_IMAGE,
