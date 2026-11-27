@@ -8,7 +8,10 @@ walls as built against what `load` reads. Nothing in it was printed or armed.
 
 from __future__ import annotations
 
+import contextlib
 import math
+import os
+from pathlib import Path
 from typing import Any
 
 from print_shop.study.loop import StudyResult, front, reading_said
@@ -63,8 +66,24 @@ def _escape(text: str) -> str:
     return text.replace("|", "/").replace("\n", " ")
 
 
-def table(result: StudyResult, part: str, cases: list[str]) -> str:
-    """The study as Markdown, for the gate."""
+def _project(r: Reading, where: Path | None) -> str:
+    """A link to the candidate's Orca project, `candidates/NAME/regions.3mf` (or `part.3mf`
+    where it has no regions), from the folder `study.md` is in: the Sponsor opens it in Orca to
+    see its modifiers and settings by eye (mqucifer/print-shop#357)."""
+    project = r.sliced.project if r.sliced is not None else None
+    if project is None:
+        return "-"
+    path = Path(project)
+    if where is not None:
+        # Another drive's path stays whole.
+        with contextlib.suppress(ValueError):
+            path = Path(os.path.relpath(path, where))
+    return f"[{path.name}](<{path.as_posix()}>)"
+
+
+def table(result: StudyResult, part: str, cases: list[str], where: Path | None = None) -> str:
+    """The study as Markdown, for the gate, its links to each candidate's Orca project from
+    `where`, the folder it's written in."""
     base = result.defaults
     rows = result.readings
     out = [f"# Settings study: {part}", "",
@@ -76,17 +95,23 @@ def table(result: StudyResult, part: str, cases: list[str]) -> str:
            "which no print has checked yet (mqucifer/print-shop#340); * is a figure whose core, "
            "or the core its skin rests on, is below the density any published test of its "
            "pattern reaches, so no test checks it.", "",
-           "| Candidate | Settings | Time | Grams | " + " | ".join(cases) + " | Passes |",
-           "|---|---|---|---|" + "---|" * len(cases) + "---|"]
+           "Each candidate's Orca project, its regions as Orca's own modifiers, is linked in its "
+           "row: open it in Orca to see them and its settings by eye.", "",
+           "| Candidate | Settings | Time | Grams | " + " | ".join(cases)
+           + " | Passes | Orca project |",
+           "|---|---|---|---|" + "---|" * len(cases) + "---|---|"]
     for r in rows:
         passes = "yes" if r.passes else "no"
         out.append(f"| {r.candidate.name} | {_escape(r.candidate.said())} | "
                    f"{_cell_time(r, base)} | {_cell_grams(r, base)} | "
-                   + " | ".join(_cell_case(r, c) for c in cases) + f" | {passes} |")
+                   + " | ".join(_cell_case(r, c) for c in cases)
+                   + f" | {passes} | {_project(r, where)} |")
     out.append("")
     chosen = result.recommendation
     if chosen is not None:
         out.append(f"**Recommended: {chosen.candidate.name}**, {chosen.candidate.said()}.")
+        out.append("")
+        out.append(f"Its Orca project: {_project(chosen, where)}.")
         out.append("")
         out.append(f"Why: {result.reason}")
         out.append("")
