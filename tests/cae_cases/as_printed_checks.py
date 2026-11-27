@@ -5,7 +5,8 @@ and whether `as_printed.cells` takes it or refuses it. Prints one JSON object.
 - `fin`: a block 10 x 10 x 40 and a fin 1.0 thick beside it, joined by a base 2 tall under its
   layers' lowest checked plane, at 2 walls: each layer's core is the block's alone, as the fin
   is thinner than its walls. Its layer at z 20, as Orca slices it; with the cut empty, as an
-  offset that left nothing would be; and with only the 16 copies.
+  offset that left nothing would be; with only the 16 copies, whose core meets the base's top
+  where the block stands on it; and as it's cut, by its slabs.
 - `shifted`: a bar's core moved 0.5 mm across, its area each layer the same.
 - `short` and `over`: a bar's core cut 4% of its walls further in, and 4% less far.
 - `ledge`: a bar with a ledge at z 6, its core missing a slab 0.8 tall round the ledge's height,
@@ -76,9 +77,9 @@ def main() -> None:
     found["fin"] = {
         "layer_mm2": area,
         "true_mm2": (10 - 2 * WALLS) ** 2,
-        "empty": read(fin, slabs_in_plane=nothing, offset_in_plane=nothing,
-                      eroded_in_plane=nothing),
-        "copies": read(fin, slabs_in_plane=failed, offset_in_plane=failed),
+        "empty": read(fin, slab_core=nothing, offset_in_plane=nothing, eroded_in_plane=nothing),
+        "copies": read(fin, slab_core=failed, offset_in_plane=failed),
+        "read": read(fin),
     }
     bar = box((0, 0, 0), (60, 20, 14))
     right = as_printed.offset_in_plane
@@ -91,25 +92,32 @@ def main() -> None:
             return right(shape, layers, by * share)
         return cut
 
-    def as_slabs(cut: Any) -> Any:
-        """A wrong cut as the slabs give it, which take the walls in, not out, by a positive
-        distance."""
-        return lambda shape, layers, by: cut(shape, layers, -by)
+    slabs = as_printed.slab_core
+
+    def slabs_moved(part: Any, layers: int, walls: float, *rest: Any) -> Any:
+        return slabs(part, layers, walls, *rest).translated(App.Vector(0, 0.5, 0))
+
+    def slabs_further(share: float) -> Any:
+        def cut(part: Any, layers: int, walls: float, top: float, bottom: float, up: float,
+                margin: float) -> Any:
+            return slabs(part, layers, walls * share, top, bottom, up, margin * share)
+        return cut
 
     # Each wrong cut given as the first way a bar's tried, its slabs (mqucifer/print-shop#363),
     # and as the offset after it.
-    found["shifted"] = read(bar, slabs_in_plane=as_slabs(moved), offset_in_plane=moved)
-    found["short"] = read(bar, slabs_in_plane=as_slabs(further(1.04)),
-                          offset_in_plane=further(1.04))
-    found["over"] = read(bar, slabs_in_plane=as_slabs(further(0.96)),
-                         offset_in_plane=further(0.96))
+    found["shifted"] = read(bar, slab_core=slabs_moved, offset_in_plane=moved)
+    found["short"] = read(bar, slab_core=slabs_further(1.04), offset_in_plane=further(1.04))
+    found["over"] = read(bar, slab_core=slabs_further(0.96), offset_in_plane=further(0.96))
     ledge = box((0, 0, 0), (60, 20, 6)).fuse(box((0, 0, 0), (30, 20, 14))).removeSplitter()
+    slab = box((-1, -1, 5.6), (61, 21, 6.4))
 
     def slab_missing(shape: Any, layers: int, by: float) -> Any:
-        return right(shape, layers, by).cut(box((-1, -1, 5.6), (61, 21, 6.4)))
+        return right(shape, layers, by).cut(slab)
 
-    found["ledge"] = read(ledge, slabs_in_plane=as_slabs(slab_missing),
-                          offset_in_plane=slab_missing)
+    def slabs_missing(*given: Any) -> Any:
+        return slabs(*given).cut(slab)
+
+    found["ledge"] = read(ledge, slab_core=slabs_missing, offset_in_plane=slab_missing)
     calls = [0]
     layer_core = as_printed.layer_core
 

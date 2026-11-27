@@ -73,6 +73,9 @@ them; and the leg bowing along its layers with a notch 6 x 4 in its flat side.
 `load/web*` (mqucifer/print-shop#363): two round bosses 12 across and 20 tall, 40 apart, joined
 by a web 1.75 thick, and 2.0 thick.
 
+`load/tile*` (mqucifer/print-shop#363): a plate 60 x 60 x 8 with four counterbored holes, a
+pocket in its top and a boss in the pocket against its wall.
+
 `capped/` (mqucifer/print-shop#346): a top 40 x 40 and 6 thick with a counterbore 10 across and
 2 deep at its middle, and a cap 2 tall standing on the counterbore's floor with play round it,
 turned 15° about its axis so its seam isn't the counterbore's: 0.15 mm of play, a fit's, and
@@ -1258,6 +1261,30 @@ def webbed() -> None:
             assembly(out / f"{kind}{name}.json", [row], held=[{"plane": "z=0", "how": "fixed"}])
 
 
+#: The tile (mqucifer/print-shop#363): a plate 60 x 60 and 8 thick, four holes 5.5 across
+#: through it, each counterbored 10 across and 3 deep, a pocket 20 x 10 and 4 deep in its top,
+#: and a boss 6 across standing in the pocket against its wall: every face upright to its
+#: layers or flat in their plane, planes and cylinders, as a real tile's.
+TILE_SIDE, TILE_T, TILE_HOLE_R, TILE_BORE_R, TILE_BORE_DEEP = 60.0, 8.0, 2.75, 5.0, 3.0
+
+
+def tile() -> None:
+    """The tile (mqucifer/print-shop#363), printed and solid, held on its bed face and pushed
+    down on its top by a corner."""
+    out = Path("load")
+    shape = box((0, 0, 0), (TILE_SIDE, TILE_SIDE, TILE_T))
+    for x, y in ((10, 10), (50, 10), (10, 50), (50, 50)):
+        shape = shape.cut(Part.makeCylinder(TILE_HOLE_R, TILE_T + 2, App.Vector(x, y, -1)))
+        shape = shape.cut(Part.makeCylinder(TILE_BORE_R, TILE_BORE_DEEP + 1,
+                                            App.Vector(x, y, TILE_T - TILE_BORE_DEEP)))  # fmt: skip
+    shape = shape.cut(box((20, 25, TILE_T - 4), (40, 35, TILE_T + 1)))
+    shape = shape.fuse(Part.makeCylinder(3, 4, App.Vector(30, 25, TILE_T - 4))).removeSplitter()
+    save(shape, out / "tile.step")
+    for kind, extra in (("", {}), ("printed-", {"print": {**PRINT, "walls": 2, "infill": 20}})):
+        row = {"name": "tile", "file": "tile.step", "layers": "z", **extra}
+        assembly(out / f"{kind}tile.json", [row], held=[{"plane": "z=0", "how": "fixed"}])
+
+
 #: The capped top (mqucifer/print-shop#346): its side and thickness, the counterbore's radius
 #: and depth, and the cap's play round it, a fit's and a hair's, and its turn, in mm and degrees.
 CAPPED_SIDE, CAPPED_T, CAPPED_BORE_R, CAPPED_DEEP = 40.0, 6.0, 5.0, 2.0
@@ -1296,6 +1323,7 @@ def main() -> None:
     printed()
     bowed()
     webbed()
+    tile()
     throughs()
     peaks()
     shears()

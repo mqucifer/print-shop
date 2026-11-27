@@ -29,6 +29,17 @@ its shells are no thinner than a third of them; and so does the mitre, a square 
 disc at a concave corner, 21% of the walls' square at a right angle. The 16 copies err the
 other way, a wall between two of them read at least cos(11.25°), 98%, as thick as it is.
 
+**A stack of prisms** (mqucifer/print-shop#363). A part whose every face is upright to its
+layers or flat in their plane, as a tile of holes, counterbores and pockets is, is cut exactly
+as its layers have it (`slab_core`), tried first: between each two of its flat faces' levels,
+and those moved its shells along its layers, its section offset in by its walls in 2D, less
+what its shells take, grown its walls' width across the layer, as Orca grows a top or bottom
+face's solid into the infill beside it (`MARGIN`). Stretched for OCCT's offset, such a part's
+cylinders are B-spline and the offset fails; and without the margin, where a flat face meets an
+upright one, a counterbore's floor its bore or a boss its pocket's floor, the core ran up to
+the part's own edge there and its skin was two pieces meeting on a line, which any cut is
+refused for now (`_touches`).
+
 **Too thin for infill** (mqucifer/print-shop#363). Orca opens the area inside the walls before
 it lays sparse infill, by half of 0.6 of a solid infill line's spacing (`open_radius`), so it
 lays none where that area is narrower than about 0.24 mm: the walls and gap fill make it solid.
@@ -116,6 +127,18 @@ READ_SHARE, READ_LEAST = 0.8, 3
 #: no infill is laid, and the walls and gap fill make it solid (mqucifer/print-shop#363). Read
 #: at the walls' own line width, as `load` is given no other.
 OPEN_SHARE = 0.6
+#: How far a top or bottom face's solid shells are grown across its layer into the sparse infill
+#: beside them, for a part cut as slabs (`slab_core`, mqucifer/print-shop#363), as a share of its
+#: walls' thickness: all of it. Orca grows them, in `LayerRegion.cpp`'s `process_external_surfaces`
+#: on its main, by about a wall line's spacing into the sparse zone (`expansion_min`) and by
+#: "shell_width * sqrt(2.)" into the shells' own (`expansion_top`), 0.41 and 1.47 mm at 2 walls of
+#: 0.45 mm lines and 0.2 mm layers; the walls', 0.81, lie between, and line the core up under a
+#: flat face's edge with its walls above it, so no step of the core there is narrower than a bead.
+#: It keeps the core off the line where a flat face meets an upright one, a counterbore's floor its
+#: bore, or a boss its pocket's floor: without it the skin there is two pieces meeting on a line.
+#: At 4 walls it's past Orca's, and the core a little small there, the part read a little stronger
+#: than printed.
+MARGIN = 1.0
 #: How far apart the layers' planes thin gaps are sought at, in mm (`thin_runs`), how many in a
 #: row must have the same gap for it to be cut out of the core, and how far one may be from the
 #: next, as a share of its area, and still be the same.
@@ -340,7 +363,7 @@ def _polygonal(face: Any) -> Any:
     return Part.makeFace(wires, "Part::FaceMakerBullseye").Faces[0]
 
 
-def _offset_2d(face: Any, by: float, layers: int) -> list[Any]:
+def _offset_2d(face: Any, by: float, layers: int, join: int = 0) -> list[Any]:
     """A face in a layer's plane grown by `by`, or with `by` under naught shrunk, as faces:
     OCCT's 2D offset, rounded at its corners; where that fails, OCCT's 2D offset of the face's
     polygon (`_polygonal`); and where that fails too and it's shrunk, its common with
@@ -357,7 +380,7 @@ def _offset_2d(face: Any, by: float, layers: int) -> list[Any]:
     for shape in (face, None):
         try:
             given = face if shape is not None else _polygonal(face)
-            made = given.makeOffset2D(by, 0, False, False, False)
+            made = given.makeOffset2D(by, join, False, False, join != 0)
             return [f for f in made.Faces if f.Area > 1e-9]
         except Exception:  # noqa: BLE001 - OCCT raises for a face it can't offset, or that's gone
             continue
@@ -420,15 +443,48 @@ def opened(faces: list[Any], radius: float, layers: int) -> list[Any]:
     return kept
 
 
+def _exposed(
+    part: Any, layers: int, at: float, top: float, bottom: float, up: float, margin: float
+) -> list[Any]:
+    """What of the part's section at `at` its top shells or its bottom shells take, as Orca
+    reads a layer: what of it isn't there `top` above, or `bottom` below; grown `margin` across
+    the layer, its corners rounded as the walls' are, as Orca grows a top or bottom face's solid
+    into the sparse infill beside it (`MARGIN`). As faces in the plane at `at`.
+
+    Raises:
+        _Unread: Where a face can't be grown.
+    """
+    import Part
+
+    own = _section(part, layers, at)
+    if own is None:
+        return []
+    exposed = []
+    for along in (top * up, -bottom * up):
+        if along == 0:
+            continue
+        other = _section(part, layers, at + along)
+        rest = own if other is None else own.cut(_moved_to(other, layers, at))
+        exposed += [f for f in rest.Faces if f.Area > 1e-9]
+    if not exposed:
+        return []
+    joined = exposed[0].fuse(exposed[1:]).removeSplitter() if len(exposed) > 1 else exposed[0]
+    grown = ([g for f in joined.Faces for g in _offset_2d(f, margin, layers)] if margin
+             else list(joined.Faces))  # fmt: skip
+    return [Part.makeCompound(grown)] if grown else []
+
+
 def layer_core(
     part: Any, layers: int, at: float, walls: float, top: float, bottom: float, up: float,
-    open_by: float = 0.0,
+    open_by: float = 0.0, margin: float = 0.0,
 ) -> tuple[Any | None, float] | None:
     """The core's section at `at` along its layers as Orca slices it: the area inside its
     walls (`_inside_walls`), opened by `open_by` as Orca opens it before it lays sparse infill
     (`opened`, mqucifer/print-shop#363), and cut by the part's sections `top` above and
-    `bottom` below it, which its shells need. Its faces, or None where nothing's left, and its
-    outline's length, the part's section's, in mm. None where the part has no section there.
+    `bottom` below it, which its shells need; with `margin`, what its shells take grown that
+    far across the layer, as Orca grows them (`_exposed`). Its faces, or None where nothing's
+    left, and its outline's length, the part's section's, in mm. None where the part has no
+    section there.
 
     Raises:
         _Unread: Where OCCT can't offset a face that isn't thinner than its walls.
@@ -440,6 +496,11 @@ def layer_core(
         return None
     inner = opened(inner, open_by, layers)
     left = Part.makeCompound(inner) if inner else None
+    if margin > 0 and left is not None:
+        # The shells' own, grown across the layer as Orca grows them (`_exposed`).
+        for taken in _exposed(part, layers, at, top, bottom, up, margin):
+            left = left.cut(taken)
+        return (left if left.Area > 1e-9 else None), outline
     for along in (top * up, -bottom * up):
         if along == 0 or left is None:
             continue
@@ -515,7 +576,7 @@ class Check:
 
 def checked(
     part: Any, core: Any | None, layers: int, walls: float, top: float, bottom: float,
-    up: float, open_by: float = 0.0,
+    up: float, open_by: float = 0.0, margin: float = 0.0,
 ) -> Check:
     """The cut held to the core each layer has as Orca slices it (`layer_core`), at each of
     `heights`: the area of the layer's core the cut's doesn't have, and of the cut's the
@@ -524,7 +585,7 @@ def checked(
     short = over = 0.0
     for at in heights(part, layers):
         try:
-            want = layer_core(part, layers, at, walls, top, bottom, up, open_by)
+            want = layer_core(part, layers, at, walls, top, bottom, up, open_by, margin)
         except Exception:  # noqa: BLE001 - a plane OCCT can't section or offset isn't read
             planes += 1
             continue
@@ -720,31 +781,42 @@ def _levels(part: Any, layers: int) -> list[float] | None:
     return sorted(levels)
 
 
-def slabs_in_plane(part: Any, layers: int, by: float) -> Any | None:
-    """What of a part whose every face is upright to its layers or flat in their plane
-    (`_levels`) is at least `by` from its outline in its own layer's plane, exactly: between
-    each two of its flat faces' levels its section is the same, so it's that section offset in
-    by `by` in its plane (`_offset_2d`) and run between them, the slabs fused
-    (mqucifer/print-shop#363). Its steps are at the part's own flat faces' levels, where the part
-    steps. None where nothing's left, or the part isn't such a stack.
+def slab_core(
+    part: Any, layers: int, walls: float, top: float, bottom: float, up: float, margin: float
+) -> Any | None:
+    """The core of a part whose every face is upright to its layers or flat in their plane
+    (`_levels`), exactly as Orca's layers have it (mqucifer/print-shop#363): between each two
+    of its flat faces' levels, and those levels moved its shells along its layers, where what
+    its shells take changes, the area inside its walls (`_inside_walls`) less what its shells
+    take, grown `margin` across the layer as Orca grows them (`_exposed`), run between them,
+    the slabs fused. None where nothing's left, or the part isn't such a stack.
 
     Raises:
         _Unread: Where a slab's section can't be offset.
     """
+    import Part
 
     levels = _levels(part, layers)
     if levels is None:
         return None
+    low, high = _span(part, layers)
+    cuts = {round(h, 9) for level in levels for h in (level, level - top * up, level + bottom * up)
+            if low - 1e-9 <= h <= high + 1e-9}  # fmt: skip
+    bounds = sorted(cuts)
     prisms = []
-    for low, high in zip(levels, levels[1:], strict=False):
-        if high - low < 1e-6:
+    for first, last in zip(bounds, bounds[1:], strict=False):
+        if last - first < 1e-6:
             continue
-        section = _section(part, layers, (low + high) / 2)
-        if section is None:
+        middle = (first + last) / 2
+        inner, outline = _inside_walls(part, layers, middle, walls)
+        if not inner:
             continue
-        for face in section.Faces:
-            for inner in _offset_2d(face, -by, layers):
-                prisms.append(_moved_to(inner, layers, low).extrude(_vector(layers, high - low)))
+        left = Part.makeCompound(inner)
+        for taken in _exposed(part, layers, middle, top, bottom, up, margin):
+            left = left.cut(taken)
+        for face in left.Faces:
+            if face.Area > 1e-9:
+                prisms.append(_moved_to(face, layers, first).extrude(_vector(layers, last - first)))
     solids = [s for p in prisms for s in p.Solids if s.Volume > NOTHING]
     if not solids:
         return None
@@ -852,7 +924,7 @@ class Cut:
 def _cut_from(
     part: Any, source: Any, whence: str, layers: int, walls: float, top: float, bottom: float,
     up: float, bead: float, said: list[str], shells: Any | None = None,
-    open_by: float = 0.0, thin: list[Any] | None = None,
+    open_by: float = 0.0, thin: list[Any] | None = None, margin: float = 0.0,
 ) -> Cut | None:
     """The core cut from `source`, the part or a simpler shape of it (`simplified`), by each
     way in turn: the first that holds, or None, with why each didn't in `said`. Each is held
@@ -870,7 +942,7 @@ def _cut_from(
     for how in ways:
         try:
             if how == "slabs":
-                inside = slabs_in_plane(source, layers, walls) if walls > 0 else source
+                inside = None
                 words = (f"its section between each two of its flat faces offset in by its "
                          f"walls{whence}")
             elif how == "offset":
@@ -887,7 +959,9 @@ def _cut_from(
                          + (f", mitred at {len(prisms)} concave edge(s)" if prisms else "")
                          + whence)
             core = None
-            if inside is not None and own is not None:
+            if how == "slabs":
+                core = slab_core(source, layers, walls, top, bottom, up, margin)
+            elif inside is not None and own is not None:
                 core = _one(_solids(inside.common(own)))
             if core is not None and source is not part:
                 core = _within(core, shells)
@@ -899,8 +973,9 @@ def _cut_from(
             what = {"slabs": "its slabs", "offset": "its offset"}.get(how, "its copies")
             said.append(f"OCCT couldn't make {what}{whence} ({type(exc).__name__})")
             continue
-        check = checked(part, core, layers, walls, top, bottom, up, open_by)
-        wrong = check.fails()
+        grown = margin if how == "slabs" else 0.0
+        check = checked(part, core, layers, walls, top, bottom, up, open_by, grown)
+        wrong = check.fails() or _touches(core, part)
         if wrong is not None:
             said.append(f"{words}: {wrong}")
             continue
@@ -918,8 +993,8 @@ def _cut_from(
                 said.append(f"{words}: OCCT couldn't keep it within the part "
                             f"({type(exc).__name__})")
                 continue
-            check = checked(part, core, layers, walls, top, bottom, up, open_by)
-            wrong = check.fails() or (
+            check = checked(part, core, layers, walls, top, bottom, up, open_by, grown)
+            wrong = check.fails() or _touches(core, part) or (
                 f"{len(slivers(core, bead))} face(s) of its core narrower than a bead by a "
                 "curved face, kept within the part" if core is not None
                 and slivers(core, bead) else None)  # fmt: skip
@@ -928,6 +1003,18 @@ def _cut_from(
                 continue
         return Cut(core, words, check)
     return None
+
+
+def _touches(core: Any | None, part: Any) -> str | None:
+    """Why a core won't do where it meets the part's own faces, in words, or None: its skin
+    would be in pieces that meet only on a line, where a flat face meets an upright one and
+    the shells' and the walls' edges meet, and isn't one piece round it (mqucifer/print-shop
+    #363)."""
+    if core is None or not part.Shells:
+        return None
+    if min(core.distToShape(shell)[0] for shell in part.Shells) > 1e-6:
+        return None
+    return "its core meets the part's own faces, so its skin would be in pieces"
 
 
 def _within(core: Any, shells: Any | None) -> Any | None:
@@ -943,7 +1030,7 @@ def _within(core: Any, shells: Any | None) -> Any | None:
 
 def cut_core(
     part: Any, layers: int, walls: float, top: float, bottom: float, up: float, bead: float,
-    name: str, open_by: float = 0.0,
+    name: str, open_by: float = 0.0, margin: float = 0.0,
 ) -> Cut:
     """The part's core, at least its walls from its outline in its own layer's plane and its
     shells from its faces along its layers (mqucifer/print-shop#356). The walls are cut by
@@ -963,7 +1050,7 @@ def cut_core(
     shells = eroded_along(part, layers, top, bottom, up)
     thin = thin_runs(part, layers, walls, open_by, bead) if open_by > 0 else []
     found = _cut_from(part, part, "", layers, walls, top, bottom, up, bead, said, shells,
-                      open_by, thin)  # fmt: skip
+                      open_by, thin, margin)  # fmt: skip
     if found is not None:
         return found
     simple = simplified(part, bead)
@@ -971,7 +1058,7 @@ def cut_core(
         source, count = simple
         found = _cut_from(
             part, source, f", from it with its {count} face(s) under a bead merged first",
-            layers, walls, top, bottom, up, bead, said, shells, open_by, thin,
+            layers, walls, top, bottom, up, bead, said, shells, open_by, thin, margin,
         )
         if found is not None:
             return found
@@ -1152,10 +1239,11 @@ def cells(part: Any, printed: Printed, layers: int, folder: Path, name: str) -> 
         top = float(own.top or 0) * float(own.layer_height or 0)
         bottom = float(own.bottom or 0) * float(own.layer_height or 0)
         open_by = open_radius(line, float(own.layer_height or 0))
+        margin = MARGIN * walls
         key = (walls, top, bottom, open_by)
         if key not in made:
             made[key] = cut_core(part, layers, walls, top, bottom, sign, line, f"the part {name}",
-                                 open_by)
+                                 open_by, margin)
         whole = made[key]
         core: list[Any] = []
         if whole.core is not None:

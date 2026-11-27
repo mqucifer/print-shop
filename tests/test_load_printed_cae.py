@@ -373,13 +373,16 @@ def test_the_cut_s_check_holds_it_to_each_layer_and_to_the_part(cae: Any) -> Non
 
     - a block and a fin thinner than its walls: each layer's core is the block's, though OCCT's
       2D offset of the two together fails for both. An empty cut is refused, never read solid,
-      and the 16 copies' cut, the block's alone, holds;
+      and the block's core is kept: its slabs' cut holds, while the 16 copies', which meets the
+      base's top where the block stands on it, is refused;
     - a bar's core moved 0.5 mm across, the same area each layer, isn't the cut; nor is one cut
       4% of its walls too far in, the unsafe side, while 4% too little is within `AGREE`;
     - a bar with a ledge, its core missing a slab between the spread planes: read at planes
-      just off the ledge, the cut missing it isn't taken;
+      just off the ledge, the cut missing it isn't taken, nor the copies', which meet the
+      ledge's top where the bar stands on it;
     - a bar whose layers can be read at one plane only is refused, not passed on one;
-    - a core cut from the bar with a lump on it is kept within the bar's own shells."""
+    - a core cut from the bar with a lump on it is kept within the bar's own shells, and where
+      that leaves it on the bar's own faces, refused."""
     work: Path = cae.work
     shutil.copy(CASES / "as_printed_checks.py", work / "as_printed_checks.py")
     done = host.run(["as_printed_checks.py"], work, python=True, image=host.CAE_IMAGE)
@@ -390,17 +393,30 @@ def test_the_cut_s_check_holds_it_to_each_layer_and_to_the_part(cae: Any) -> Non
     assert "the skin couldn't be cut round the part test's faces" in fin["empty"]["refused"]
     assert "short of a layer's own outline" in fin["empty"]["refused"]
     side = as_printed.wall_thickness(2, 0.45, 0.2)
-    assert fin["copies"]["cut"] == "its common with 16 copies of itself"
+    # The 16 copies' core runs up to where the block stands on its base, and its skin would be
+    # two pieces meeting on a line there (mqucifer/print-shop#363): refused, not read.
+    assert "its core meets the part's own faces" in fin["copies"]["refused"]
+    assert fin["read"]["cut"].startswith("its section between each two of its flat faces")
     # The block's core over its 40 mm, less its shells, and a strip of the base's under it.
-    assert fin["copies"]["core_mm3"] > (10 - 2 * side) ** 2 * (40 - 1.0 - 2.6)
-    for name in ("shifted", "short", "ledge"):
+    assert fin["read"]["core_mm3"] > (10 - 2 * side) ** 2 * (40 - 1.0 - 2.6)
+    for name in ("shifted", "short"):
         assert found[name]["cut"] == "its common with 16 copies of itself", (name, found[name])
+    # The ledge's slabs and offset given the missing slab are refused as short of its layers,
+    # and its copies meet its ledge's top where the bar stands on it: no cut is taken.
+    ledge = found["ledge"]["refused"]
+    assert ledge.count("short of a layer's own outline") >= 2, ledge
+    assert "its core meets the part's own faces" in ledge, ledge
     assert found["over"]["cut"] == ("its section between each two of its flat faces offset in "
                                     "by its walls")
     assert found["over"]["core_mm3"] > found["shifted"]["core_mm3"]
     assert "only 1 of" in found["unread"]["refused"]
     assert "planes could be read to check it" in found["unread"]["refused"]
-    assert found["outside"]["cut"] is not None and found["outside"]["outside_mm3"] == 0.0
+    # Cut from the bar with its lump, the core is held within the bar's shells; and where that
+    # leaves it on the bar's own side, where the lump was, it's refused, not read.
+    outside = found["outside"]
+    assert outside["outside_mm3"] == 0.0
+    assert outside["cut"] is not None or any(
+        "its core meets the part's own faces" in why for why in outside["said"]), outside
 
 
 def test_a_web_too_thin_for_infill_reads_solid_and_its_bosses_skin_and_core(cae: Any) -> None:
@@ -431,3 +447,22 @@ def test_a_web_too_thin_for_infill_reads_solid_and_its_bosses_skin_and_core(cae:
     # The wide web's 0.37 mm of core between the bosses' own, through its height less shells.
     strip = (2.0 - 2 * side) * (40.0 - 2 * (6.0 - side)) * (20.0 - 1.6)
     assert read["web-wide"]["core_mm3"] > 2 * boss + 0.9 * strip
+
+
+def test_a_tile_of_planes_and_cylinders_is_cut_by_slabs_exactly(cae: Any) -> None:
+    """mqucifer/print-shop#363: a tile of counterbored holes and a boss in a pocket, every face
+    upright to its layers or flat in their plane. Stretched along its layers for OCCT's offset,
+    its cylinders are B-spline and the offset fails, as on a real tile; and the 16 copies leave
+    steps by them. Cut instead as slabs, each section between two flat faces offset in 2D, it
+    holds to its layers within a hundredth of a percent of its walls, meshes with nothing
+    turned inside out and reads; its solid read is as it was."""
+    solid = cae("load", "load/tile.json", "--weight", "1", "--at", "55,55,8")
+    printed = cae("load", "load/printed-tile.json", "--weight", "1", "--at", "55,55,8")
+    assert solid.verdict != "NO ANSWER" and "printed" not in solid.numbers, solid.text
+    assert printed.verdict != "NO ANSWER", printed.text
+    assert "inside out" not in printed.text
+    cell = printed.numbers["printed"]["tile"][0]
+    assert cell["cut"] == "its section between each two of its flat faces offset in by its walls"
+    assert cell["cut_planes_read"] == cell["cut_planes"] >= 7, cell
+    assert cell["cut_short_walls_pct"] <= 0.05 and cell["cut_over_walls_pct"] <= 0.05, cell
+    assert printed.numbers["moves_mm"] > solid.numbers["moves_mm"]
