@@ -447,3 +447,46 @@ def test_a_study_slices_the_long_bar_in_fit_beds_turn(tmp_path: Path) -> None:
     assert "bar+post-bolt-1: built as asked" in said, said
     assert roomy.unbuilt == [] and roomy.unread == []
     assert roomy.printed["infill_angle"] == pytest.approx(0.0)
+
+
+# --------------------------------------------------------------------------
+# The cold review of mqucifer/print-shop#353
+# --------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("size,turn", [((300.0, 20.0, 10.0), FIT_TURN), ((240.0, 6.0, 20.0), 33.0)])
+def test_a_turned_parts_lesson_keys_are_its_own_not_its_diagonals(
+    tmp_path: Path, size: tuple[float, float, float], turn: float,
+) -> None:
+    """Turned about its up axis, a part's plate box covers its diagonal: its narrowest width
+    read off that box would make a bar `flat_and_wide` and take `tall_and_narrow` from a fin.
+    Its traits are the part's as laid, whatever its turn."""
+    from print_shop.setup.traits import traits  # noqa: PLC0415
+    from print_shop.study.lessons import measured  # noqa: PLC0415
+
+    stl = tmp_path / "part.stl"
+    _box(size).export(stl)
+    laid = traits(measured(stl, (0.0, 0.0, 0.0), tmp_path / "laid", 100.0))
+    assert traits(measured(stl, (0.0, 0.0, turn), tmp_path / "turned", 100.0)) == laid
+    assert traits(measured(stl, (180.0, 0.0, turn), tmp_path / "over", 100.0)) == laid
+
+
+def test_poses_equivalent_about_the_up_axis_are_offered_once() -> None:
+    """(0,180,0) lays a part as (180,0,0) does, turned half about its up axis."""
+    poses = study_poses(_box((80, 20, 10)), (0.0, 180.0, 0.0), BED)
+    assert poses[0] == (0.0, 180.0, 0.0)
+    assert (180.0, 0.0, 0.0) not in poses
+    assert len(poses) == len(AXIS_ALIGNED), "it stands in for (180,0,0): six, as before"
+
+
+def test_a_part_too_tall_laid_so_is_said_to_be(tmp_path: Path) -> None:
+    """60 x 20 x 300 mm stood on its end is too tall whatever its turn; laid down it fits."""
+    mesh = _box((60, 20, 300))
+    said = unfit(mesh, (0.0, 0.0, 0.0), BED, "z")
+    assert "it's too tall laid so, 300.0 mm on a bed 256 mm high, whatever its turn" in said
+    assert "It fits only laid otherwise: turned 90,0," in said
+    path = tmp_path / "tall.stl"
+    mesh.export(path)
+    with pytest.raises(DoesntFit, match="it's too tall laid so, 300.0 mm on a bed 256 mm high"):
+        write_project(path, Printed(Settings()), STORE_PROFILES, tmp_path / "out",
+                      (0.0, 0.0, 0.0), binary=tmp_path / "no-orca")

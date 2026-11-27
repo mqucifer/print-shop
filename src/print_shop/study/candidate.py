@@ -327,8 +327,11 @@ class Shaper:
         return out, files
 
 
-def _laid(turn: tuple[float, float, float]) -> tuple[float, float]:
-    return round(turn[0] % 360, 6), round(turn[1] % 360, 6)
+def _up(mesh: trimesh.Trimesh, turn: tuple[float, float, float]) -> tuple[float, ...]:
+    """Which way each of the part's own axes points up in a pose: two poses with the same lay
+    the part alike, one turned about its up axis from the other, as (0,180,0) and (180,0,180)
+    do. The turn's rows are its own axes on the plate, and the third is up."""
+    return tuple(round(float(v), 6) + 0.0 for v in np.asarray(Pose.of(mesh, turn).matrix)[2, :3])
 
 
 def study_poses(mesh: trimesh.Trimesh, turn: tuple[float, float, float],
@@ -338,11 +341,13 @@ def study_poses(mesh: trimesh.Trimesh, turn: tuple[float, float, float],
     it must (`regions.turned_to_fit`: none where it fits as laid). One that fits no turn isn't
     offered: Orca would refuse it."""
     found = [turn]
+    laid_so = {_up(mesh, turn)}
     for laid in AXIS_ALIGNED:
-        if _laid(laid) == _laid(turn):
+        if _up(mesh, laid) in laid_so:
             continue
+        laid_so.add(_up(mesh, laid))
         fit = turned_to_fit(mesh, (laid[0], laid[1]), bed)
-        if fit.fits and fit.turn not in found:
+        if fit.fits:
             found.append(fit.turn)
     return tuple(found)
 
@@ -364,14 +369,17 @@ def unfit(mesh: trimesh.Trimesh, turn: tuple[float, float, float], bed: Bed,
                 f"{degrees_said([turn[0], turn[1]])},fit")
     fits = [turned_to_fit(mesh, (p[0], p[1]), bed) for p in AXIS_ALIGNED]
     others = [f for f in fits if f.fits]
+    tall = fit.too_tall(bed)
     if not others:
         # The least footprint laid as asked: the pose whose layers are the part's.
-        return (f"{head}. It fits the bed in no pose, turned any way about its up axis: laid "
-                f"so, its least footprint is {best.said()}")
+        return (f"{head}" + (f": {tall}" if tall else "") + ". It fits the bed in no pose, "
+                f"turned any way about its up axis: laid so, its least footprint is "
+                f"{best.said()}")
     said = "; ".join(f"{f.said()}, its layers along its own "
                      f"{Pose.of(mesh, f.turn).layers()}" for f in others)
-    return (f"{head}, and no turn about its up axis fits it ({best.said()}). It fits only laid "
-            f"otherwise: {said}" + (f"; its layers are along {layers}" if layers else ""))
+    return (f"{head}, and " + (tall or f"no turn about its up axis fits it ({best.said()})")
+            + f". It fits only laid otherwise: {said}"
+            + (f"; its layers are along {layers}" if layers else ""))
 
 
 def poses_said(poses: Sequence[tuple[float, float, float]]) -> str:

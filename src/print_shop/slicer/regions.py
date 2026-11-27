@@ -366,6 +366,14 @@ class Fit:
         return (f"turned {degrees_said(self.turn)} it's "
                 + " x ".join(f"{v:.1f}" for v in self.size) + " mm")
 
+    def too_tall(self, bed: Bed) -> str:
+        """That it's taller than the bed laid so, which no turn about its up axis mends; ""
+        where it isn't."""
+        if not over(self.size[2], bed.size[2]):
+            return ""
+        return (f"it's too tall laid so, {self.size[2]:.1f} mm on a bed {bed.size[2]:g} mm "
+                "high, whatever its turn about its up axis")
+
 
 def fit_of(mesh: trimesh.Trimesh, rotation_deg: tuple[float, float, float], bed: Bed) -> Fit:
     """The part posed by `rotation_deg` against the bed: the whole bed, no margin kept, as
@@ -631,7 +639,7 @@ def write_project(
         raise DoesntFit(
             f"{fit.said()}, past the bed's {bed.said()}: "
             + (f"turned about its up axis by fit-bed's own turn it fits, {best.said()}"
-               if best.fits else
+               if best.fits else fit.too_tall(bed) or
                f"no turn about its up axis fits it, the least footprint {best.said()}"))
     bands = {r.name: pose.heights(r.shape) for r in printed.regions
              if isinstance(r.shape, Layers)}

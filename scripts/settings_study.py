@@ -52,12 +52,11 @@ from print_shop.bench.assembly import read as read_assembly
 from print_shop.bench.report import NoAnswer
 from print_shop.env import SETTINGS_PATH, load_env
 from print_shop.expert.client import LLMConfig
-from print_shop.ingest.orientation import AXIS_ALIGNED, scored, write_rotated
+from print_shop.ingest.orientation import AXIS_ALIGNED, scored
 from print_shop.ledger import Ledger, ledger_path
 from print_shop.rounds.lessons import Refused
 from print_shop.runtime import bed_type, job_profiles
 from print_shop.setup.context import read_context
-from print_shop.setup.features import measure
 from print_shop.setup.model import setup_llm
 from print_shop.slicer.regions import Bed, Pose, degrees_said, turned_to_fit
 from print_shop.slicer.store import NoChoice
@@ -150,8 +149,8 @@ def study(args: argparse.Namespace) -> int:
     offered = study_poses(mesh, turn, bed)
     poses = tuple(scored(mesh, t) for t in offered)
     kept = poses[0]
-    posed = write_rotated(stl, turn, out / "posed" / stl.name)
-    features = measure(posed, kept.bed_contact_area_mm2)
+    # Its features laid, not turned about its up axis: its box on the plate isn't its own.
+    features = lessons.measured(stl, turn, out / "laid", kept.bed_contact_area_mm2)
     keys = lessons.keys(features, assembly, args.part, context)
     process = json.loads(Path(profiles.process).read_text())
     config = setup_llm(LLMConfig.from_settings(), env)
