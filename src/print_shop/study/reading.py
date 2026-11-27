@@ -38,8 +38,9 @@ from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
 
-from print_shop.bench import host, infill
+from print_shop.bench import infill
 from print_shop.bench.as_printed import wall_thickness
+from print_shop.bench.job import BenchJob, Runner, run_here, stop_here
 from print_shop.bench.printed import Printed, Settings, as_json
 from print_shop.rounds.needs import Need, _judge_number
 from print_shop.rounds.needs import Reading as NeedReading
@@ -50,6 +51,7 @@ from print_shop.slicer.regions import (
     settings_of,
     slice_project,
     slice_regions,
+    stop_slicing,
     wall_band,
     write_project,
 )
@@ -485,6 +487,10 @@ class OrcaSlicing:
     binary: Path | None = None
     timeout_s: float = 900.0
 
+    def stop(self) -> None:
+        """Stop every slice running: a study that's interrupted leaves none."""
+        stop_slicing()
+
     def __call__(self, candidate: Candidate, out: Path) -> Sliced:
         profiles = _sequenced(self.profiles, candidate.wall_sequence, out)
         printed = candidate.printed()
@@ -556,23 +562,29 @@ def _files(raw: dict[str, Any]) -> list[str]:
 
 @dataclass
 class BenchLoad:
-    """Reads each candidate with `load`, in the bench's second image, under one case."""
+    """Reads each candidate with `load`, in the bench's second image, under one case: each read
+    a bench job (`bench.job`), its files in its own folder, run here or by `runner` on any host
+    with the same image."""
 
     assembly: Path
     part: str
+    runner: Runner = run_here
 
-    def __call__(self, candidate: Candidate, sliced: Sliced, case: Case,
-                 out: Path) -> dict[str, Any]:
+    def job(self, candidate: Candidate, sliced: Sliced, case: Case, out: Path) -> BenchJob:
+        """The `load` of one candidate under one case, as a job over its files in `out/load`."""
         work = out / "load"
         work.mkdir(parents=True, exist_ok=True)
         raw = json.loads(self.assembly.read_text())
+        files = []
         for name in _files(raw):
             target = work / name
             if not target.exists():
                 target.parent.mkdir(parents=True, exist_ok=True)
                 shutil.copy2(self.assembly.parent / name, target)
+            files.append(name)
         for path in candidate.meshes.values():
             shutil.copy2(path, work / path.name)
+            files.append(path.name)
         layers = (sliced.settings.up or "").lstrip("+-") or None
         for part in raw.get("parts") or ():
             if isinstance(part, dict) and part.get("name") == self.part:
@@ -581,11 +593,23 @@ class BenchLoad:
                     part["layers"] = layers
         name = "study-assembly.json"
         (work / name).write_text(json.dumps(raw, indent=1))
-        done = host.run(["load", name, *case.args], work)
+        return BenchJob.of(["load", name, *case.args], work, [name, *files])
+
+    def stop(self) -> None:
+        """Stop every read this host is running for it: a study that's interrupted leaves none.
+        A runner for another host stops its own."""
+        if self.runner is run_here:
+            stop_here()
+
+    def __call__(self, candidate: Candidate, sliced: Sliced, case: Case,
+                 out: Path) -> dict[str, Any]:
+        job = self.job(candidate, sliced, case, out)
+        done = self.runner(job)
         found = _SAVED.search(done.stdout)
         if not found:
             tail = (done.stdout + done.stderr).strip().splitlines()[-3:]
             return {"verdict": "NO ANSWER", "why": "the bench saved no reply: " + " / ".join(tail),
                     "numbers": {}}
-        record: dict[str, Any] = json.loads((work / f"{found.group(1)}.json").read_text())
+        record: dict[str, Any] = json.loads(
+            (job.folder / f"{found.group(1)}.json").read_text())
         return record

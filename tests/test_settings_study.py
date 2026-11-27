@@ -162,6 +162,8 @@ FOUR_WALLS = ("read", {"why": "between", "settings": {"walls": 4, "infill": 30,
                                                        "pattern": "grid", "infill_angle": 0}})
 BOLT = ("read", {"why": "a ring round the hole", "settings": {"walls": 3, "infill": 25},
                  "regions": [{"joints": ["bar+post-bolt-1"], "margin": 2, "walls": 2}]})
+#: Each read is queued, and its reading given as it lands (mqucifer/print-shop#364).
+WAIT: Step = ("wait", {})
 
 
 # --------------------------------------------------------------------------
@@ -174,7 +176,7 @@ def test_the_defaults_are_read_first_and_two_of_its_own_before_it_recommends(
 ) -> None:
     model = Model(
         [("recommend", {"candidate": DEFAULTS, "reason": "they pass"})],
-        [THREE_WALLS], [FOUR_WALLS],
+        [THREE_WALLS, WAIT], [FOUR_WALLS, WAIT],
         [("recommend", {"candidate": "c2", "reason": "the least margin it needs, for 1 min",
                         "lessons": [{"text": "a bar pulled across its layers needs 3 walls",
                                      "shown_by": ["defaults", "c1"]}]})],
@@ -199,7 +201,7 @@ def test_the_defaults_are_read_first_and_two_of_its_own_before_it_recommends(
 def test_a_candidate_that_fails_a_case_or_was_never_read_isnt_recommended(
     part: StudyPart,
 ) -> None:
-    model = Model([THREE_WALLS, FOUR_WALLS],
+    model = Model([THREE_WALLS, FOUR_WALLS, WAIT, WAIT],
                   [("recommend", {"candidate": "defaults", "reason": "cheapest"})],
                   [("recommend", {"candidate": "c9", "reason": "?"})],
                   [("recommend", {"candidate": "none", "reason": "?"})],
@@ -216,10 +218,10 @@ def test_a_candidate_that_fails_a_case_or_was_never_read_isnt_recommended(
 def test_each_reading_says_where_the_worst_figure_is_which_way_and_the_trade_off(
     part: StudyPart,
 ) -> None:
-    model = Model([THREE_WALLS], [FOUR_WALLS],
+    model = Model([THREE_WALLS, WAIT], [FOUR_WALLS, WAIT],
                   [("recommend", {"candidate": "c1", "reason": "r"})])
     result = run(StudyLoop(chat=model), part)
-    first, second = (c.result for c in result.calls if c.tool == "read")
+    first, second = (c.result for c in result.calls if c.tool == "wait")
     assert first.startswith("c1: 3 walls, 25% infill\n  Orca: 35 min 30 s, 25.5 g "
                             "(+2.0 min, +2.0 g against the defaults)")
     assert "standing: OK" in first
@@ -236,7 +238,7 @@ def test_each_reading_says_where_the_worst_figure_is_which_way_and_the_trade_off
 def test_the_same_candidate_is_read_once(part: StudyPart) -> None:
     seen: list[Candidate] = []
     part.slicing = fake_slicing(seen)
-    model = Model([THREE_WALLS], [THREE_WALLS], [FOUR_WALLS],
+    model = Model([THREE_WALLS, WAIT], [THREE_WALLS, WAIT], [FOUR_WALLS, WAIT],
                   [("recommend", {"candidate": "c1", "reason": "r"})])
     result = run(StudyLoop(chat=model), part)
     assert [c.name for c in seen] == [DEFAULTS, "c1", "c2"]
@@ -257,7 +259,7 @@ def test_the_same_candidate_is_read_once(part: StudyPart) -> None:
 def test_what_neither_side_reads_is_refused_with_its_bound(
     part: StudyPart, asked: dict[str, Any], refusal: str,
 ) -> None:
-    model = Model([("read", {"why": "w", **asked})], [THREE_WALLS], [FOUR_WALLS],
+    model = Model([("read", {"why": "w", **asked})], [THREE_WALLS, WAIT], [FOUR_WALLS, WAIT],
                   [("recommend", {"candidate": "c1", "reason": "r"})])
     result = run(StudyLoop(chat=model), part)
     assert result.calls[0].result.startswith("refused:")
@@ -267,13 +269,13 @@ def test_what_neither_side_reads_is_refused_with_its_bound(
 
 def test_arguments_not_of_the_tools_shape_are_refused_never_a_crash(part: StudyPart) -> None:
     """The first real run's model gave its lessons as words alone, and the study crashed."""
-    model = Model([THREE_WALLS], [FOUR_WALLS],
+    model = Model([THREE_WALLS, WAIT], [FOUR_WALLS, WAIT],
                   [("read", {"why": "w", "regions": ["round the hole"]})],
                   [("recommend", {"candidate": "c1", "reason": "r", "lessons": [7]})],
                   [("recommend", {"candidate": "c1", "reason": "r",
                                   "lessons": ["3 walls carry it across its layers"]})])
     result = run(StudyLoop(chat=model), part)
-    said = [c.result for c in result.calls]
+    said = [c.result for c in result.calls if c.tool != "wait"]
     assert said[2] == "refused: region 1 is an object"
     assert said[3].startswith("refused: each lesson is")
     assert result.recommended == "c1"
@@ -281,7 +283,7 @@ def test_arguments_not_of_the_tools_shape_are_refused_never_a_crash(part: StudyP
 
 
 def test_past_its_limits_it_ends_with_the_table_and_no_recommendation(part: StudyPart) -> None:
-    model = Model([THREE_WALLS], [FOUR_WALLS])
+    model = Model([THREE_WALLS, WAIT], [FOUR_WALLS, WAIT])
     result = run(StudyLoop(chat=model, max_calls=2), part)
     assert result.ended == "past its limit of 2 calls, with no recommendation"
     assert result.recommended is None and len(result.readings) == 3
@@ -290,7 +292,7 @@ def test_past_its_limits_it_ends_with_the_table_and_no_recommendation(part: Stud
 
 
 def test_it_reads_no_more_than_its_most_candidates(part: StudyPart) -> None:
-    model = Model([THREE_WALLS], [FOUR_WALLS], [BOLT],
+    model = Model([THREE_WALLS, WAIT], [FOUR_WALLS, WAIT], [BOLT, WAIT],
                   [("recommend", {"candidate": "c2", "reason": "r"})])
     result = run(StudyLoop(chat=model, max_candidates=2), part)
     assert [c.result for c in result.calls if c.tool == "read"][2].startswith(
@@ -530,7 +532,7 @@ def test_a_design_runs_load_needs_are_its_cases(tmp_path: Path) -> None:
 
 
 def _studied(part: StudyPart) -> Any:
-    model = Model([THREE_WALLS], [FOUR_WALLS], [BOLT],
+    model = Model([THREE_WALLS, WAIT], [FOUR_WALLS, WAIT], [BOLT, WAIT],
                   [("recommend", {"candidate": "c1", "reason": "it passes for the least time",
                                   "lessons": [{"text": "3 walls carry a bar across its layers",
                                                "shown_by": ["defaults", "c1"]}]})])
@@ -605,7 +607,7 @@ def test_past_studies_gives_the_kept_lessons_and_what_earlier_studies_recommende
 ) -> None:
     part.lessons = ("lesson 4: 3 walls carry a bar across its layers",)
     part.earlier = ("rail (rail.stl), study s: recommended 4 walls",)
-    model = Model([("past_studies", {})], [THREE_WALLS], [FOUR_WALLS],
+    model = Model([("past_studies", {})], [THREE_WALLS, WAIT], [FOUR_WALLS, WAIT],
                   [("recommend", {"candidate": "c1", "reason": "r"})])
     result = run(StudyLoop(chat=model), part)
     said = result.calls[0].result
@@ -639,7 +641,7 @@ def test_a_region_orca_didnt_build_as_asked_fails_as_not_as_sliced_and_isnt_read
         return sliced
 
     part.slicing, part.loading = thinner, fake_loading(loaded)
-    model = Model([THREE_WALLS], [FOUR_WALLS], [BOLT],
+    model = Model([THREE_WALLS, WAIT], [FOUR_WALLS, WAIT], [BOLT, WAIT],
                   [("recommend", {"candidate": "c3", "reason": "the ring holds the bolt"})],
                   [("recommend", {"candidate": "c1", "reason": "r"})])
     result = run(StudyLoop(chat=model), part)
@@ -654,7 +656,7 @@ def test_a_region_orca_didnt_build_as_asked_fails_as_not_as_sliced_and_isnt_read
     text = table(result, "bar", [c.name for c in CASES])
     assert "| not as sliced | not as sliced | no |" in text
     assert "- c3: not as sliced: Orca didn't build what its regions ask" in text
-    read = [c.result for c in result.calls if c.tool == "read"][2]
+    read = [c.result for c in result.calls if c.tool == "wait"][2]
     assert "Orca: 36 min 30 s" in read and "not as sliced" in read
 
 
@@ -732,8 +734,8 @@ def test_unchecked_is_by_pattern_and_density_as_load_reads_it() -> None:
 def test_the_recommendation_says_what_no_test_checks_and_the_star_marks_only_that(
     part: StudyPart,
 ) -> None:
-    model = Model([THREE_WALLS], [("read", {"why": "low", "settings": {"walls": 4,
-                                                                        "infill": 18}})],
+    model = Model([THREE_WALLS, WAIT], [("read", {"why": "low", "settings": {"walls": 4,
+                                                                        "infill": 18}}), WAIT],
                   [("recommend", {"candidate": "c2", "reason": "the least plastic"})])
     result = run(StudyLoop(chat=model), part)
     text = table(result, "bar", [c.name for c in CASES])
@@ -744,7 +746,7 @@ def test_the_recommendation_says_what_no_test_checks_and_the_star_marks_only_tha
     rows = {line.split(" | ")[0]: line for line in text.splitlines() if line.startswith("| c")}
     assert "*" not in rows["| c1"], "25% rectilinear is within its tests"
     assert "*" in rows["| c2"]
-    other = Model([THREE_WALLS], [FOUR_WALLS],
+    other = Model([THREE_WALLS, WAIT], [FOUR_WALLS, WAIT],
                   [("recommend", {"candidate": "c1", "reason": "r"})])
     text = table(run(StudyLoop(chat=other), part), "bar", [c.name for c in CASES])
     assert "every core's density is within what the tests of its pattern reach" in text

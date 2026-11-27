@@ -57,6 +57,7 @@ import re
 import signal
 import subprocess
 import tempfile
+import threading
 import zipfile
 from collections import Counter
 from collections.abc import Callable
@@ -109,6 +110,7 @@ __all__ = [
     "fit_of",
     "settings_of",
     "slice_regions",
+    "stop_slicing",
     "turned_to_fit",
     "wall_band",
     "regions_meet",
@@ -714,9 +716,26 @@ class Project:
     bands: dict[str, tuple[float, float]] = field(default_factory=dict)
 
 
+#: The Orca processes this process is running, so a study that's interrupted can stop them
+#: (`stop_slicing`): each runs in a session of its own, which an interrupt doesn't reach.
+_LIVE: set[subprocess.Popen[str]] = set()
+_LIVE_LOCK = threading.Lock()
+
+
+def stop_slicing() -> None:
+    """Stop every Orca this process is running."""
+    with _LIVE_LOCK:
+        live = list(_LIVE)
+    for proc in live:
+        with contextlib.suppress(ProcessLookupError):
+            os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+
+
 def _run(cmd: list[str], cwd: str, timeout_s: float) -> tuple[int, str, str]:
     proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
                             start_new_session=True, cwd=cwd)
+    with _LIVE_LOCK:
+        _LIVE.add(proc)
     try:
         stdout, stderr = proc.communicate(timeout=timeout_s)
     except subprocess.TimeoutExpired as exc:
@@ -724,6 +743,9 @@ def _run(cmd: list[str], cwd: str, timeout_s: float) -> tuple[int, str, str]:
             os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
         proc.wait()
         raise RuntimeError(f"OrcaSlicer timeout after {timeout_s}s") from exc
+    finally:
+        with _LIVE_LOCK:
+            _LIVE.discard(proc)
     return proc.returncode, stdout, stderr
 
 
