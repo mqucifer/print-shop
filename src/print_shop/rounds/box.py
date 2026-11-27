@@ -29,7 +29,9 @@ memory, or where an assembly's one pass wouldn't end inside the run's own limit
 (mqucifer/print-shop#331). So a design round's `load` of a large assembly may take up to an hour,
 and every other command, and a script, keeps the run's own `command_seconds`. A one pass stopped
 at that limit, of an assembly two passes could read (`host.ABLE`), is told to ask for them with
-`--parts` (`host.past`).
+`--parts` (`host.past`). And a command killed for memory says the step it was in and the most the
+container had held, from what `load` says as it goes, as from `host.run` (`host.killed`,
+mqucifer/print-shop#336).
 """
 
 from __future__ import annotations
@@ -222,6 +224,9 @@ class Box:
             # harness's, not the answer's.
             lines = text.splitlines(keepends=True)
             text = "".join(one for one in lines if one.rstrip("\n") not in (host.TAKEN, host.ABLE))
+        # What `load` says as it goes, its steps and the container's memory, is the harness's
+        # too: kept only to say where it was, if it's killed (mqucifer/print-shop#336).
+        text, said = host.progress_lines(text)
         seconds = round(time.monotonic() - began, 1)
         if code == DOCKER_FAILED and not timed_out:
             raise Gone(f"docker couldn't run the container: {text[-400:]}")
@@ -229,10 +234,7 @@ class Box:
             text += "\n" + host.past(limit, could)
             code = 2 if command[1:2] == ["-I"] else 124
         elif code == host.KILLED:
-            text += (
-                f"\nverdict: NO ANSWER: it was killed, most likely at the {host.MEMORY} "
-                "memory limit\n"
-            )
+            text += "\n" + host.killed(said)
             code = 2 if command[1:2] == ["-I"] else host.KILLED
         return Ran(code, text, seconds, size[1], timed_out)
 

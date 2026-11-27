@@ -109,7 +109,7 @@ from typing import Any
 
 import numpy as np
 
-from . import dovetail, load_dovetail, load_through, way_in
+from . import dovetail, load_dovetail, load_through, progress, way_in
 from .assembly import AXES, DIAMETER, Assembly, Held, Joint, PartAt, read
 from .cae import ccx_one_thread, freecad, tidy_mesh, tidy_solve
 from .limits import over, said, under
@@ -1578,9 +1578,12 @@ def lies_on(corners: np.ndarray, nearest: np.ndarray, normal: np.ndarray, bend: 
 def step(what: str) -> Iterator[None]:
     """What `load` was doing, said with anything it couldn't do there (mqucifer/print-shop#319):
     a reason it gives itself is said as it is, and anything else as `NoAnswer` naming the step,
-    and the part or the joint, where it stopped. Never a traceback's last line alone."""
+    and the part or the joint, where it stopped. Never a traceback's last line alone. And said
+    as it begins, with the container's memory, so a command killed for memory says where it was
+    (`progress`, mqucifer/print-shop#336)."""
     try:
-        yield
+        with progress.step(what):
+            yield
     except NoAnswer:
         raise
     except Exception as exc:  # noqa: BLE001 - whatever stops a step is said with the step
@@ -1868,10 +1871,14 @@ def run(args: Any, report: Report) -> None:
     it name their glass band, read again with each band left out, as a lower bound
     (mqucifer/print-shop#295). The reply leads with that, names the parts and says why."""
     _clock["now"] = None
+    # The container's memory said as it goes, for the host to say where it was killed
+    # (mqucifer/print-shop#336).
+    progress.watch()
     try:
         _read(args, report)
     finally:
         _clock["now"] = None
+        progress.stop()
 
 
 def _read(args: Any, report: Report) -> None:

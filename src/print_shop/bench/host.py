@@ -71,6 +71,11 @@ TWO_PASSES = 3600
 OFFER = "BENCH_TIMEOUT_TWO_PASSES"
 TAKEN = "bench: two passes take the longer limit"
 ABLE = "bench: two passes could read it"
+#: What a command says on stderr as it goes (`progress.py`, mqucifer/print-shop#336): each step
+#: as it begins, and the container's memory every few seconds. The host keeps the last of each,
+#: and where the command is killed, says where it was and the most the container had held.
+STEP_LINE = "bench: step"
+MEMORY_LINE = "bench: memory"
 HERE = Path(__file__).resolve().parent
 REPOSITORY = HERE.parent.parent.parent
 #: The container's own mount of this package: read-only, so nothing in it can change the bench.
@@ -262,12 +267,14 @@ def run(
     timeout: int | None = None,
     python: bool = False,
     image: str | None = None,
+    trace: list[str] | None = None,
 ) -> subprocess.CompletedProcess[str]:
     """Run a bench command, or a script with `python=True`, in a container over `work`. A command
     runs in its own image; a script in the first, or in `image`, where `CAE_IMAGE`'s Python has
     FreeCAD's modules on its path. A `timeout` given is the limit, and nothing is offered past
     it; otherwise a command has its own (`timeout_for`), and `load` may take up a longer one
-    (`offered`)."""
+    (`offered`). What it says as it goes (`STEP_LINE`, `MEMORY_LINE`) isn't passed on, but put
+    in `trace` where one's given."""
     name = f"print-bench-{uuid.uuid4().hex[:12]}"
     longer = None
     if timeout is None:
@@ -296,11 +303,54 @@ def run(
     if done is None:
         subprocess.run(["docker", "kill", name], capture_output=True, check=False)
         return subprocess.CompletedProcess(argv, 2, past(limit, could), "")
+    err, said = progress_lines(done.stderr)
+    if trace is not None:
+        trace.extend(said)
     if done.returncode == KILLED:
         # A process that's killed takes its buffered output with it, so this may be all there is.
-        message = f"verdict: NO ANSWER: it was killed, most likely at the {MEMORY} memory limit\n"
-        return subprocess.CompletedProcess(argv, 2, done.stdout + message, done.stderr)
-    return done
+        return subprocess.CompletedProcess(argv, 2, done.stdout + killed(said), err)
+    return subprocess.CompletedProcess(argv, done.returncode, done.stdout, err)
+
+
+def progress_lines(stderr: str) -> tuple[str, list[str]]:
+    """A command's stderr, less what it said as it went (`STEP_LINE`, `MEMORY_LINE`); and those
+    lines."""
+    kept, said = [], []
+    for line in stderr.splitlines(keepends=True):
+        if line.startswith((STEP_LINE + " ", MEMORY_LINE + " ")):
+            said.append(line.rstrip("\n"))
+        else:
+            kept.append(line)
+    return "".join(kept), said
+
+
+def _gib(count: str) -> str:
+    return f"{int(count) / 2**30:.2f} GiB" if count.isdigit() else "unknown"
+
+
+def killed(said: list[str]) -> str:
+    """The verdict of a command the kernel killed: where it had said it was, the step it was in
+    and when, and the most the container had held when it last said (mqucifer/print-shop#336).
+    A command that says nothing as it goes is said to be killed, as before."""
+    message = f"verdict: NO ANSWER: it was killed, most likely at the {MEMORY} memory limit"
+    steps = [
+        line[len(STEP_LINE) + 1 :].split(" ", 1) for line in said if line.startswith(STEP_LINE)
+    ]
+    counts = [
+        line[len(MEMORY_LINE) + 1 :].split() for line in said if line.startswith(MEMORY_LINE)
+    ]
+    if steps and len(steps[-1]) == 2:
+        seconds, what = steps[-1]
+        message += f". Where it was: {what}, from {seconds} s in"
+    if counts:
+        seconds, *fields = counts[-1]
+        found = dict(f.split("=", 1) for f in fields if "=" in f)
+        message += (
+            f". The container's memory: at most {_gib(found.get('peak', '-'))} of its "
+            f"{MEMORY} by {seconds} s in, when it last said, {_gib(found.get('current', '-'))} "
+            f"then, {_gib(found.get('shmem', '-'))} of it files in /tmp"
+        )
+    return message + "\n"
 
 
 def past(limit: int, could: bool) -> str:

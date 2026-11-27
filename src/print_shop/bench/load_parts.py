@@ -634,7 +634,7 @@ def first(
     """The whole, its bolts' bores squared, at the mesh and the coarser one: each solve as
     `load._solved` reads it, and what's said of the pass."""
     began = time.time()
-    with load._quiet():
+    with load._quiet(), load.step("the first pass's squaring of each bolt's bore"):
         square, count, kept = squared(assembly, placed)
     clock.check("whole", f"the first pass's whole at {size:g} mm")
     fine = load._solved(
@@ -682,7 +682,7 @@ def second(
     # The parts as they are, joined so the faces each meets another by are faces of its own.
     doc = App.newDocument("Joined")
     try:
-        with load._quiet():
+        with load._quiet(), load.step("the second pass's joining of the parts"):
             joined = load._Model(assembly, placed, args, size)
             joined.join(doc)
             solids = joined.solids
@@ -734,7 +734,8 @@ def second(
                     straight,
                 )  # fmt: skip
 
-            into[part.name] = _alone_solved(make)
+            with load.step(f"the second pass's part {part.name} on its own, at {mesh:g} mm"):
+                into[part.name] = _alone_solved(make)
             into[part.name]["seconds"] = round(time.time() - started, 1)
             clock.time(kind, time.time() - started)
         clock.done.append(f"the second pass read {part.name} on its own")
