@@ -10,8 +10,10 @@ and its wall order, as the model asks for them and as code bounds them (mqucifer
   to trade;
 - its wall order, Orca's `wall_sequence`, for finish only: `load` reads walls by their count,
   whatever order they're laid in;
-- its pose: one of `ingest.orientation.AXIS_ALIGNED`, where that changes which way its layers
-  run against its loads. `load` is told the layers' axis the pose gives;
+- its pose: one of the study's poses, where that changes which way its layers run against its
+  loads: each of `ingest.orientation.AXIS_ALIGNED`'s that fits the bed, turned about its up axis
+  where it must by `fit-bed`'s own turn (mqucifer/print-shop#351). `load` is told the layers'
+  axis the pose gives;
 - regions of their own (`bench.printed.Region`): a box, a cylinder or a band of layers as
   `printed.read` takes them, or round the part's own joints (`slicer.joints.round_joints`): a
   cylinder round each bolt's hole, and round each fit and latch a box, or, with `faces`, a mesh
@@ -36,6 +38,7 @@ from print_shop.bench.printed import Box, Mesh, Printed, Region, Settings, as_js
 from print_shop.ingest.orientation import AXIS_ALIGNED
 from print_shop.setup.context import PartContext
 from print_shop.slicer.joints import round_joints
+from print_shop.slicer.regions import Bed, Pose, degrees_said, fit_of, turned_to_fit
 
 __all__ = [
     "DEFAULTS",
@@ -46,6 +49,8 @@ __all__ = [
     "faces_mesh",
     "own_settings",
     "poses_said",
+    "study_poses",
+    "unfit",
 ]
 
 #: The candidate the study reads first, by code: the profile's own settings, in the part's pose.
@@ -83,6 +88,10 @@ _JOINT = frozenset({"joints", "margin", "faces", "why", *OWN})
 PROUD = 0.5
 #: A face mesh's faces are cut to this size, in mm, so its edge follows the box's to within it.
 EDGE_MM = 1.0
+#: A turn asked is one of the poses where each of its angles is within this of the pose's, in
+#: degrees: the poses are said to a millionth of a degree, and a turn about the up axis that
+#: fits the bed needn't be a round one.
+SAME_TURN = 1e-4
 
 
 @dataclass(frozen=True)
@@ -116,7 +125,7 @@ class Candidate:
         if self.wall_sequence:
             words.append(f"walls laid {self.wall_sequence}")
         if self.turn != AXIS_ALIGNED[0]:
-            words.append("turned " + ",".join(f"{v:g}" for v in self.turn))
+            words.append("turned " + degrees_said(self.turn))
         words += [f"region {r.said()}" for r in self.regions]
         return "; ".join(words)
 
@@ -241,10 +250,12 @@ class Shaper:
             raise ValueError(f"wall_sequence is one of {', '.join(WALL_SEQUENCES)}: not "
                              f"{sequence!r}")
         raw_turn = args.get("turn") or list(self.poses[0])
-        turn = tuple(float(v) for v in raw_turn)
-        if len(turn) != 3 or turn not in self.poses:
+        asked = tuple(float(v) for v in raw_turn)
+        turn = next((p for p in self.poses if len(asked) == 3 and all(
+            abs(a - b) <= SAME_TURN for a, b in zip(asked, p, strict=True))), None)
+        if turn is None:
             raise ValueError(f"turn {raw_turn!r} isn't one of the poses: "
-                             + "; ".join(",".join(f"{v:g}" for v in p) for p in self.poses))
+                             + poses_said(self.poses))
         regions: list[Region] = []
         meshes: dict[str, Path] = {}
         for k, item in enumerate(args.get("regions") or (), 1):
@@ -316,5 +327,52 @@ class Shaper:
         return out, files
 
 
+def _laid(turn: tuple[float, float, float]) -> tuple[float, float]:
+    return round(turn[0] % 360, 6), round(turn[1] % 360, 6)
+
+
+def study_poses(mesh: trimesh.Trimesh, turn: tuple[float, float, float],
+                bed: Bed) -> tuple[tuple[float, float, float], ...]:
+    """The poses a study may read the part in: its own `turn` first, then each other of
+    `AXIS_ALIGNED`'s that fits the bed, turned about its up axis by `fit-bed`'s own turn where
+    it must (`regions.turned_to_fit`: none where it fits as laid). One that fits no turn isn't
+    offered: Orca would refuse it."""
+    found = [turn]
+    for laid in AXIS_ALIGNED:
+        if _laid(laid) == _laid(turn):
+            continue
+        fit = turned_to_fit(mesh, (laid[0], laid[1]), bed)
+        if fit.fits and fit.turn not in found:
+            found.append(fit.turn)
+    return tuple(found)
+
+
+def unfit(mesh: trimesh.Trimesh, turn: tuple[float, float, float], bed: Bed,
+          layers: str | None = None) -> str:
+    """Why the part, posed by `turn`, can't be sliced on the bed, before Orca runs: the turn
+    that fits it about its up axis, where one does, or that no pose fits it, naming the least
+    footprint of any. "" where it fits as posed. `layers` is the own axis the part's layers
+    must run along, where its assembly gives one."""
+    fit = fit_of(mesh, turn, bed)
+    if fit.fits:
+        return ""
+    head = f"--turn {degrees_said(turn)}: {fit.said()}, past the bed's {bed.said()}"
+    best = turned_to_fit(mesh, (turn[0], turn[1]), bed)
+    if best.fits:
+        return (f"{head}. Turned about its up axis by fit-bed's own turn it fits, "
+                f"{best.said()}: give --turn {degrees_said(best.turn)}, or "
+                f"{degrees_said([turn[0], turn[1]])},fit")
+    fits = [turned_to_fit(mesh, (p[0], p[1]), bed) for p in AXIS_ALIGNED]
+    others = [f for f in fits if f.fits]
+    if not others:
+        # The least footprint laid as asked: the pose whose layers are the part's.
+        return (f"{head}. It fits the bed in no pose, turned any way about its up axis: laid "
+                f"so, its least footprint is {best.said()}")
+    said = "; ".join(f"{f.said()}, its layers along its own "
+                     f"{Pose.of(mesh, f.turn).layers()}" for f in others)
+    return (f"{head}, and no turn about its up axis fits it ({best.said()}). It fits only laid "
+            f"otherwise: {said}" + (f"; its layers are along {layers}" if layers else ""))
+
+
 def poses_said(poses: Sequence[tuple[float, float, float]]) -> str:
-    return "; ".join(",".join(f"{v:g}" for v in p) for p in poses)
+    return "; ".join(degrees_said(p) for p in poses)

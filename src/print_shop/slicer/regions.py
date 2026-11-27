@@ -9,9 +9,14 @@ what Orca built in each, against the same part sliced without them.
 
 **How it's sliced,** each step Orca's own:
 1. The part is turned into the pose it prints in and seated on the plate, as
-   `ingest.orientation` does, and its own settings are written into a whole copy of the process
-   profile, as `with_bed_type` does.
+   `ingest.orientation` does, and centred on the plate by translation only: Orca is told neither
+   to turn it nor to arrange it (`--allow-rotations=0`, `--arrange 0`), and keeps it where its
+   file puts it. The turn about z may be any angle, as a long part fits the bed only turned
+   (mqucifer/print-shop#351); a pose that doesn't fit the bed is refused before Orca runs. Its
+   own settings are written into a whole copy of the process profile, as `with_bed_type` does.
 2. Orca writes the project itself: `--export-3mf` of the posed part, with the job's profiles.
+   Where it placed the part (its build item's transform: a move, never a turn) and the infill
+   angle it keeps on the plate are read back from it.
    Orca 2.4.2 won't slice a project without its own `Metadata/project_settings.config` (it
    crashed, exit 139, on one written by hand), and refuses one whose `Application` is a later
    BambuStudio without its `OrcaSlicer` version (exit 232), so the project is Orca's.
@@ -62,6 +67,8 @@ from typing import Any, cast
 import numpy as np
 import trimesh
 
+from print_shop.bench.footprint import footprint
+from print_shop.bench.limits import over
 from print_shop.bench.printed import (
     Cylinder,
     Layers,
@@ -88,14 +95,19 @@ from print_shop.slicer.orca import (
 __all__ = [
     "ANGLE_DEGREES",
     "INFILL_POINTS",
+    "Bed",
+    "Fit",
     "Pose",
     "Project",
     "RegionRead",
     "RegionsSlice",
     "Said",
     "band",
+    "degrees_said",
+    "fit_of",
     "settings_of",
     "slice_regions",
+    "turned_to_fit",
     "wall_band",
     "write_project",
 ]
@@ -222,7 +234,10 @@ def _with_settings(profiles: SlicerProfiles, own: dict[str, str], workdir: Path)
 @dataclass(frozen=True)
 class Pose:
     """How the part's own axes become the plate's: turned by `rotation_deg` (Euler XYZ, as
-    `ingest.orientation`), seated on the plate, then placed where Orca put it (`shift`)."""
+    `ingest.orientation`), seated on the plate and centred on it, then placed where Orca put it
+    (`shift`). The turn about z may be any angle (mqucifer/print-shop#351): it turns the part
+    about its up axis, so the layers axis is the same, and the infill angle and every region
+    turn with it, through `matrix`."""
 
     rotation_deg: tuple[float, float, float]
     #: The part's own file to the posed file Orca was given, 4 x 4.
@@ -231,7 +246,10 @@ class Pose:
     shift: tuple[float, float] = (0.0, 0.0)
 
     @classmethod
-    def of(cls, mesh: trimesh.Trimesh, rotation_deg: tuple[float, float, float]) -> Pose:
+    def of(cls, mesh: trimesh.Trimesh, rotation_deg: tuple[float, float, float],
+           centre: tuple[float, float] | None = None) -> Pose:
+        """The part turned by `rotation_deg` and seated on the plate; with `centre`, moved
+        across the plate, by translation only, to where its box's middle is there."""
         rx, ry, rz = (math.radians(v) for v in rotation_deg)
         about = trimesh.transformations.rotation_matrix
         turn = (np.asarray(about(rz, (0, 0, 1)))  # type: ignore[no-untyped-call]
@@ -241,6 +259,9 @@ class Pose:
         turned.apply_transform(turn)
         seat = np.eye(4)
         seat[2, 3] = -float(turned.bounds[0][2])
+        if centre is not None:
+            middle = turned.bounds.mean(axis=0)
+            seat[0, 3], seat[1, 3] = centre[0] - middle[0], centre[1] - middle[1]
         return cls(rotation_deg, np.asarray(seat @ turn))
 
     def layers(self) -> str | None:
@@ -294,6 +315,76 @@ class Pose:
         at = np.asarray(points, dtype=float)
         placed = at @ np.asarray(self.matrix)[:3, :3].T + np.asarray(self.matrix)[:3, 3]
         return np.asarray(placed + np.array([self.shift[0], self.shift[1], 0.0]))
+
+
+def degrees_said(turn: tuple[float, float, float] | list[float]) -> str:
+    """A pose's turn as `--turn` takes it, to a millionth of a degree: `0,0,35.5`."""
+    return ",".join(format(round(float(v), 6) + 0.0, ".10g") for v in turn)
+
+
+@dataclass(frozen=True)
+class Bed:
+    """The plate a machine profile prints on: its printable area's box, and its height."""
+
+    low: tuple[float, float]
+    size: tuple[float, float, float]
+
+    @classmethod
+    def of(cls, machine: Path) -> Bed:
+        """From a whole machine profile's `printable_area` and `printable_height`.
+
+        Raises:
+            ValueError: If the profile doesn't give them as Orca reads them.
+        """
+        data = json.loads(machine.read_text())
+        try:
+            corners = [[float(v) for v in str(c).split("x")] for c in data["printable_area"]]
+            height = float(_value(data["printable_height"]))
+            xs, ys = [c[0] for c in corners], [c[1] for c in corners]
+        except (KeyError, ValueError, IndexError, TypeError) as exc:
+            raise ValueError(f"{machine.name} gives no printable_area and printable_height "
+                             "Orca would read") from exc
+        return cls((min(xs), min(ys)), (max(xs) - min(xs), max(ys) - min(ys), height))
+
+    @property
+    def centre(self) -> tuple[float, float]:
+        return self.low[0] + self.size[0] / 2, self.low[1] + self.size[1] / 2
+
+    def said(self) -> str:
+        return " x ".join(f"{v:g}" for v in self.size) + " mm"
+
+
+@dataclass(frozen=True)
+class Fit:
+    """A part in one pose against the bed: its box there, and whether it's inside the bed's."""
+
+    turn: tuple[float, float, float]
+    size: tuple[float, float, float]
+    fits: bool
+
+    def said(self) -> str:
+        return (f"turned {degrees_said(self.turn)} it's "
+                + " x ".join(f"{v:.1f}" for v in self.size) + " mm")
+
+
+def fit_of(mesh: trimesh.Trimesh, rotation_deg: tuple[float, float, float], bed: Bed) -> Fit:
+    """The part posed by `rotation_deg` against the bed: the whole bed, no margin kept, as
+    `fit-bed` reads it. Orca keeps margins of its own, and is the judge past this."""
+    pose = Pose.of(mesh, rotation_deg)
+    points = np.asarray(mesh.vertices) @ np.asarray(pose.matrix)[:3, :3].T
+    size = tuple(float(v) for v in np.ptp(points, axis=0))
+    fits = not any(over(v, most) for v, most in zip(size, bed.size, strict=True))
+    return Fit(rotation_deg, (size[0], size[1], size[2]), fits)
+
+
+def turned_to_fit(mesh: trimesh.Trimesh, laid: tuple[float, float], bed: Bed) -> Fit:
+    """The part laid by `laid` (its turns about x and y) and turned about its up axis by
+    `fit-bed`'s own turn (`bench.footprint`): the least that fits its footprint on the bed, or
+    where none does, the one that needs least of it."""
+    flat = Pose.of(mesh, (laid[0], laid[1], 0.0))
+    points = np.asarray(mesh.vertices) @ np.asarray(flat.matrix)[:3, :3].T
+    turn, _, _ = footprint(points[:, :2], (bed.size[0], bed.size[1]))
+    return fit_of(mesh, (laid[0], laid[1], float(turn)), bed)
 
 
 def _shape_mesh(region: Region, base: Path | None) -> trimesh.Trimesh:
@@ -374,7 +465,9 @@ def _orca(binary: Path, profiles: SlicerProfiles, args: list[str], log: Path,
                "--load-settings", f"{profiles.machine};{profiles.process}"]
         if profiles.filament is not None:
             cmd += ["--load-filaments", str(profiles.filament)]
-        cmd += ["--allow-rotations=0", *args]
+        # Orca neither turns nor arranges the part: it's posed and centred on the plate here,
+        # and Orca keeps it where its file puts it (mqucifer/print-shop#351).
+        cmd += ["--allow-rotations=0", "--arrange", "0", *args]
         return _run(cmd, scratch, timeout_s)
 
 
@@ -414,6 +507,23 @@ def _item_shift(model: str) -> tuple[float, float]:
         raise RuntimeError(f"Orca placed the part {values[11]:g} mm above the plate: its bands "
                            "and shells aren't read where it isn't")
     return values[9], values[10]
+
+
+def _plate_angle_kept(model_settings: str, plate: float | None) -> None:
+    """The part's infill angle on the plate as Orca keeps it in its own project
+    (`Metadata/project_settings.config`), against the angle the pose gives: so the slice's
+    lines are read against what Orca was told, not only what was written for it."""
+    if plate is None:
+        return
+    try:
+        kept = float(_value(json.loads(model_settings).get("infill_direction", "")))
+    except ValueError as exc:
+        raise RuntimeError("Orca's project gives no infill_direction to read the part's "
+                           "infill angle against") from exc
+    if _angle_off(kept, plate) > 1e-3:
+        raise RuntimeError(f"Orca's project keeps the infill on the plate at {kept:g}, not "
+                           f"{plate:g} as the pose turns the part's own: its lines aren't read "
+                           "against what it was told")
 
 
 def _add_regions(src: Path, out: Path, volumes: list[tuple[Region, trimesh.Trimesh,
@@ -505,11 +615,24 @@ def write_project(
     loaded = trimesh.load(stl, force="mesh")
     if not isinstance(loaded, trimesh.Trimesh):
         raise ValueError(f"{stl.name} isn't one mesh")
-    pose = Pose.of(loaded, rotation_deg)
+    bed = Bed.of(Path(profiles.machine))
+    pose = Pose.of(loaded, rotation_deg, bed.centre)
     if layers is not None and pose.layers() != layers:
         raise ValueError(f"the pose {rotation_deg} stands its own {pose.layers() or 'none'} up, "
                          f"but its layers are along {layers}: its infill angle and bands would "
                          "mean other ways to the slice than to load")
+    if pose.layers() is None:
+        raise ValueError(f"the pose {degrees_said(rotation_deg)} stands none of the part's own "
+                         "axes up: its layers, bands and infill angle aren't the part's own")
+    fit = fit_of(loaded, rotation_deg, bed)
+    if not fit.fits:
+        # Refused before Orca runs, saying the turn that fits where there's one.
+        best = turned_to_fit(loaded, (rotation_deg[0], rotation_deg[1]), bed)
+        raise DoesntFit(
+            f"{fit.said()}, past the bed's {bed.said()}: "
+            + (f"turned about its up axis by fit-bed's own turn it fits, {best.said()}"
+               if best.fits else
+               f"no turn about its up axis fits it, the least footprint {best.said()}"))
     bands = {r.name: pose.heights(r.shape) for r in printed.regions
              if isinstance(r.shape, Layers)}
     posed = loaded.copy()
@@ -547,6 +670,9 @@ def write_project(
         raise _refused("writing the project", code, stdout, stderr)
     with zipfile.ZipFile(orca_own) as z:
         shift = _item_shift(z.read("3D/3dmodel.model").decode())
+        _plate_angle_kept(z.read("Metadata/project_settings.config").decode(),
+                          pose.plate_angle(settings.infill_angle)
+                          if settings.infill_angle is not None else None)
     pose = Pose(pose.rotation_deg, pose.matrix, shift)
 
     volumes: list[tuple[Region, trimesh.Trimesh, dict[str, str]]] = []

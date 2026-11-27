@@ -4,7 +4,7 @@ mqucifer/print-shop#339. On the Mac, with Orca installed and the bench's second 
 (`scripts/bench.py build cae`):
 
     uv run python scripts/settings_study.py run PART.stl --assembly A.json --part NAME \\
-        --nozzle 0.4 --filament NAME [--turn RX,RY,RZ] [--context PATH] \\
+        --nozzle 0.4 --filament NAME [--turn RX,RY,RZ|RX,RY,fit] [--context PATH] \\
         (--case 'NAME=LOAD ARGS' ... | --needs RUN/record/needs.json [--need ID ...]) \\
         [--out DIR] [--ledger PATH] [--max-candidates N] [--max-hours H]
     uv run python scripts/settings_study.py lessons [STUDY]
@@ -17,7 +17,10 @@ mqucifer/print-shop#339. On the Mac, with Orca installed and the bench's second 
 file, which `load` reads (`docs/bench.md`, "The assembly file"); `--part` names it there. The
 assembly is what `load` reads the part's load cases on: the part alone with what holds and loads
 it, read in one pass. `--turn` is the pose it prints in, which must stand the assembly's
-`layers` axis up. Each `--case` is a name and `load`'s words after the assembly file, as
+`layers` axis up: its turn about z, the part's up axis, may be any angle, or `fit` for `fit-bed`'s
+own turn, the least that fits the bed (mqucifer/print-shop#351). A pose that doesn't fit the bed
+is refused before Orca runs, saying the turn that fits, or the least footprint where none does.
+Each `--case` is a name and `load`'s words after the assembly file, as
 `'standing=--weight 30 --at 10,10,700'` or `'lifted=--lift top'`; or `--needs` takes each
 `load` need of a design run's `record/needs.json` (only `--need`'s, where given), with its own
 figure and limit, the run's assembly word replaced by `--assembly`.
@@ -36,6 +39,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import math
 import shlex
 import sys
 import tempfile
@@ -48,17 +52,17 @@ from print_shop.bench.assembly import read as read_assembly
 from print_shop.bench.report import NoAnswer
 from print_shop.env import SETTINGS_PATH, load_env
 from print_shop.expert.client import LLMConfig
-from print_shop.ingest.orientation import AXIS_ALIGNED, candidates, write_rotated
+from print_shop.ingest.orientation import AXIS_ALIGNED, scored, write_rotated
 from print_shop.ledger import Ledger, ledger_path
 from print_shop.rounds.lessons import Refused
 from print_shop.runtime import bed_type, job_profiles
 from print_shop.setup.context import read_context
 from print_shop.setup.features import measure
 from print_shop.setup.model import setup_llm
-from print_shop.slicer.regions import Pose
+from print_shop.slicer.regions import Bed, Pose, degrees_said, turned_to_fit
 from print_shop.slicer.store import NoChoice
 from print_shop.study import lessons
-from print_shop.study.candidate import Shaper
+from print_shop.study.candidate import Shaper, study_poses, unfit
 from print_shop.study.loop import StudyLoop, StudyPart, llm_chat, run
 from print_shop.study.reading import (
     BenchLoad,
@@ -79,13 +83,18 @@ def _case(text: str) -> Case:
     return Case(name.strip(), tuple(shlex.split(words)))
 
 
-def _turn(text: str) -> tuple[float, float, float]:
+def _turn(text: str) -> tuple[float, float, float | None]:
+    """Three angles in degrees, or two and `fit` for fit-bed's own turn about z (None)."""
+    words = [w.strip() for w in text.split(",")]
     try:
-        values = tuple(float(v) for v in text.split(","))
+        if len(words) == 3 and words[2] == "fit":
+            return float(words[0]), float(words[1]), None
+        values = tuple(float(v) for v in words)
     except ValueError:
         values = ()
-    if len(values) != 3:
-        raise argparse.ArgumentTypeError("--turn is three angles, RX,RY,RZ, in degrees")
+    if len(values) != 3 or not all(math.isfinite(v) for v in values):
+        raise argparse.ArgumentTypeError("--turn is three angles, RX,RY,RZ, in degrees, or "
+                                         "RX,RY,fit for fit-bed's own turn about z")
     return values[0], values[1], values[2]
 
 
@@ -113,12 +122,6 @@ def study(args: argparse.Namespace) -> int:
     if not isinstance(mesh, trimesh.Trimesh):
         print(f"{stl.name} isn't one mesh", file=sys.stderr)
         return 2
-    turn = args.turn
-    if Pose.of(mesh, turn).layers() != placed.layers:
-        print(f"--turn {','.join(f'{v:g}' for v in turn)} stands the part's own "
-              f"{Pose.of(mesh, turn).layers() or 'no axis'} up, but {assembly_path.name} gives "
-              f"its layers along {placed.layers}: give the pose it prints in", file=sys.stderr)
-        return 2
     out: Path = (args.out or Path(tempfile.mkdtemp(prefix="settings-study-"))).resolve()
     out.mkdir(parents=True, exist_ok=True)
     env = load_env(SETTINGS_PATH)
@@ -127,16 +130,26 @@ def study(args: argparse.Namespace) -> int:
         # process's own Cool Plate won't take PETG.
         profiles = job_profiles(None, out, bed=bed_type(env), nozzle_mm=args.nozzle,
                                 filament=args.filament)
+        bed = Bed.of(Path(profiles.machine))
     except (NoChoice, ValueError) as exc:
         print(exc, file=sys.stderr)
         return 2
-    context = read_context(stl, args.context) if args.context else None
-    poses = candidates(stl)
-    kept = next(p for p in poses if p.rotation_deg == turn) if turn in AXIS_ALIGNED else None
-    if kept is None:
-        print("--turn is one of the poses the print loop turns parts by: "
-              + "; ".join(",".join(f"{v:g}" for v in p) for p in AXIS_ALIGNED), file=sys.stderr)
+    rx, ry, rz = args.turn
+    # `fit`: fit-bed's own turn about the up axis, the least that fits (`bench.footprint`).
+    turn = (turned_to_fit(mesh, (rx, ry), bed).turn if rz is None else (rx, ry, rz))
+    if Pose.of(mesh, turn).layers() != placed.layers:
+        print(f"--turn {degrees_said(turn)} stands the part's own "
+              f"{Pose.of(mesh, turn).layers() or 'no axis'} up, but {assembly_path.name} gives "
+              f"its layers along {placed.layers}: give the pose it prints in", file=sys.stderr)
         return 2
+    # Refused before Orca runs: a pose that doesn't fit the bed, saying what would.
+    if why := unfit(mesh, turn, bed, placed.layers):
+        print(why, file=sys.stderr)
+        return 2
+    context = read_context(stl, args.context) if args.context else None
+    offered = study_poses(mesh, turn, bed)
+    poses = tuple(scored(mesh, t) for t in offered)
+    kept = poses[0]
     posed = write_rotated(stl, turn, out / "posed" / stl.name)
     features = measure(posed, kept.bed_contact_area_mm2)
     keys = lessons.keys(features, assembly, args.part, context)
@@ -154,16 +167,17 @@ def study(args: argparse.Namespace) -> int:
     part = StudyPart(
         name=args.part, stl=stl, turn=turn, cases=tuple(cases),
         shaper=Shaper(mesh, meshes, context, assembly, args.part,
-                      (turn, *(p for p in AXIS_ALIGNED if p != turn))),
+                      offered),
         slicing=OrcaSlicing(stl, profiles, meshes),
         loading=BenchLoad(assembly_path, args.part),
         defaults=defaults(profiles, stl, turn), material=placed.material,
         workdir=out / "candidates", keys=keys,
-        poses=(kept, *(p for p in poses if p.rotation_deg != turn)),
+        poses=poses,
         lessons=tuple(kept_lessons), earlier=tuple(studied_before),
         wall_sequence=str(process.get("wall_sequence", "")), filament=args.filament,
     )
-    print(f"studying {args.part} under {len(cases)} load cases, in {out}", flush=True)
+    print(f"studying {args.part} turned {degrees_said(turn)} under {len(cases)} load cases, "
+          f"in {out}", flush=True)
     result = run(loop, part)
     names = [c.name for c in cases]
     (out / "study.md").write_text(table(result, args.part, names))
@@ -194,7 +208,8 @@ def main(argv: list[str] | None = None) -> int:
     go.add_argument("--nozzle", type=float, required=True, help="the nozzle, in mm (0.4)")
     go.add_argument("--filament", required=True, help="a variety, or a tuning's name")
     go.add_argument("--turn", type=_turn, default=AXIS_ALIGNED[0], metavar="RX,RY,RZ",
-                    help="the pose it prints in, in degrees about x, then y, then z")
+                    help="the pose it prints in, in degrees about x, then y, then z, the "
+                         "part's up axis; RX,RY,fit turns it about z by fit-bed's own turn")
     go.add_argument("--context", type=Path, help="a sidecar or design run's folder, for its fits")
     go.add_argument("--case", type=_case, action="append", metavar="NAME=ARGS",
                     help="a load case: its name and load's words after the assembly file")
