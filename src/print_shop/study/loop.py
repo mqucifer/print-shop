@@ -54,7 +54,15 @@ from print_shop.study.candidate import (
     poses_said,
 )
 from print_shop.study.published import published
-from print_shop.study.reading import Case, Loading, Reading, Slicing, figures, margin_said
+from print_shop.study.reading import (
+    Case,
+    Loading,
+    Reading,
+    Slicing,
+    figures,
+    margin_said,
+    unchecked,
+)
 
 __all__ = [
     "LEAST_OWN",
@@ -242,6 +250,13 @@ def read_candidate(part: StudyPart, candidate: Candidate) -> Reading:
     except Exception as exc:  # noqa: BLE001 - Orca failing is the candidate's answer, said
         reading.error = f"Orca couldn't slice it: {type(exc).__name__}: {exc}"[:400]
         return reading
+    if reading.sliced.unbuilt:
+        # `load` reads a region as asked: where Orca built less, it would read the part stronger
+        # than it prints, so the candidate fails as not as sliced, and isn't read.
+        reading.error = ("not as sliced: Orca didn't build what its regions ask, and load would "
+                         "read them as asked, stronger than printed: "
+                         + "; ".join(reading.sliced.unbuilt))[:900]
+        return reading
     for case in part.cases:
         try:
             record = part.loading(candidate, reading.sliced, case, out / case.name)
@@ -301,9 +316,10 @@ def reading_said(reading: Reading, base: Reading | None, most: int = 3) -> list[
     """A reading as the model and the table say it: its time and grams against the defaults, and
     each case's worst figures, where and which way."""
     lines = [f"{reading.candidate.name}: {reading.candidate.said()}"]
+    if reading.sliced is not None:
+        lines.append("  " + _against(reading, base))
     if reading.error:
         return [*lines, f"  {reading.error}"]
-    lines.append("  " + _against(reading, base))
     for case in reading.cases:
         worst = sorted(case.figures, key=lambda f: -f.share)[:most]
         verdict = case.verdict if case.passes or case.verdict != "OK" else "OVER ITS LIMIT"
@@ -312,6 +328,11 @@ def reading_said(reading: Reading, base: Reading | None, most: int = 3) -> list[
         lines += [f"    {f.said()}; {margin_said(f.margin)}" for f in worst]
     if reading.sliced is not None:
         lines += [f"  {line}" for line in reading.sliced.band_said()]
+        lines += [f"  not read from the layers, so load takes it as asked: {line}"
+                  for line in reading.sliced.unread]
+        if loose := unchecked(reading.sliced.printed):
+            lines.append("  below the densities the published tests reach, so unchecked by "
+                         "any: " + "; ".join(loose))
     return lines
 
 

@@ -8,10 +8,11 @@ walls as built against what `load` reads. Nothing in it was printed or armed.
 
 from __future__ import annotations
 
+import math
 from typing import Any
 
 from print_shop.study.loop import StudyResult, front, reading_said
-from print_shop.study.reading import Reading, margin_said
+from print_shop.study.reading import Reading, margin_said, unchecked
 
 __all__ = ["as_plain", "table"]
 
@@ -39,6 +40,8 @@ def _cell_grams(r: Reading, base: Reading | None) -> str:
 
 
 def _cell_case(r: Reading, name: str) -> str:
+    if r.error:
+        return "not as sliced" if r.error.startswith("not as sliced") else "not sliced"
     case = next((c for c in r.cases if c.case == name), None)
     if case is None:
         return "-"
@@ -48,7 +51,11 @@ def _cell_case(r: Reading, name: str) -> str:
     if worst is None:
         return case.verdict
     mark = "" if case.passes else " FAILS"
-    rests = "*" if worst.infill else ""
+    # Only where no published test reaches its density (mqucifer/print-shop#342's `unchecked`):
+    # every figure of a printed part rests on the infill model.
+    rests = "*" if worst.unchecked else ""
+    if not math.isfinite(worst.share):
+        return f"past its limit{rests}{mark}"
     return f"{100 * worst.share:.0f}%{rests} ({margin_said(worst.margin)}){mark}"
 
 
@@ -65,8 +72,10 @@ def table(result: StudyResult, part: str, cases: list[str]) -> str:
            f"under {len(cases)} load case{'s' if len(cases) != 1 else ''}, by {result.model}, "
            f"in {result.seconds / 60:.0f} min: {result.ended}. Nothing was printed or armed.",
            "", "Each case's cell is its worst figure as a share of its limit, and the margin "
-           "left. * rests on the infill model's published tests, unchecked by a print "
-           "(mqucifer/print-shop#340).", "",
+           "left. Every figure of a printed part rests on the infill model's published tests, "
+           "which no print has checked yet (mqucifer/print-shop#340); * is a figure whose core, "
+           "or the core its skin rests on, is below the density any published test of its "
+           "pattern reaches, so no test checks it.", "",
            "| Candidate | Settings | Time | Grams | " + " | ".join(cases) + " | Passes |",
            "|---|---|---|---|" + "---|" * len(cases) + "---|"]
     for r in rows:
@@ -82,6 +91,8 @@ def table(result: StudyResult, part: str, cases: list[str]) -> str:
         out.append(f"Why: {result.reason}")
         out.append("")
         out.append(_past_defaults(chosen, base))
+        out.append("")
+        out.append(_rests_on(chosen))
     else:
         why = result.reason or result.ended
         out.append(f"**No recommendation**: {why}.")
@@ -106,11 +117,12 @@ def table(result: StudyResult, part: str, cases: list[str]) -> str:
             "`docs/bench.md`), none yet checked by a print from this printer: that's the "
             "coupons, mqucifer/print-shop#340. A figure marked * rests on them, and the skin's "
             "rest on them too, as what the skin carries is what the core doesn't."]
-    unchecked = sorted({r.candidate.name for r in rows for c in r.cases for f in c.figures
-                        if f.unchecked})
-    if unchecked:
-        out.append(f"- **Below the densities the tests reach:** {', '.join(unchecked)}: their "
-                   "core's figures are its lines' at the tests' share, which no test checks.")
+    loose = [f"{r.candidate.name} ({'; '.join(found)})" for r in rows if r.sliced is not None
+             and (found := unchecked(r.sliced.printed))]
+    if loose:
+        out.append(f"- **Below the densities the tests reach:** {', '.join(loose)}: their "
+                   "core's figures are its lines' at the tests' share, which no test checks, "
+                   "and so are its skin's, which rest on them.")
     notes = sorted({n for r in rows for c in r.cases for n in c.notes
                     if "read solid" in n or "solved again" in n})
     if notes:
@@ -128,6 +140,22 @@ def table(result: StudyResult, part: str, cases: list[str]) -> str:
         out += [f"- {lesson['text']} (shown by {', '.join(lesson['shown_by']) or 'the study'})"
                 for lesson in result.lessons]
     return "\n".join(out) + "\n"
+
+
+def _rests_on(chosen: Reading) -> str:
+    """What the recommended candidate's figures rest on, in its own paragraph."""
+    said = ["Its figures rest on the infill model's published tests, which no print from this "
+            "printer has checked yet (mqucifer/print-shop#340)"]
+    if chosen.sliced is not None and (loose := unchecked(chosen.sliced.printed)):
+        said.append("and some are checked by no test at all, below the densities they reach: "
+                    + "; ".join(loose))
+    else:
+        said.append("and every core's density is within what the tests of its pattern reach")
+    text = ", ".join(said) + "."
+    if chosen.sliced is not None and chosen.sliced.unread:
+        text += (" Not read from the layers, so load takes it as asked: "
+                 + "; ".join(chosen.sliced.unread) + ".")
+    return text
 
 
 def _past_defaults(chosen: Reading, base: Reading | None) -> str:

@@ -45,7 +45,10 @@ from print_shop.study.reading import (
     Sliced,
     _sequenced,
     cases_from_needs,
+    check_names,
     figures,
+    margin_said,
+    unchecked,
 )
 from print_shop.study.table import as_plain, table
 from tests.fakes import STORE_PROFILES
@@ -610,3 +613,160 @@ def test_past_studies_gives_the_kept_lessons_and_what_earlier_studies_recommende
     assert "- lesson 4: 3 walls carry a bar across its layers" in said
     assert "- rail (rail.stl), study s: recommended 4 walls" in said
     assert "Kept lessons from studies of parts like this one" in model.shown[0][1]["content"]
+
+
+# --------------------------------------------------------------------------
+# mqucifer/print-shop#345's cold review
+# --------------------------------------------------------------------------
+
+
+UNBUILT = ("ring's walls: asked 6, read 2, without the regions 2: not as asked (the walls fill "
+           "it: only 2 fit in its width, and nothing is left inside them)")
+
+
+def test_a_region_orca_didnt_build_as_asked_fails_as_not_as_sliced_and_isnt_read(
+    part: StudyPart,
+) -> None:
+    """`load` reads a region as asked: a 6-wall ring where Orca laid 2 would read stronger than
+    printed, so it's failed, never read, and never recommended."""
+    slicing = fake_slicing([])
+    loaded: list[tuple[str, str]] = []
+
+    def thinner(candidate: Candidate, out: Path) -> Sliced:
+        sliced = slicing(candidate, out)
+        if candidate.regions:
+            sliced.unbuilt = [UNBUILT]
+        return sliced
+
+    part.slicing, part.loading = thinner, fake_loading(loaded)
+    model = Model([THREE_WALLS], [FOUR_WALLS], [BOLT],
+                  [("recommend", {"candidate": "c3", "reason": "the ring holds the bolt"})],
+                  [("recommend", {"candidate": "c1", "reason": "r"})])
+    result = run(StudyLoop(chat=model), part)
+    ring = result.readings[3]
+    assert not ring.passes and not ring.cases
+    assert ring.error.startswith("not as sliced: Orca didn't build what its regions ask, and "
+                                 "load would read them as asked, stronger than printed: ring's")
+    assert ("c3", "standing") not in loaded, "it isn't read by load"
+    assert [c.result for c in result.calls if c.tool == "recommend"][0].startswith(
+        "refused: c3 doesn't pass every case: not as sliced")
+    assert result.recommended == "c1"
+    text = table(result, "bar", [c.name for c in CASES])
+    assert "| not as sliced | not as sliced | no |" in text
+    assert "- c3: not as sliced: Orca didn't build what its regions ask" in text
+    read = [c.result for c in result.calls if c.tool == "read"][2]
+    assert "Orca: 36 min 30 s" in read and "not as sliced" in read
+
+
+def _need(number: str, numbers: dict[str, Any], at_least: float | None = None,
+          at_most: float | None = None) -> Any:
+    case = Case("holds", (), number, at_most=at_most, at_least=at_least)
+    return figures({"verdict": "OK", "numbers": numbers}, "bar", case)
+
+
+@pytest.mark.parametrize("number,numbers,at_least,at_most,passes", [
+    # A list's index is followed, as a design run's need follows it.
+    ("holds.0.n", {"holds": [{"n": 10}]}, 200, None, False),
+    ("holds.0.n", {"holds": [{"n": 250}]}, 200, None, True),
+    # No figure at all fails, as the need does.
+    ("moves_mm", {}, None, 3, False),
+    # A limit of 0, and a figure of 0 or less.
+    ("gap.mm", {"gap": {"mm": -0.3}}, 0.2, None, False),
+    ("gap.mm", {"gap": {"mm": -0.3}}, 0, None, False),
+    ("gap.mm", {"gap": {"mm": 0.0}}, 0, None, True),
+    ("moves_mm", {"moves_mm": 0.0}, None, 0, True),
+    ("moves_mm", {"moves_mm": 0.1}, None, 0, False),
+    # At its limit, to arithmetic's noise, passes.
+    ("moves_mm", {"moves_mm": 3.0 + 1e-12}, None, 3, True),
+    ("moves_mm", {"moves_mm": 3.5}, None, 3, False),
+])
+def test_a_cases_need_passes_exactly_where_the_design_runs_need_would(
+    number: str, numbers: dict[str, Any], at_least: float | None, at_most: float | None,
+    passes: bool,
+) -> None:
+    from print_shop.rounds.needs import Need, judge
+
+    read = _need(number, numbers, at_least, at_most)
+    need = Need(id="holds", what="it holds", source="derived", by="bench", command="load a.json",
+                number=number, at_least=at_least, at_most=at_most)
+    assert judge(need, 0, "verdict: OK", {"verdict": "OK", "numbers": numbers}).passed is passes
+    assert read.passes is passes
+    (figure,) = read.figures
+    assert figure.what == f"{number} (the need's own)"
+    if not passes:
+        assert read.worst is figure and figure.breaks
+
+
+def test_a_missing_need_figure_says_so_in_the_needs_own_words() -> None:
+    (figure,) = _need("moves_mm", {"loads": []}, at_most=3).figures
+    assert figure.said() == ("moves_mm (the need's own): this answer has no number `moves_mm`: "
+                             "it has loads, so it fails")
+    assert margin_said(figure.margin) == "past its limit"
+
+
+def test_the_skin_resting_on_an_unchecked_core_is_unchecked_too() -> None:
+    record = fake_loading([])(
+        Candidate("c1", Settings(infill=15.0)), Sliced(1, 1.0, OWN, {}), CASES[0], Path())
+    read = figures(record, "bar", CASES[0])
+    skin = [f for f in read.figures if f.what.startswith("its skin")]
+    assert skin and all(f.unchecked for f in skin)
+    record = fake_loading([])(
+        Candidate("c1", Settings(infill=25.0)), Sliced(1, 1.0, replace(OWN, infill=25.0), {}),
+        CASES[0], Path())
+    assert not any(f.unchecked for f in figures(record, "bar", CASES[0]).figures)
+
+
+def test_unchecked_is_by_pattern_and_density_as_load_reads_it() -> None:
+    printed = {**as_json(Printed(replace(OWN, pattern="gyroid", infill=30.0))), "regions": [
+        {"name": "ring", "cylinder": {}, "walls": 5},
+        {"name": "dense", "box": [[0, 0, 0], [1, 1, 1]], "infill": 45},
+        {"name": "grid", "box": [[0, 0, 0], [1, 1, 1]], "pattern": "grid"}]}
+    assert unchecked(printed) == [
+        "the part: gyroid at 30%, which the published tests of gyroid reach only from 40%",
+    ]
+    assert unchecked(as_json(Printed(replace(OWN, pattern="grid", infill=15.0)))) == [
+        "the part: grid at 15%, which the published tests of grid reach only from 20%"]
+    assert unchecked(as_json(Printed(replace(OWN, pattern="grid", infill=20.0)))) == []
+
+
+def test_the_recommendation_says_what_no_test_checks_and_the_star_marks_only_that(
+    part: StudyPart,
+) -> None:
+    model = Model([THREE_WALLS], [("read", {"why": "low", "settings": {"walls": 4,
+                                                                        "infill": 18}})],
+                  [("recommend", {"candidate": "c2", "reason": "the least plastic"})])
+    result = run(StudyLoop(chat=model), part)
+    text = table(result, "bar", [c.name for c in CASES])
+    para = text.split("**Recommended: c2**", 1)[1].split("## ", 1)[0]
+    assert ("some are checked by no test at all, below the densities they reach: the part: "
+            "rectilinear at 18%, which the published tests of rectilinear reach only from 20%"
+            in para)
+    rows = {line.split(" | ")[0]: line for line in text.splitlines() if line.startswith("| c")}
+    assert "*" not in rows["| c1"], "25% rectilinear is within its tests"
+    assert "*" in rows["| c2"]
+    other = Model([THREE_WALLS], [FOUR_WALLS],
+                  [("recommend", {"candidate": "c1", "reason": "r"})])
+    text = table(run(StudyLoop(chat=other), part), "bar", [c.name for c in CASES])
+    assert "every core's density is within what the tests of its pattern reach" in text
+
+
+@pytest.mark.parametrize("names,refusal", [
+    (["holds", "lift", "holds"], "holds is given twice"),
+    (["need-1", "need-1"], "need-1 is given twice"),
+    (["a/b"], "letters, digits"),
+    ([".."], "letters, digits"),
+])
+def test_two_cases_of_one_name_or_a_name_no_folder_takes_are_refused(
+    names: list[str], refusal: str,
+) -> None:
+    with pytest.raises(ValueError, match=refusal):
+        check_names([Case(n, ()) for n in names])
+    check_names([Case("holds", ()), Case("lift", ())])
+
+
+def test_a_need_named_like_the_one_auto_named_before_it_is_refused(tmp_path: Path) -> None:
+    needs = tmp_path / "needs.json"
+    needs.write_text(json.dumps([{"command": "load a.json --lift top"},
+                                 {"id": "need-1", "command": "load a.json --weight 3 --at 0,0,1"}]))
+    with pytest.raises(ValueError, match="need-1 is given twice"):
+        check_names(cases_from_needs(needs, []))

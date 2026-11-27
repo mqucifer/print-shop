@@ -33,6 +33,8 @@ def read(tmp_path_factory: pytest.TempPathFactory) -> dict[str, Sliced]:
                                             "wall_sequence": "inner-outer-inner wall"}),
         "joints": shaper.candidate("joints", {"settings": {"walls": 3}, "regions": [
             {"joints": "all", "margin": 2, "faces": True, "walls": 5, "infill": 50}]}),
+        "roomy": shaper.candidate("roomy", {"settings": {"walls": 2}, "regions": [
+            {"joints": ["bar+post-bolt-1"], "margin": 6, "walls": 4, "infill": 50}]}),
     }
     return {name: slicing(candidate, folder / name) for name, candidate in asked.items()}
 
@@ -66,13 +68,30 @@ def test_more_walls_and_infill_cost_time_and_grams_and_the_wall_order_is_orcas(
 def test_regions_round_the_joints_are_sliced_as_orcas_modifiers_and_read_back(
     read: dict[str, Sliced],
 ) -> None:
+    roomy = read["roomy"]
+    assert roomy.base_time_s is not None and roomy.time_s is not None
+    assert roomy.time_s > roomy.base_time_s, "the region costs time"
+    assert roomy.printed["regions"][0]["name"] == "bar+post-bolt-1"
+    said = "\n".join(roomy.regions)
+    assert "bar+post-bolt-1: built as asked" in said
+    assert "walls: asked 4, read 4, without the regions 2: as asked" in said
+    assert "infill: asked 50, read 50" in said
+    assert roomy.unbuilt == [] and roomy.unread == []
+    assert set(roomy.region_bands) == {"bar+post-bolt-1"}
+
+
+def test_walls_orca_couldnt_fit_in_a_region_are_said_as_not_built(
+    read: dict[str, Sliced],
+) -> None:
+    """mqucifer/print-shop#345's cold review: 5 walls asked in a 2 mm band round the hole and
+    the latch, where Orca laid 2. `load` would read 5, so the study fails it as not as sliced."""
     joints = read["joints"]
-    assert joints.base_time_s is not None and joints.time_s is not None
-    assert joints.time_s > joints.base_time_s, "the regions cost time"
     names = [r["name"] for r in joints.printed["regions"]]
     assert names == ["bar+post-bolt-1", "bar+lid-latch"]
     assert joints.printed["regions"][1]["mesh"].startswith("bar+lid-latch-faces-")
-    said = "\n".join(joints.regions)
-    assert "bar+post-bolt-1: built as asked" in said or "bar+post-bolt-1: not all" in said
-    assert "infill: asked 50" in said
-    assert set(joints.region_bands) == {"bar+post-bolt-1", "bar+lid-latch"}
+    assert joints.unbuilt == [
+        f"{name}'s walls: asked 5, read 2, without the regions 3: not as asked (the walls fill "
+        "it: only 2 fit in its width, and nothing is left inside them)"
+        for name in names]
+    assert joints.unread == ["bar+post-bolt-1's infill: asked 50, read -: not read (nothing of "
+                             "it inside the region)"]

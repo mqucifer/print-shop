@@ -60,7 +60,14 @@ from print_shop.slicer.store import NoChoice
 from print_shop.study import lessons
 from print_shop.study.candidate import Shaper
 from print_shop.study.loop import StudyLoop, StudyPart, llm_chat, run
-from print_shop.study.reading import BenchLoad, Case, OrcaSlicing, cases_from_needs, defaults
+from print_shop.study.reading import (
+    BenchLoad,
+    Case,
+    OrcaSlicing,
+    cases_from_needs,
+    check_names,
+    defaults,
+)
 from print_shop.study.table import as_plain, table
 
 
@@ -96,6 +103,11 @@ def study(args: argparse.Namespace) -> int:
         cases += cases_from_needs(args.needs, args.need or [])
     if not cases:
         print("no load cases: give --case, or --needs with load needs", file=sys.stderr)
+        return 2
+    try:
+        check_names(cases)
+    except ValueError as exc:
+        print(exc, file=sys.stderr)
         return 2
     mesh = trimesh.load(stl, force="mesh")
     if not isinstance(mesh, trimesh.Trimesh):

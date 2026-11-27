@@ -16,8 +16,11 @@ layers along the axis its pose stands up, beside copies of the files it names an
 mesh. Each load case is one `load` of it. Of the reply, this part's figures are read
 (`figures`): its skin's, or the whole part's where it's read solid, pulled across its layers and
 stretched any way, and each core's, against their own limits; each joint it's in, by its nearest
-figure to its limit; and the case's own figure, where the need it came from gives one. Each is a
-share of its limit, and its margin is what's left. **What rests on the infill model says so:** a
+figure to its limit; and the case's own figure, where the need it came from gives one, judged
+exactly as the design run's need is (`rounds.needs`). Each is a share of its limit, and its margin
+is what's left. **A region Orca didn't build as asked** (the reader's `not as asked`, or `as the
+part round it`) would be read by `load` as asked, stronger than printed: its candidate fails as
+not as sliced, and isn't read. **What rests on the infill model says so:** a
 core's figures are its published tests' (`bench/infill.py`), none checked by a print from this
 printer yet (mqucifer/print-shop#340), and below the density they reach, checked by none. What
 `load` solves again round a joint is read solid, stronger than printed, and the reply says so.
@@ -26,6 +29,7 @@ printer yet (mqucifer/print-shop#340), and below the density they reach, checked
 from __future__ import annotations
 
 import json
+import math
 import re
 import shlex
 import shutil
@@ -34,9 +38,11 @@ from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
 
-from print_shop.bench import host
+from print_shop.bench import host, infill
 from print_shop.bench.as_printed import wall_thickness
 from print_shop.bench.printed import Printed, Settings, as_json
+from print_shop.rounds.needs import Need, _judge_number
+from print_shop.rounds.needs import Reading as NeedReading
 from print_shop.slicer import gcode
 from print_shop.slicer.orca import SlicerProfiles
 from print_shop.slicer.regions import (
@@ -59,8 +65,10 @@ __all__ = [
     "Reading",
     "Sliced",
     "cases_from_needs",
+    "check_names",
     "figures",
     "margin_said",
+    "unchecked",
 ]
 
 #: The walls' band and `load`'s wall thickness differ by more than this share of a line's width,
@@ -112,6 +120,22 @@ def cases_from_needs(path: Path, only: list[str]) -> list[Case]:
     return found
 
 
+def check_names(cases: list[Case]) -> None:
+    """Each case's name is its own, and a folder's name: the table's columns and each case's
+    `load` replies (`candidates/NAME/CASE/`) are keyed by it.
+
+    Raises:
+        ValueError: Naming each name given twice, or that can't be a folder's.
+    """
+    names = [c.name for c in cases]
+    if twice := sorted({n for n in names if names.count(n) > 1}):
+        raise ValueError(f"each load case has a name of its own: {', '.join(twice)} is given "
+                         "twice, between --case and the needs' ids. Name them apart")
+    if bad := [n for n in names if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]*", n)]:
+        raise ValueError(f"a case's name is letters, digits, '.', '_' and '-': not "
+                         f"{', '.join(repr(n) for n in bad)}")
+
+
 @dataclass(frozen=True)
 class Figure:
     """One figure of a case against its limit."""
@@ -129,12 +153,24 @@ class Figure:
     unchecked: bool = False
     #: A joint's nearest figure to its limit, said as its share alone.
     joint: bool = False
+    #: Whether it holds, where that's judged as a design run's need is (`rounds.needs`), and
+    #: not by its share alone: a limit of 0, a figure of 0 or less, or no figure at all.
+    held: bool | None = None
+    #: The need's own words for it, where it's judged so.
+    words: str = ""
+
+    @property
+    def breaks(self) -> bool:
+        """Whether it's past its limit."""
+        return self.held is False or (self.held is None and self.share > 1.0)
 
     @property
     def margin(self) -> float:
         return 1.0 - self.share
 
     def said(self) -> str:
+        if self.words:
+            return f"{self.what}: {self.words}" + ("" if self.held else ", so it fails")
         at = f" at ({', '.join(f'{v:g}' for v in self.where)})" if self.where else ""
         way = f", {self.way}" if self.way else ""
         rests = (" [infill model, unchecked: below its tests' densities]" if self.unchecked
@@ -147,7 +183,8 @@ class Figure:
     def plain(self) -> dict[str, Any]:
         return {"what": self.what, "value": self.value, "limit": self.limit, "unit": self.unit,
                 "share": round(self.share, 4), "where": list(self.where or ()),
-                "way": self.way, "infill": self.infill, "unchecked": self.unchecked}
+                "way": self.way, "infill": self.infill, "unchecked": self.unchecked,
+                "held": self.held, "words": self.words}
 
 
 @dataclass
@@ -167,7 +204,7 @@ class CaseRead:
 
     @property
     def passes(self) -> bool:
-        return self.verdict == "OK" and all(f.share <= 1.0 for f in self.figures)
+        return self.verdict == "OK" and not any(f.breaks for f in self.figures)
 
     def plain(self) -> dict[str, Any]:
         return {"case": self.case, "verdict": self.verdict, "why": self.why,
@@ -197,6 +234,11 @@ class Sliced:
     region_bands: dict[str, tuple[float | None, float]] = field(default_factory=dict)
     project: Path | None = None
     gcode: Path | None = None
+    #: What of its regions Orca didn't build as asked, each the reader's line
+    #: (`regions.Said`): `load` would read the region as asked, stronger than printed. And
+    #: what couldn't be read from the layers, which `load` takes as asked.
+    unbuilt: list[str] = field(default_factory=list)
+    unread: list[str] = field(default_factory=list)
 
     def band_said(self) -> list[str]:
         """The walls' band against `load`'s thickness, where it was read."""
@@ -220,7 +262,7 @@ class Sliced:
         return {"time_s": self.time_s, "grams": self.grams, "base_time_s": self.base_time_s,
                 "base_grams": self.base_grams, "band_mm": self.band_mm,
                 "walls_mm": self.walls_mm, "print": self.printed, "regions": self.regions,
-                "bands": self.band_said(),
+                "bands": self.band_said(), "unbuilt": self.unbuilt, "unread": self.unread,
                 "project": str(self.project) if self.project else None}
 
 
@@ -263,7 +305,7 @@ class Reading:
             if case.verdict not in ("OK", "FAIL"):
                 said.append(f"{case.case}: {case.verdict}, {case.why}"[:300])
                 continue
-            over = [f for f in case.figures if f.share > 1.0]
+            over = [f for f in case.figures if f.breaks]
             said += [f"{case.case}: {f.said()}" for f in over]
             if case.verdict == "FAIL" and not over:
                 said.append(f"{case.case}: FAIL, {case.why}"[:300])
@@ -279,6 +321,8 @@ class Reading:
 
 def margin_said(margin: float) -> str:
     """A worst figure's margin in words: what's left under its limit, or how far past it."""
+    if not math.isfinite(margin):
+        return "past its limit"
     if margin >= 0:
         return f"a margin of {100 * margin:.0f}%"
     return f"{100 * -margin:.0f}% past its limit"
@@ -327,13 +371,53 @@ def _joint_share(joint: dict[str, Any]) -> float | None:
     return None
 
 
-def _number_at(numbers: dict[str, Any], path: str) -> float | None:
-    found: Any = numbers
-    for key in path.split("."):
-        if not isinstance(found, dict) or key not in found:
-            return None
-        found = found[key]
-    return float(found) if isinstance(found, int | float) and not isinstance(found, bool) else None
+def _need(record: dict[str, Any], case: Case) -> Figure:
+    """The case's own need's figure, judged exactly as the design run's need is
+    (`rounds.needs`, `number_at` and `_judge_number`): a list's index followed, a figure at its
+    limit to arithmetic's noise passing, and no figure at all failing. Its share is said where
+    it means something, a figure of 0 or more against a limit over 0."""
+    need = Need(id=case.name, what=case.name, source="derived", by="bench", command="load",
+                number=case.number, at_least=case.at_least, at_most=case.at_most)
+    judged = _judge_number(need, NeedReading(need=case.name, by="bench", passed=False, why="",
+                                             verdict=str(record.get("verdict", ""))), record)
+    value = judged.value
+    share: float | None = None
+    if value is not None:
+        if case.at_most is not None and case.at_most > 0 and value >= 0:
+            share = value / case.at_most
+        elif case.at_most is None and case.at_least is not None and case.at_least > 0 \
+                and value > 0:
+            share = case.at_least / value
+    if share is None:
+        share = 0.0 if judged.passed else math.inf
+    elif judged.passed:
+        share = min(share, 1.0)
+    else:
+        share = max(share, math.nextafter(1.0, 2.0))
+    limit = case.at_most if case.at_most is not None else case.at_least
+    return Figure(f"{case.number} (the need's own)", math.nan if value is None else value,
+                  math.nan if limit is None else float(limit), "", share, held=judged.passed,
+                  words=judged.why)
+
+
+def unchecked(printed: dict[str, Any]) -> list[str]:
+    """Each cell of a part's `print` whose core is below the density any published test of its
+    pattern reaches (`infill.checked_from`, mqucifer/print-shop#342), in words: the part's
+    own, and each region's that gives its infill or pattern."""
+    part = {k: v for k, v in printed.items() if k != "regions"}
+    cells = [("the part", part)] + [
+        (f"region {r.get('name')}", {**part, **{k: r[k] for k in ("infill", "pattern")
+                                                if k in r}})
+        for r in printed.get("regions") or () if "infill" in r or "pattern" in r]
+    found = []
+    for name, cell in cells:
+        pattern, density = cell.get("pattern"), cell.get("infill")
+        if pattern in infill.LINES and isinstance(density, int | float):
+            start = infill.checked_from(str(pattern))
+            if density < start:
+                found.append(f"{name}: {pattern} at {density:g}%, which the published tests of "
+                             f"{pattern} reach only from {start:g}%")
+    return found
 
 
 def figures(record: dict[str, Any], part: str, case: Case) -> CaseRead:
@@ -345,9 +429,10 @@ def figures(record: dict[str, Any], part: str, case: Case) -> CaseRead:
     if isinstance(one, dict):
         printed = bool(one.get("printed"))
         # The skin's figures rest on the core's stiffness too: what it carries is what the core
-        # doesn't.
+        # doesn't. So a core no test checks leaves the skin's unchecked too.
+        loose = any(bool(c.get("unchecked")) for c in one.get("cores") or ())
         read.figures += _strains(one, "its skin" if printed else "the part (read solid)",
-                                 printed)
+                                 printed, loose)
         for core in one.get("cores") or ():
             read.figures += _strains(core, f"its core in {core.get('cell', 'the part')}", True,
                                      bool(core.get("unchecked")))
@@ -360,13 +445,7 @@ def figures(record: dict[str, Any], part: str, case: Case) -> CaseRead:
             read.figures.append(Figure(f"joint {name}, {gives}", round(100 * share, 2), 100.0,
                                        "%", share, joint=True))
     if case.number:
-        value = _number_at(numbers, case.number)
-        if value is not None and case.at_most:
-            read.figures.append(Figure(f"{case.number} (the need's own)", value, case.at_most,
-                                       "", value / case.at_most))
-        if value is not None and case.at_least and value > 0:
-            read.figures.append(Figure(f"{case.number} (the need's own, at least)", value,
-                                       case.at_least, "", case.at_least / value))
+        read.figures.append(_need(record, case))
     read.notes = [str(n) for n in record.get("notes") or ()
                   if part in str(n) or "infill" in str(n)]
     return read
@@ -418,9 +497,14 @@ class OrcaSlicing:
                 float(r.asked.layer_height or 0.2)))
                 for r in result.regions if r.region.settings.walls is not None}
             regions = [line for r in result.regions for line in r.lines()]
+            unbuilt = [f"{r.region.name}'s {s.line()}" for r in result.regions for s in r.said
+                       if s.verdict in ("not as asked", "as the part round it")]
+            unread = [f"{r.region.name}'s {s.line()}" for r in result.regions for s in r.said
+                      if s.verdict == "not read"]
             return Sliced(result.time_s, result.grams, settings, result.for_load(),
                           result.base_time_s, result.base_grams, result.band_mm,
-                          _walls_mm(settings), regions, bands, result.project, result.gcode)
+                          _walls_mm(settings), regions, bands, result.project, result.gcode,
+                          unbuilt, unread)
         _, without = write_project(self.stl, Printed(candidate.settings), profiles, out,
                                    candidate.turn, self.meshes, self.binary, self.timeout_s)
         path = slice_project(without, out / "without", self.binary, self.timeout_s)
