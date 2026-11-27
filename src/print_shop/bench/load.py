@@ -595,9 +595,6 @@ class _Model:
         #: tighter than gmsh's sizing would mesh at `close_faces.LEAST`, the least element then.
         self.closes: list[close_faces.Close] = []
         self.tight = 0
-        #: The faces nearest elements CalculiX found turned inside out in a straight try, by
-        #: number from 1, and the size each grows the mesh from (`close_faces.fields`).
-        self.graded: dict[int, float] = {}
         #: Each node's axes held, as CalculiX is told them, by `_add_to`.
         self.constrained: dict[int, set[int]] = {}
         #: The solids each part's own weight is taken from, where they aren't `placed`: in
@@ -866,9 +863,7 @@ class _Model:
         began = time.time()
         # Where the curved try found faces close, the straight one is meshed finer there from
         # the start (mqucifer/print-shop#346).
-        tools = self._gmsh(
-            GmshTools, mesh, close_faces.fields(self.closes, self.size, self.graded)
-        )
+        tools = self._gmsh(GmshTools, mesh, close_faces.fields(self.closes, self.size))
         said = None if mesh.FemMesh.VolumeCount else _gmsh_said(tools)
         for _ in range(RETRIES):
             if said is None or not CROSSED.search(said):
@@ -939,23 +934,10 @@ class _Model:
                     self.closes,
                     self.tight,
                 )
-            graded = {} if self.graded else self._inverted_faces(str(fea.ccx_stdout))
-            if graded:
-                raise _Inverted(
-                    f"CalculiX found an element of the straight mesh turned inside out{where}",
-                    self.closes, self.tight, graded,
-                )  # fmt: skip
             raise NoAnswer(
                 f"CalculiX solved nothing: an element of the mesh, at most {self.size:g} mm, is "
-                f"turned inside out{where}"
-                + (
-                    f", meshed again with the size grown from the {len(self.graded)} curved "
-                    "face(s) nearest the elements a straight try left turned inside out"
-                    if self.graded
-                    else ""
-                )
-                + ". One with a curved side on a small hole or a tight round can be: give a "
-                "finer --mesh"
+                f"turned inside out{where}. One with a curved side on a small hole or a tight "
+                "round can be: give a finer --mesh"
             )
         if (not results or not results[0].NodeStrainXX) and self.two_pass:
             full = memory_met(kills)
@@ -1045,7 +1027,7 @@ class _Model:
         before = {(c.first, c.second) for c in self.closes}
         new = [c for c in found if c not in refused and (c.first, c.second) not in before]
         self.closes += new
-        return close_faces.fields(self.closes, self.size, self.graded), bool(new)
+        return close_faces.fields(self.closes, self.size), bool(new)
 
     def _finer_words(self) -> str:
         finer = self.finer_said()
@@ -1112,34 +1094,6 @@ class _Model:
             + (f"; the faces nearest it: {near}" if near else "")
         )
 
-    def _inverted_faces(self, said: str) -> dict[int, float]:
-        """The curved faces within the mesh of each element CalculiX found turned inside out, by
-        number from 1, each with gmsh's own size there, its 12 elements a turn, no finer than
-        `close_faces.LEAST` (mqucifer/print-shop#346): a straight element is turned inside out
-        only where gmsh left a sliver, as where an element of the mesh's size meets a face it
-        sized far finer at once, and the mesh is grown from them instead."""
-        import FreeCAD as App
-        import Part
-
-        numbers = list(dict.fromkeys(int(n) for n in INVERTED.findall(said)))[:INVERTED_MOST]
-        middles = []
-        for number in numbers:
-            with contextlib.suppress(KeyError, ValueError, TypeError):
-                corners = [self.nodes[n] for n in self.fem.getElementNodes(number)[:4]]
-                middles.append(Part.Vertex(App.Vector(*np.mean(corners, axis=0))))
-        graded: dict[int, float] = {}
-        for face_number, face in enumerate(self.whole.Faces, 1):
-            bend = close_faces.surface_bend(face)
-            if bend > 0:
-                box = face.BoundBox
-                box.enlarge(self.size)
-                if any(box.isInside(m.Point) and m.distToShape(face)[0] <= self.size
-                       for m in middles):  # fmt: skip
-                    own = 2 * math.pi / (close_faces.PER_TURN * bend)
-                    graded[face_number] = max(close_faces.LEAST, min(own, self.size))
-            close_faces._let_go(face)
-        return graded
-
     def _face_owners(self) -> list[frozenset[int]]:
         """Each face of the joined shape's parts, by their number from 0, in the shape's order:
         two where they meet, and none for a core's."""
@@ -1160,10 +1114,8 @@ class _Model:
 
     def finer_said(self) -> dict[str, Any] | None:
         """What's meshed finer where faces are close, for the reply: none where nothing is."""
-        if not self.closes and not self.graded:
-            return None
         if not self.closes:
-            return {"pairs": 0, "graded": len(self.graded), "least_mm": close_faces.LEAST}
+            return None
         faces = {n for c in self.closes for n in c.faces}
         return {
             "pairs": len(self.closes),
@@ -1171,7 +1123,6 @@ class _Model:
             "closest_mm": round(min(c.apart for c in self.closes), 4),
             "tight_faces": self.tight,
             "least_mm": close_faces.LEAST,
-            "graded": len(self.graded),
             "finest_mm": round(close_faces.stepped(min(c.finest for c in self.closes)), 4),
         }
 
@@ -2246,8 +2197,6 @@ CROSSED = re.compile(r"intersect", re.I)
 NEAREST = 4
 #: CalculiX's words for each element it finds turned inside out, with its number.
 INVERTED = re.compile(r"determinant in element\s+(\d+)")
-#: How many of them the mesh is grown round, at the most.
-INVERTED_MOST = 50
 #: How many times the parts are meshed again finer where gmsh's triangles cross, each time
 #: where it says they cross again.
 RETRIES = 4
@@ -2521,18 +2470,6 @@ class Faces:
         return any(face.isSame(f) for f in self.by.get(face.hashCode(), ()))
 
 
-class _Inverted(NoAnswer):
-    """A straight try's mesh has elements CalculiX found turned inside out, beside the curved
-    faces `graded` names: it's meshed once more, its size grown from them (mqucifer/print-shop#346).
-    With the close pairs and tight faces it was meshed with."""
-
-    def __init__(
-        self, said: str, closes: list[close_faces.Close], tight: int, graded: dict[int, float]
-    ) -> None:
-        super().__init__(said)
-        self.closes, self.tight, self.graded = list(closes), tight, dict(graded)
-
-
 class _Curved(NoAnswer):
     """The mesh with its elements' sides curved onto the parts' faces has an element turned
     inside out, or none at all: it's meshed again with them straight. With the pairs of faces
@@ -2602,33 +2539,9 @@ def _solved(
     try:
         with _quiet():
             found = _read_solved(assembly, straight, doc, size)
-    except _Inverted as inverted:
-        first, graded = str(inverted), inverted.graded
     except NoAnswer as stopped:
         # What turned the curved try away is said too, as the reply would have said it.
         stopped.args = (f"{stopped}; before it, the curved mesh: {why[:600]}", *stopped.args[1:])
-        raise
-    else:
-        found["straight"] = why
-        return found
-    # Meshed once more outside the `except`, as the straight try is, grown from the faces
-    # nearest the elements it left turned inside out (mqucifer/print-shop#346).
-    give_back()
-    with step("meshing again straight-sided, grown from the faces nearest elements turned inside "
-              "out"):  # fmt: skip
-        pass
-    doc = App.newDocument("Load")
-    again = model(True)
-    again.closes, again.tight, again.graded = closes, tight, graded
-    try:
-        with _quiet():
-            found = _read_solved(assembly, again, doc, size)
-    except NoAnswer as stopped:
-        stopped.args = (
-            f"{stopped}; before it, the straight mesh: {first[:400]}; and the curved mesh: "
-            f"{why[:400]}",
-            *stopped.args[1:],
-        )
         raise
     found["straight"] = why
     return found
@@ -2689,14 +2602,6 @@ def _finer_said(solved: dict[str, Any]) -> str:
     finer = solved.get("finer")
     if not finer:
         return ""
-    graded = (
-        f", grown from the {finer['graded']} curved face(s) nearest elements a straight try "
-        "left turned inside out"
-        if finer.get("graded")
-        else ""
-    )
-    if not finer["pairs"]:
-        return f", nowhere finer than {finer['least_mm']:g} mm{graded}"
     return (
         f", finer, to at most {finer['finest_mm']:g} mm, on {finer['faces']} face(s) where "
         f"{finer['pairs']} pair(s) of faces that meet nowhere lie closer than its triangles' "
@@ -2708,7 +2613,6 @@ def _finer_said(solved: dict[str, Any]) -> str:
             if finer.get("tight_faces")
             else ""
         )
-        + graded
     )
 
 

@@ -1772,32 +1772,20 @@ def test_a_straight_try_after_a_curved_one_is_meshed_finer_from_the_start(cae: A
 
 def test_an_element_turned_inside_out_is_placed_and_the_curved_try_s_words_kept(cae: Any) -> None:
     """mqucifer/print-shop#346: on a design run's table, CalculiX refused the straight mesh for
-    elements turned inside out, and the reply said only that, and nothing of why the curved try
-    before it didn't stand. Straight, an element is turned inside out only where gmsh left a
-    sliver, as where an element of the mesh's size meets a face it sized far finer: it's meshed
-    once more, grown from the curved faces nearest them. And where that's refused too, the
-    reply says how many, the first one's part and where it is, the faces nearest it, and each
-    try's words before it."""
-    shutil.copy(CASES / "load_forced.py", cae.work / "load_forced.py")
-    said: list[str] = []
-    done = host.run(["load_forced.py", "inverted", "load", "capped/capped.json", *CAPPED],
-                    cae.work, python=True, image=host.CAE_IMAGE, trace=said)  # fmt: skip
-    found = re.search(r"saved: (\S+)\.txt and \.json", done.stdout)
-    assert found and done.returncode == 2, done.stdout + done.stderr
-    why = json.loads((cae.work / f"{found.group(1)}.json").read_text())["why"]
+    an element turned inside out, and the reply said only that, and nothing of why the curved
+    try before it didn't stand. Now it says how many, the first one's part and where it is, the
+    faces nearest it and whether they were meshed finer; and the curved try's words with it."""
+    answer = forced(cae, "inverted", "load", "capped/capped.json", *CAPPED)
+    assert answer.verdict == "NO ANSWER" and answer.code == 2, answer.text
+    why = answer.record["why"]
     assert why.startswith("CalculiX solved nothing: an element of the mesh"), why
     assert re.search(r"turned inside out: 1 element\(s\), the first in (cap|top), round "
                      r"\([-\d.]+, [-\d.]+, [-\d.]+\), its longest side [\d.]+ mm; the faces "
                      r"nearest it: (cap|top)'s ", why), why  # fmt: skip
-    assert re.search(r", meshed again with the size grown from the [1-9]\d* curved face\(s\) "
-                     "nearest the elements a straight try left turned inside out", why), why
-    straight, curved = why.split("; before it, the straight mesh: ", 1)[1].split(
-        "; and the curved mesh: ", 1)  # fmt: skip
-    assert straight.startswith("CalculiX found an element of the straight mesh"), why
-    assert curved.startswith("CalculiX found an element of the curved mesh"), why
-    steps = [line for line in said if line.startswith(host.STEP_LINE)]
-    assert any("grown from the faces nearest elements turned inside out" in line
-               for line in steps), steps  # fmt: skip
+    curved = why.split("; before it, the curved mesh: ", 1)
+    assert len(curved) == 2, why
+    assert curved[1].startswith("CalculiX found an element of the curved mesh"), why
+    assert ": 1 element(s), the first in" in curved[1], why
 
 
 def test_where_gmsh_still_refuses_the_faces_nearest_its_crossing_are_named(cae: Any) -> None:
