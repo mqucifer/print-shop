@@ -11,16 +11,16 @@ bench's second image under `load`'s limits. For each part the assembly gives a `
 own axes as `load` cuts it (`bench/as_printed.py`), it says the part's faces, by kind, how many
 are narrow (under a tenth of the mesh across, as `load` names a face narrow, or under a bead's
 width), and its edges where two faces meet concave, how many of those touch a curved face, and
-how many are smooth, the faces tangent there. Then for each of two cuts of its walls in its
-layers' plane:
+how many are smooth, the faces tangent there. Then for each of two cuts of its core:
 
-- `copies`, main's before mqucifer/print-shop#356: the part's common with 16 copies of itself,
-  each moved its walls' thickness round;
-- `offset`: OCCT's offset of the part, stretched along its layers so that the offset is nearly
-  all in their plane, and the stretch undone;
+- main's before mqucifer/print-shop#356: the part's common with 16 copies of itself, each moved
+  its walls' thickness round, and with its shells;
+- this branch's (`as_printed.cut_core`): OCCT's offset of the part stretched along its layers,
+  or else the 16 copies mitred at its concave edges, each held to each layer's own outline
+  offset in by its walls, and its slivers merged, or refused;
 
-it says what that cut leaves: the part eroded in its layers' plane, and each cell's core, their
-faces by kind, how many narrow and of which kind, and how many of those touch a curved face;
+it says what that cut leaves: each cell's core, how it was cut and checked, its faces by kind,
+how many narrow and of which kind, how many of those touch a curved face, and its slivers;
 and with every printed part's cores fused in, as `load` joins them, gmsh's mesh as `load` makes
 it, its elements' sides curved and straight, and how many of its elements are turned inside out
 at any of CalculiX's four integration points, as CalculiX would find them, with the kinds of the
@@ -49,7 +49,6 @@ def inner(assembly_file: str, mesh: float | None) -> None:  # pragma: no cover
     """Inside the container: each stage said as it starts, then its counts and verdicts."""
     import collections
     import dataclasses
-    import math
     import time
     import types
     from pathlib import Path
@@ -78,41 +77,19 @@ def inner(assembly_file: str, mesh: float | None) -> None:  # pragma: no cover
     import ObjectsFem
     from femmesh.gmshtools import GmshTools
 
-    def by_copies(shape: object, layers: int, by: float) -> object:
-        """Main's cut before mqucifer/print-shop#356: the common with 16 copies, moved round."""
-        if by <= 0:
-            return shape
-        first, second = (a for a in range(3) if a != layers)
-        left = shape
-        for k in range(16):
-            angle = 2 * math.pi * k / 16
-            move = [0.0, 0.0, 0.0]
-            move[first] = by * math.cos(angle)
-            move[second] = by * math.sin(angle)
-            left = left.common(shape.translated(App.Vector(*move)))  # type: ignore[attr-defined]
-            if left.Volume <= as_printed.NOTHING:
-                return None
-        return left
+    branch_cut = as_printed.cut_core
 
-    def by_offset(shape: object, layers: int, by: float, stretch: float = 10.0) -> object:
-        """OCCT's offset of the part stretched `stretch` times along its layers, arcs at its
-        concave edges, and the stretch undone."""
-        if by <= 0:
-            return shape
-        scale = [1.0, 1.0, 1.0]
-        scale[layers] = stretch
-        there = App.Matrix()
-        there.scale(*scale)
-        back = App.Matrix()
-        back.scale(*(1 / s for s in scale))
-        long = shape.transformGeometry(there)  # type: ignore[attr-defined]
-        made = long.makeOffsetShape(-by, 1e-4, False, False, 0, 0, False)
-        left = made.transformGeometry(back)
-        if left.isNull() or left.Volume <= as_printed.NOTHING:
-            return None
-        return left
+    def mains_cut(part: object, layers: int, walls: float, top: float, bottom: float,
+                  up: float, bead: float, name: str) -> object:
+        """Main's cut before mqucifer/print-shop#356: the common with 16 copies, unchecked."""
+        inside = as_printed.eroded_in_plane(part, layers, walls)
+        shelled = as_printed.eroded_along(part, layers, top, bottom, up)
+        core = None
+        if inside is not None and shelled is not None:
+            core = as_printed._one(as_printed._solids(inside.common(shelled)))
+        return as_printed.Cut(core, "main's 16 copies", 0, 0.0)
 
-    cuts = {"copies": by_copies, "offset": by_offset}
+    cuts = {"main's": mains_cut, "this branch's": branch_cut}
 
     stage("placing the parts")
     made = assembly.read(assembly_file)
@@ -238,8 +215,8 @@ def inner(assembly_file: str, mesh: float | None) -> None:  # pragma: no cover
         edges_said(own)
     verdicts = {}
     for name, cut in cuts.items():
-        stage(f"the {name} cut")
-        as_printed.eroded_in_plane = cut
+        stage(f"{name} cut")
+        as_printed.cut_core = cut
         refused = False
         for k, part in printed:
             settings = part.printed.settings
@@ -249,27 +226,26 @@ def inner(assembly_file: str, mesh: float | None) -> None:  # pragma: no cover
                 continue
             layers = load.AXES.index(part.layers)
             bead = float(settings.line_width or 0)
-            walls = as_printed.wall_thickness(int(settings.walls or 0), bead,
-                                              float(settings.layer_height or 0))  # fmt: skip
-            said(f"part {k}: eroded in its layers' plane by its walls")
-            try:
-                faces_said("in the plane", cut(owns[k], layers, walls), bead)
-            except Exception as exc:  # noqa: BLE001 - a probe says what stopped it, and goes on
-                print(f"  stopped: {stopped(exc)}", flush=True)
             said(f"part {k}: its cells' cores")
             try:
                 cells = as_printed.cells(owns[k], part.printed, layers, folder, f"part{k}")
             except Exception as exc:  # noqa: BLE001
-                print(f"  refused: {stopped(exc)}", flush=True)
+                # The bench's own refusal names the part by the number given it: said whole.
+                words = str(exc) if type(exc).__name__ == "NoAnswer" else stopped(exc)
+                print(f"  refused: {words}", flush=True)
                 refused = True
                 continue
             for number, cell in enumerate(cells, 1):
                 core = as_printed._one(list(cell.core))
                 print(f"  cell {number} of {len(cells)}: "
-                      + (f"{len(cell.core)} core solid(s)" if cell.core else "no core"),
-                      flush=True)  # fmt: skip
+                      + (f"{len(cell.core)} core solid(s)" if cell.core else "no core")
+                      + f"; cut by {cell.cut}"
+                      + (f", checked at {cell.checked} planes, {100 * cell.off:.1f}% of its "
+                         "walls off at most" if cell.checked else ""), flush=True)  # fmt: skip
                 if core is not None:
                     faces_said(f"cell {number}'s core", core, bead)
+                    print(f"  slivers, under a bead by a curved face: "
+                          f"{len(as_printed.slivers(core, bead))}", flush=True)
         if refused:
             verdicts[name] = "refused before it's meshed"
             continue
@@ -334,7 +310,7 @@ def inner(assembly_file: str, mesh: float | None) -> None:  # pragma: no cover
         verdicts[name] = "; ".join(found)
         App.closeDocument(doc.Name)
     for name, verdict in verdicts.items():
-        print(f"verdict, the {name} cut: {verdict}", flush=True)
+        print(f"verdict, {name} cut: {verdict}", flush=True)
 
 
 def main(argv: list[str]) -> int:

@@ -3186,6 +3186,9 @@ def _as_printed(assembly: Assembly, report: Report, cores: dict[str, list[Any]])
                 "volume_mm3": round(cell.volume_mm3, 1),
                 "core_mm3": round(cell.core_mm3, 1),
                 "core_box": cell.core_box,
+                "cut": cell.cut,
+                "cut_checked_planes": cell.checked,
+                "cut_off_walls_pct": round(100 * cell.off, 2),
                 **figures.said(),
             })
             report.line(
@@ -3195,6 +3198,10 @@ def _as_printed(assembly: Assembly, report: Report, cores: dict[str, list[Any]])
                 f"face and {cell.bottom_mm:.2f} mm over each bottom one, round a core of "
                 f"{cell.core_mm3:.0f} mm³ of its {cell.volume_mm3:.0f}"
                 + ("" if solids else ": its walls and shells fill it, so it's solid")
+                + (f"; its walls cut by {cell.cut}, and held to each layer's own outline "
+                   f"offset in by them, as Orca slices it, at {cell.checked} of its layers' "
+                   f"planes, {100 * cell.off:.1f}% of its walls off at most, within "
+                   f"{100 * as_printed.AGREE:.0f}%" if cell.cut else "")
             )
         found[part.name] = cells
         joined = [j.name for j in assembly.joints
