@@ -101,7 +101,7 @@ def inner(  # pragma: no cover
     branch_cut = as_printed.cut_core
 
     def mains_cut(part: object, layers: int, walls: float, top: float, bottom: float,
-                  up: float, bead: float, name: str, open_by: float = 0.0) -> object:
+                  up: float, bead: float, name: str, *_: object) -> object:
         """Main's cut before mqucifer/print-shop#356: the common with 16 copies, unchecked."""
         inside = as_printed.eroded_in_plane(part, layers, walls)
         shelled = as_printed.eroded_along(part, layers, top, bottom, up)

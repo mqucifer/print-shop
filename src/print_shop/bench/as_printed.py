@@ -381,6 +381,14 @@ def _offset_2d(face: Any, by: float, layers: int, join: int = 0) -> list[Any]:
         try:
             given = face if shape is not None else _polygonal(face)
             made = given.makeOffset2D(by, join, False, False, join != 0)
+            # OCCT offsets by the face's own way round: a section across a part's layers along
+            # its own y comes the other way, and an offset in by `by` there grew it
+            # (mqucifer/print-shop#363's probe of a real tile and leg). Which way it went is
+            # read from its area, and where it's the wrong one it's offset the other way.
+            if (made.Area > given.Area) != (by > 0):
+                made = given.makeOffset2D(-by, join, False, False, join != 0)
+                if (made.Area > given.Area) != (by > 0):
+                    continue
             return [f for f in made.Faces if f.Area > 1e-9]
         except Exception:  # noqa: BLE001 - OCCT raises for a face it can't offset, or that's gone
             continue

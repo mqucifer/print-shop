@@ -381,6 +381,9 @@ def test_the_cut_s_check_holds_it_to_each_layer_and_to_the_part(cae: Any) -> Non
       just off the ledge, the cut missing it isn't taken, nor the copies', which meet the
       ledge's top where the bar stands on it;
     - a bar whose layers can be read at one plane only is refused, not passed on one;
+    - the tile, chamfered, its layers along each of its own axes, either way up, is held to its
+      layers the same: OCCT's 2D offset goes by a face's own way round, and a
+      section across its own y once offset out, not in (mqucifer/print-shop#363's real tile);
     - a core cut from the bar with a lump on it is kept within the bar's own shells, and where
       that leaves it on the bar's own faces, refused."""
     work: Path = cae.work
@@ -411,6 +414,10 @@ def test_the_cut_s_check_holds_it_to_each_layer_and_to_the_part(cae: Any) -> Non
     assert found["over"]["core_mm3"] > found["shifted"]["core_mm3"]
     assert "only 1 of" in found["unread"]["refused"]
     assert "planes could be read to check it" in found["unread"]["refused"]
+    # Its layers along each of its own axes, either way up, the tile's check reads the same.
+    for pose, check in found["axes"].items():
+        assert check["read"] == check["planes"] >= 7, (pose, check)
+        assert check["short"] <= as_printed.SHORT and check["over"] <= as_printed.AGREE, pose
     # Cut from the bar with its lump, the core is held within the bar's shells; and where that
     # leaves it on the bar's own side, where the lump was, it's refused, not read.
     outside = found["outside"]

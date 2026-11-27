@@ -12,6 +12,11 @@ and whether `as_printed.cells` takes it or refuses it. Prints one JSON object.
 - `ledge`: a bar with a ledge at z 6, its core missing a slab 0.8 tall round the ledge's height,
   between the 7 planes spread over its height.
 - `unread`: a bar whose layers' cores can be read at one plane only.
+- `axes`: the tile of `make_fixtures.tile`, its top's outer edges chamfered, its layers along
+  each of its own axes, either way up: each layer's core as Orca slices it, held to the core
+  the 16 copies cut. OCCT's 2D offset goes by a face's own way round, and a section across a
+  part's own y came the other way, so its walls were offset out, not in, and the check read
+  every cut far over.
 - `outside`: a bar 40 tall's core cut from the bar with a lump on it, as a simpler shape made
   bigger, the lump's own core between two of the 7 planes spread over its height.
 """
@@ -138,6 +143,30 @@ def main() -> None:
         "cut": None if cut is None else cut.how,
         "said": said,
     }
+    # The tile of `make_fixtures.tile`, its top's four outer edges chamfered 1 mm.
+    plate = Part.read("load/tile.step").Solids[0]
+    def on_rim(edge: Any) -> bool:
+        box_ = edge.BoundBox
+        return bool(type(edge.Curve).__name__ == "Line" and box_.ZMin > 8 - 1e-6
+                    and (min(box_.XMax, box_.YMax) < 1e-6 or max(box_.XMin, box_.YMin) > 60 - 1e-6))
+
+    rim = [e for e in plate.Edges if on_rim(e)]
+    plate = plate.makeChamfer(1.0, rim)
+    axes = {}
+    poses = ((2, None), (0, (App.Vector(0, 1, 0), 90)), (1, (App.Vector(1, 0, 0), -90)))
+    for layers, turn in poses:
+        posed = plate.copy()
+        if turn is not None:
+            posed.rotate(App.Vector(0, 0, 0), *turn)
+        for up in (1.0, -1.0):
+            inside = as_printed.eroded_in_plane(posed, layers, WALLS)
+            core = inside.common(as_printed.eroded_along(posed, layers, 1.0, 0.6, up))
+            check = as_printed.checked(posed, core, layers, WALLS, 1.0, 0.6, up,
+                                       as_printed.open_radius(0.45, 0.2))  # fmt: skip
+            axes[f"{'xyz'[layers]}{'+' if up > 0 else '-'}"] = {
+                "planes": check.planes, "read": check.read, "short": check.short,
+                "over": check.over}
+    found["axes"] = axes
     print(json.dumps(found))
 
 
