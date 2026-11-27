@@ -349,7 +349,7 @@ def _user(part: StudyPart, loop: StudyLoop, base: Reading) -> str:
     joints = part.shaper.joints()
     lines = [
         f"The part: {part.name} ({part.stl.name}), printed in {part.filament or 'its filament'}, "
-        f"turned {','.join(f'{v:g}' for v in part.turn)}, standing own {d.up or '?'} up.",
+        f"turned {poses_said([part.turn])}, standing own {d.up or '?'} up.",
         f"Its profile's own settings: {d.said()}; walls laid "
         f"{part.wall_sequence or 'as the profile says'}.",
         "Its load cases, each read by load on the part as printed:",
@@ -360,7 +360,8 @@ def _user(part: StudyPart, loop: StudyLoop, base: Reading) -> str:
     ]
     if not joints:
         lines.append("- none named in its context or assembly")
-    lines.append("The poses it may print in (turn, then overhang, plate contact and height):")
+    lines.append("The poses it may print in, each that fits the bed, turned about its up axis "
+                 "where it must to fit (turn, then overhang, plate contact and height):")
     lines += [f"- {poses_said([p.rotation_deg])}: {p.overhang_area_mm2:g} mm2 overhang, "
               f"{p.bed_contact_area_mm2:g} mm2 on the plate, {p.height_mm:g} mm tall"
               for p in part.poses] or [f"- {poses_said(part.shaper.poses)}"]

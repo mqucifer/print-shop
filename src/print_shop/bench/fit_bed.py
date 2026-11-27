@@ -53,18 +53,16 @@ from pathlib import Path
 from typing import Any
 
 import numpy as np
-from shapely.geometry import MultiPoint
 
 from . import through
 from .assembly import AXES, DIAMETER, Assembly, Joint, read
 from .faces import _flat_by_mesh, _flats, bore_rows, facing
 from .fit_channel import prefers, read_channels
+from .footprint import footprint
 from .limits import over, said
 from .report import NoAnswer, Report
 from .shapes import Part, load
 
-#: How far the footprint is turned between readings, in degrees.
-TURN = 0.25
 #: A face is a side to lie on where nothing of the part is below it by more than this, in mm.
 BELOW = 1e-3
 #: A side has at least this much flat on the bed, in mm².
@@ -88,34 +86,6 @@ def _down(normal: np.ndarray) -> tuple[np.ndarray, np.ndarray, float]:
     k = np.array([[0, -axis[2], axis[1]], [axis[2], 0, -axis[0]], [-axis[1], axis[0], 0]])
     matrix = np.eye(3) + math.sin(angle) * k + (1 - math.cos(angle)) * (k @ k)
     return matrix, axis, math.degrees(angle)
-
-
-def footprint(points: np.ndarray, bed: tuple[float, float]) -> tuple[float, float, float]:
-    """The least turn about the upright axis at which a footprint fits the bed, in degrees, or
-    where none does, the turn at which it needs least of it; and its width and depth there.
-    `points` are the part's points seen from above."""
-    hull = MultiPoint(points).convex_hull
-    outline = np.asarray(hull.exterior.coords if hull.geom_type == "Polygon" else hull.coords)
-    edges = np.diff(outline, axis=0)
-    angles = set(np.arange(0.0, 180.0, TURN).round(6))
-    # Each of the hull's own edges laid along the bed's width, and along its depth.
-    for dx, dy in edges:
-        if abs(dx) + abs(dy) > 1e-9:
-            turn = -math.degrees(math.atan2(dy, dx))
-            angles.update((round(turn % 180.0, 6), round((turn + 90.0) % 180.0, 6)))
-    best: tuple[float, float, float, float] | None = None
-    for angle in sorted(angles):
-        c, s = math.cos(math.radians(angle)), math.sin(math.radians(angle))
-        turned = outline @ np.array([[c, s], [-s, c]])
-        width, depth = float(np.ptp(turned[:, 0])), float(np.ptp(turned[:, 1]))
-        if not over(width, bed[0]) and not over(depth, bed[1]):
-            # The least turn that fits: as it's drawn, where that does.
-            return angle, width, depth
-        need = max(width / bed[0], depth / bed[1])
-        if best is None or need < best[0] - 1e-12:
-            best = (need, angle, width, depth)
-    assert best is not None
-    return best[1], best[2], best[3]
 
 
 def _box(shape: Any) -> list[float]:
