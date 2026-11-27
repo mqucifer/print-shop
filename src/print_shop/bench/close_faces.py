@@ -25,8 +25,9 @@ every face's edges and corners as well met the container's memory.
 
 **What's done** (`load._Model.solve`). The parts are meshed as they always were, and only
 where gmsh refuses them for triangles that cross are the pairs found, and meshed again, each
-curved face of a pair fine enough that it sags no more than a quarter of the gap, so the two
-together sag no more than half of it; and again where gmsh refuses them at another place, a
+curved face of a pair fine enough that it sags no more than half the gap at its longest sides,
+so the two together sag no more than the gap, and the size grows from there to the mesh's own
+by one mm in `GRADE`; and again where gmsh refuses them at another place, a
 few times at most. gmsh is given that as a local size on those faces and their edges alone,
 by a constant field, and every other face is meshed as it was. The test is a bound, not gmsh's
 own mesh: on the made-up traced glass frame of `test_cae.py`, a tip rounded 0.1 mm lies 0.02
@@ -53,8 +54,16 @@ import numpy as np
 LONGEST = 1.5
 #: gmsh's elements a full turn of a curve, as FreeCAD asks for them (`MeshSizeFromCurvature`).
 PER_TURN = 12
-#: Each face of a pair is meshed to sag no more than this share of the gap between them.
-SHARE = 0.25
+#: Each face of a pair is meshed to sag no more than this share of the gap between them, at
+#: its longest sides: so the two together sag no more than the gap, and at sides of the size
+#: asked for, less than half of it. A quarter left four or five times the margin a crossing
+#: needs, and twice the triangles on those faces.
+SHARE = 0.5
+#: Away from a face meshed finer, the size grows by one mm for this many mm, to the mesh's own:
+#: gmsh's elements beside a face meshed finer aren't cut from a fine edge to the mesh's size at
+#: once. And the faces it grows from are sampled at this many points along each parameter.
+GRADE = 2.0
+SAMPLING = 40
 #: The finest local size given, in mm: two faces that would need finer are the parts' to fix.
 LEAST = 0.05
 #: Two faces closer than this, in mm, are taken as meeting where they share no corner: OCC's
@@ -318,9 +327,9 @@ def apart_for(face: Any, least: float = LEAST, per_turn: int = PER_TURN) -> floa
 
 
 def fields(closes: list[Close], size: float) -> str:
-    """gmsh's input for the local sizes: a constant field for each step of size, on its faces
-    and their edges, and the least of them as the background field. Nothing where nothing is
-    close."""
+    """gmsh's input for the local sizes: for each step of size, a constant field on its faces
+    and their edges, and a threshold that grows it away from them by one mm in `GRADE` to the
+    mesh's own; the least of them all as the background field. Nothing where nothing is close."""
     faces: dict[int, float] = {}
     for close in closes:
         for n, h in close.faces.items():
@@ -332,14 +341,30 @@ def fields(closes: list[Close], size: float) -> str:
     if not steps:
         return ""
     lines = ["// faces closer than the mesh's sag (mqucifer/print-shop#346)"]
-    for k, (h, on) in enumerate(sorted(steps.items()), 1):
-        lines += [f"Field[{k}] = Constant;",
-                  f"Field[{k}].SurfacesList = {{{', '.join(map(str, sorted(on)))}}};",
-                  f"Field[{k}].VIn = {h:.6g};", f"Field[{k}].VOut = 1e22;",
-                  f"Field[{k}].IncludeBoundary = 1;"]  # fmt: skip
-    least = len(steps) + 1
+    numbers: list[int] = []
+    k = 0
+    for h, on in sorted(steps.items()):
+        listed = ", ".join(map(str, sorted(on)))
+        constant, distance, threshold = k + 1, k + 2, k + 3
+        k += 3
+        numbers += [constant, threshold]
+        lines += [f"Field[{constant}] = Constant;",
+                  f"Field[{constant}].SurfacesList = {{{listed}}};",
+                  f"Field[{constant}].VIn = {h:.6g};", f"Field[{constant}].VOut = 1e22;",
+                  f"Field[{constant}].IncludeBoundary = 1;",
+                  f"Field[{distance}] = Distance;",
+                  f"Field[{distance}].SurfacesList = {{{listed}}};",
+                  f"Field[{distance}].Sampling = {SAMPLING};",
+                  f"Field[{threshold}] = Threshold;",
+                  f"Field[{threshold}].InField = {distance};",
+                  f"Field[{threshold}].SizeMin = {h:.6g};",
+                  f"Field[{threshold}].SizeMax = {size:.6g};",
+                  f"Field[{threshold}].DistMin = 0;",
+                  f"Field[{threshold}].DistMax = {GRADE * (size - h):.6g};",
+                  f"Field[{threshold}].StopAtDistMax = 1;"]  # fmt: skip
+    least = k + 1
     lines += [f"Field[{least}] = Min;",
-              f"Field[{least}].FieldsList = {{{', '.join(map(str, range(1, least)))}}};",
+              f"Field[{least}].FieldsList = {{{', '.join(map(str, numbers))}}};",
               f"Background Field = {least};", ""]  # fmt: skip
     return "\n".join(lines)
 

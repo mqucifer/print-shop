@@ -55,16 +55,22 @@ def test_boxes_meet_where_their_gap_is_within_their_two_reaches() -> None:
     assert list(meeting(low2, high2, np.array([0.0, 0.01]))) == [(0, 1)]
 
 
-def test_each_face_has_its_least_size_and_nothing_where_none_is_close() -> None:
+def test_each_face_has_its_least_size_graded_to_the_mesh_s_and_nothing_where_none_is_close(
+) -> None:
     assert fields([], 3.0) == ""
     one = Close(7, 11, 0.15, faces={7: 0.7, 11: 0.72})
     two = Close(7, 12, 0.10, faces={7: 0.55})
     text = fields([one, two], 3.0)
+    # Face 7 at its least, 0.55, and 11 at its own, each a constant field on the face and a
+    # threshold from its distance, growing one mm in GRADE to the mesh's 3 mm.
     assert "Field[1] = Constant;\nField[1].SurfacesList = {7};" in text
     assert f"Field[1].VIn = {stepped(0.55):.6g};" in text
-    assert "Field[2].SurfacesList = {11};" in text and "IncludeBoundary = 1;" in text
-    assert text.count("= Constant;") == 2
-    assert "Field[3] = Min;\nField[3].FieldsList = {1, 2};\nBackground Field = 3;" in text
+    assert "Field[2] = Distance;\nField[2].SurfacesList = {7};" in text
+    assert "Field[3] = Threshold;\nField[3].InField = 2;" in text
+    assert f"Field[3].DistMax = {close_faces.GRADE * (3.0 - stepped(0.55)):.6g};" in text
+    assert "Field[4] = Constant;\nField[4].SurfacesList = {11};" in text
+    assert text.count("= Constant;") == 2 and text.count("= Threshold;") == 2
+    assert "Field[7] = Min;\nField[7].FieldsList = {1, 3, 4, 6};\nBackground Field = 7;" in text
     # A size the mesh already meets isn't given, and none is finer than LEAST.
     assert fields([Close(1, 2, 1.0, faces={1: 5.0})], 3.0) == ""
     assert f"VIn = {close_faces.LEAST:.6g};" in fields([Close(1, 2, 0.0, faces={1: 0.0})], 3.0)

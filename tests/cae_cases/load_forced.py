@@ -17,6 +17,8 @@ Nothing here changes how the bench reads anything else.
   nodes and of where they lie turned off, as for a swap they can't tell;
 - `turned-away`: the curved mesh, finer where faces are close, turned away after its solve as
   if an element were inside out, so the straight one starts from the pairs it found;
+- `inverted`: CalculiX's words for the first element of its input turned inside out, so the
+  curved and the straight try both fail on it;
 - `unsized`: the faces found close where gmsh's triangles cross given no local size, so gmsh
   refuses them as it did (mqucifer/print-shop#346).
 """
@@ -148,6 +150,21 @@ elif mode == "turned-away":
                                f"({FORCED})", self.closes)  # fmt: skip
 
     load._Model.solve = turned_away
+elif mode == "inverted":
+    # CalculiX's words for an element turned inside out, the first of its input, as on a
+    # design run's table, curved and straight (mqucifer/print-shop#346).
+    import re
+
+    ccx = load._ccx
+
+    def inverted(fea: Any, size: float) -> None:
+        ccx(fea, size)
+        with open(fea.inp_file_name) as given:
+            first = re.search(r"^\*ELEMENT[^\n]*\n\s*(\d+),", given.read(), re.M | re.I)
+        fea.ccx_stdout += (" *ERROR in e_c3d: nonpositive jacobian\n        determinant in "
+                           f"element {first.group(1) if first else 1}\n")  # fmt: skip
+
+    load._ccx = inverted
 elif mode == "unsized":
     # Faces that meet nowhere found close where gmsh's triangles cross, but given no local size
     # (mqucifer/print-shop#346), as where the sizes don't part them.

@@ -1753,6 +1753,24 @@ def test_a_straight_try_after_a_curved_one_is_meshed_finer_from_the_start(cae: A
     assert len(searches) == 2, steps
 
 
+def test_an_element_turned_inside_out_is_placed_and_the_curved_try_s_words_kept(cae: Any) -> None:
+    """mqucifer/print-shop#346: on a design run's table, CalculiX refused the straight mesh for
+    an element turned inside out, and the reply said only that, and nothing of why the curved
+    try before it didn't stand. Now it says how many, the first one's part and where it is, the
+    faces nearest it and whether they were meshed finer; and the curved try's words with it."""
+    answer = forced(cae, "inverted", "load", "capped/capped.json", *CAPPED)
+    assert answer.verdict == "NO ANSWER" and answer.code == 2, answer.text
+    why = answer.record["why"]
+    assert why.startswith("CalculiX solved nothing: an element of the mesh"), why
+    assert re.search(r"turned inside out: 1 element\(s\), the first in (cap|top), round "
+                     r"\([-\d.]+, [-\d.]+, [-\d.]+\), its longest side [\d.]+ mm; the faces "
+                     r"nearest it: (cap|top)'s ", why), why  # fmt: skip
+    curved = why.split("; before it, the curved mesh: ", 1)
+    assert len(curved) == 2, why
+    assert curved[1].startswith("CalculiX found an element of the curved mesh"), why
+    assert ": 1 element(s), the first in" in curved[1], why
+
+
 def test_where_gmsh_still_refuses_the_faces_nearest_its_crossing_are_named(cae: Any) -> None:
     """mqucifer/print-shop#346: where gmsh's triangles still cross, the reply says gmsh's own
     words and then the faces nearest where it says they cross, with their parts, so a design

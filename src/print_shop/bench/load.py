@@ -921,16 +921,17 @@ class _Model:
         results = [o for o in analysis.Group if o.isDerivedFrom("Fem::FemResultObject")]
         if "nonpositive jacobian" in str(getattr(fea, "ccx_stdout", "")):
             tidy_solve(fea)
+            where = self._inverted_said(str(fea.ccx_stdout))
             if not self.straight:
                 raise _Curved(
                     "CalculiX found an element of the curved mesh, at most "
-                    f"{self.size:g} mm, turned inside out",
+                    f"{self.size:g} mm, turned inside out{where}",
                     self.closes,
                 )
             raise NoAnswer(
                 f"CalculiX solved nothing: an element of the mesh, at most {self.size:g} mm, is "
-                "turned inside out, as one with a curved side on a small hole or a tight round "
-                "can be. Give a finer --mesh"
+                f"turned inside out{where}. One with a curved side on a small hole or a tight "
+                "round can be: give a finer --mesh"
             )
         if (not results or not results[0].NodeStrainXX) and self.two_pass:
             full = memory_met(kills)
@@ -1029,21 +1030,59 @@ class _Model:
         point = _crossed_at(words)
         if point is None:
             return ""
+        near = self._faces_near(point)
+        return f"; the faces nearest where gmsh's triangles cross: {near}" if near else ""
+
+    def _faces_near(self, point: Any) -> str:
+        """The `NEAREST` faces nearest a vertex, in words: each one's parts, kind and where it
+        is, how far from it, and whether it was meshed finer or is narrow, under a tenth of the
+        mesh across."""
+        finer = {n for c in self.closes for n in c.faces}
         near = []
-        for face in self.whole.Faces:
+        for number, face in enumerate(self.whole.Faces, 1):
             box = face.BoundBox
             box.enlarge(self.size)
             if box.isInside(point.Point):
-                near.append((float(face.distToShape(point)[0]), face))
+                near.append((float(face.distToShape(point)[0]), number, face))
             close_faces._let_go(face)
         near.sort(key=lambda row: row[0])
-        if not near:
+        said = []
+        for d, number, f in near[:NEAREST]:
+            length = sum(e.Length for e in f.Edges)
+            thin = length > 0 and 2 * f.Area / length < self.size / 10
+            flags = [w for w, yes in (("meshed finer", number in finer), ("narrow", thin)) if yes]
+            said.append(
+                f"{'/'.join(self._owners(f))}'s {close_faces.kind_of(f)} face"
+                + (f" of radius {f.Surface.Radius:g} mm" if hasattr(f.Surface, "Radius") else "")
+                + f" round {_xyz(f.CenterOfMass)}, {d:.4f} mm from it"
+                + (f" ({', '.join(flags)})" if flags else "")
+            )
+            close_faces._let_go(f)
+        return ", ".join(said)
+
+    def _inverted_said(self, said: str) -> str:
+        """Where CalculiX found elements turned inside out (mqucifer/print-shop#346), in words:
+        how many, and for the first, its part, where it is and the faces nearest it, so a
+        design run, or `load`, can tell a face meshed finer from a sliver the fuse left."""
+        import FreeCAD as App
+        import Part
+
+        numbers = list(dict.fromkeys(int(n) for n in INVERTED.findall(said)))
+        if not numbers or self.fem is None:
             return ""
-        return "; the faces nearest where gmsh's triangles cross: " + ", ".join(
-            f"{'/'.join(self._owners(f))}'s {close_faces.kind_of(f)} face"
-            + (f" of radius {f.Surface.Radius:g} mm" if hasattr(f.Surface, "Radius") else "")
-            + f" round {_xyz(f.CenterOfMass)}, {d:.4f} mm from it"
-            for d, f in near[:NEAREST]
+        try:
+            corners = [self.nodes[n] for n in self.fem.getElementNodes(numbers[0])[:4]]
+        except (KeyError, ValueError, TypeError):
+            return f": {len(numbers)} element(s)"
+        middle = App.Vector(*np.mean(corners, axis=0))
+        parts = [p.name for p, solid in zip(self.assembly.parts, self.solids, strict=True)
+                 if solid.isInside(middle, 1e-6, True)] or ["none of the parts"]  # fmt: skip
+        longest = max(float(np.linalg.norm(a - b)) for a in corners for b in corners)
+        near = self._faces_near(Part.Vertex(middle))
+        return (
+            f": {len(numbers)} element(s), the first in {'/'.join(parts)}, round "
+            f"{_xyz(middle)}, its longest side {longest:.4f} mm"
+            + (f"; the faces nearest it: {near}" if near else "")
         )
 
     def _face_owners(self) -> list[frozenset[int]]:
@@ -2145,6 +2184,8 @@ _SUMMED = re.compile(
 CROSSED = re.compile(r"intersect", re.I)
 #: How many of the faces nearest where gmsh's triangles cross are named.
 NEAREST = 4
+#: CalculiX's words for each element it finds turned inside out, with its number.
+INVERTED = re.compile(r"determinant in element\s+(\d+)")
 #: How many times the parts are meshed again finer where gmsh's triangles cross, each time
 #: where it says they cross again.
 RETRIES = 4
@@ -2481,8 +2522,13 @@ def _solved(
     doc = App.newDocument("Load")
     straight = model(True)
     straight.closes = closes
-    with _quiet():
-        found = _read_solved(assembly, straight, doc, size)
+    try:
+        with _quiet():
+            found = _read_solved(assembly, straight, doc, size)
+    except NoAnswer as stopped:
+        # What turned the curved try away is said too, as the reply would have said it.
+        stopped.args = (f"{stopped}; before it, the curved mesh: {why[:600]}", *stopped.args[1:])
+        raise
     found["straight"] = why
     return found
 
