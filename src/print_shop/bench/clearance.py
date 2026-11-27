@@ -323,7 +323,10 @@ def _plan_said(
 ) -> None:
     """`--plan`: how the pairs would be read and how long, with a few read exactly to time
     them, and no verdict on any (mqucifer/print-shop#354)."""
-    sample = exact[:PLAN_SAMPLE]
+    # Spread through the pairs read exactly, not the first: neighbours near the start of a ring
+    # can be cheaper than the curved pairs later on.
+    step = max(1, len(exact) // PLAN_SAMPLE)
+    sample = exact[::step][:PLAN_SAMPLE]
     clock = time.monotonic()
     with progress.step(f"clearance: timing {len(sample)} exact read(s)"):
         for a, b in sample:
