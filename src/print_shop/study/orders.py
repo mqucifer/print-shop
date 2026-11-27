@@ -24,11 +24,14 @@ follow. Nothing here reads or writes the shop's ledger: the study does, as it al
 
 from __future__ import annotations
 
+import fcntl
 import json
 import shlex
 import shutil
 import subprocess
+import sys
 import uuid
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -45,7 +48,7 @@ from print_shop.slicer.regions import Pose
 from print_shop.study.limits import Limits
 
 __all__ = ["Order", "claim", "finish", "flag", "laid_for", "listing", "on_approval",
-           "orders", "prepare"]
+           "orders", "prepare", "start_worker"]
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS study_orders (
@@ -282,6 +285,44 @@ def finish(ledger: DesignLedger, order: Order, status: str, said: str,
            out: Path | None = None) -> None:
     ledger.change("UPDATE study_orders SET status=?, said=?, out=?, ended_at=? WHERE id=?",
                   status, said[:2000], str(out) if out else None, _now(), order.id)
+
+
+#: The lock one worker per root holds while it runs that root's studies, and its log.
+LOCK = "studies.lock"
+LOG = "studies.log"
+#: The study's own script, which runs the worker.
+SCRIPT = Path(__file__).resolve().parents[3] / "scripts" / "settings_study.py"
+
+
+def worker_running(root: Path) -> bool:
+    """Whether a worker holds `root`'s lock now."""
+    path = root / LOCK
+    if not path.exists():
+        return False
+    with path.open("a") as held:
+        try:
+            fcntl.flock(held, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            return True
+        fcntl.flock(held, fcntl.LOCK_UN)
+    return False
+
+
+def start_worker(root: Path, spawn: Callable[..., Any] = subprocess.Popen) -> str:
+    """A worker for `root`'s queued studies, started detached where none runs: so a study runs
+    by itself after the approval that queued it, and the approval doesn't wait for it. It runs
+    until nothing is queued, writing to `root/studies.log`. Two started at once leave one: the
+    other finds the lock held and ends (`work`)."""
+    if worker_running(root):
+        return f"a worker already runs {root.name}'s studies: they're queued for it"
+    log = (root / LOG).open("a")
+    try:
+        spawn([sys.executable, str(SCRIPT), "work", "--root", str(root)], stdout=log,
+              stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL, start_new_session=True,
+              cwd=str(SCRIPT.parents[1]))
+    finally:
+        log.close()
+    return f"a worker started for them, one at a time; it writes to {root / LOG}"
 
 
 def listing(ledger: DesignLedger) -> str:

@@ -403,16 +403,35 @@ def test_only_one_worker_runs_a_roots_studies(
         held.close()
 
 
-def test_queueing_on_approval_never_holds_it_up(tmp_path: Path) -> None:
+def test_queueing_on_approval_never_holds_it_up(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """What goes wrong with a study is said, and the run stays approved: here its assembly is
-    gone, and the limits given aren't limits."""
+    gone, and the limits given aren't limits. A worker is started for what's queued."""
     import argparse  # noqa: PLC0415
 
+    started: list[Path] = []
+
+    def start(root: Path) -> str:
+        started.append(root)
+        return f"a worker started for them, in {root.name}"
+
+    monkeypatch.setattr(orders, "start_worker", start)
     folder, _ = _furniture_run(tmp_path)
     rounds = _script("rounds.py")
     said = rounds._studies(folder, tmp_path, argparse.Namespace(by="sponsor",
                                                                  study_limits=None))
-    assert said.startswith("a settings study of each part queued, 2") and "work --root" in said
+    assert said.startswith("a settings study of each part queued, 2")
+    assert said.endswith("; a worker started for them, in " + tmp_path.name)
+    assert started == [tmp_path]
+
+    def broken(root: Path) -> str:
+        raise OSError("no room")
+
+    monkeypatch.setattr(orders, "start_worker", broken)
+    other, _ = _furniture_run(tmp_path, "table-3")
+    said = rounds._studies(other, tmp_path, argparse.Namespace(by="sponsor", study_limits=None))
+    assert "no worker could start (OSError: no room)" in said and "work --root" in said
     (tmp_path / "bad.json").write_text('{"fastest": true}')
     said = rounds._studies(folder, tmp_path, argparse.Namespace(
         by="sponsor", study_limits=tmp_path / "bad.json"))
@@ -475,3 +494,28 @@ def test_a_flagged_study_with_real_slices_keeps_to_the_grams_allowed(tmp_path: P
     assert c2.passes and result.recommended == "c2"
     text = table(result, "bar", [])
     assert "## Ruled out by the Sponsor's limits" in text and "- c1:" in text
+
+
+def test_a_worker_starts_detached_where_none_runs(tmp_path: Path) -> None:
+    import fcntl  # noqa: PLC0415
+    import sys  # noqa: PLC0415
+
+    spawned: list[tuple[list[str], dict[str, Any]]] = []
+
+    def spawn(argv: list[str], **kwargs: Any) -> None:
+        spawned.append((argv, kwargs))
+
+    said = orders.start_worker(tmp_path, spawn)
+    ((argv, kwargs),) = spawned
+    assert argv == [sys.executable, str(orders.SCRIPT), "work", "--root", str(tmp_path)]
+    assert kwargs["start_new_session"] is True and kwargs["stdin"] is not None
+    assert said.endswith(f"it writes to {tmp_path / 'studies.log'}")
+    held = (tmp_path / "studies.lock").open("a")
+    fcntl.flock(held, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    try:
+        assert orders.start_worker(tmp_path, spawn).startswith("a worker already runs")
+        assert len(spawned) == 1
+    finally:
+        fcntl.flock(held, fcntl.LOCK_UN)
+        held.close()
+    assert orders.SCRIPT.is_file()

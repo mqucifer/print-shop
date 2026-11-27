@@ -242,14 +242,19 @@ def _studies(folder: Path, root: Path, args: argparse.Namespace) -> str:
 
     try:
         limits = Limits.read(args.study_limits) if args.study_limits else None
-        _, said = orders.on_approval(
+        made, said = orders.on_approval(
             folder, DesignLedger(root / "ledger.sqlite"), f"on approval by {args.by}", limits
         )
     except Exception as exc:  # noqa: BLE001 - nothing about a study holds up an approval
         return f"no settings study queued: {type(exc).__name__}: {exc}"
-    return said + (
-        ". `scripts/settings_study.py work --root ROOT` runs them" if "order" in said else ""
-    )
+    if not made:
+        return said
+    try:
+        # Run by themselves: a worker for the root, started where none runs.
+        return f"{said}; {orders.start_worker(root)}"
+    except Exception as exc:  # noqa: BLE001 - nor does starting their worker
+        return (f"{said}; no worker could start ({type(exc).__name__}: {exc}): "
+                "`scripts/settings_study.py work --root ROOT` runs them")
 
 
 def _refine(args: argparse.Namespace, folder: Path, ledger: DesignLedger) -> int:

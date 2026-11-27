@@ -291,7 +291,7 @@ def work(root: Path, design: DesignLedger, once: bool = False, ledger: Path | No
     `run_study` is `main`, unless given."""
     run_study = run_study or main
     env = load_env(SETTINGS_PATH)
-    lock = (root / "studies.lock").open("w")
+    lock = (root / study_orders.LOCK).open("a")
     try:
         fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
     except BlockingIOError:
