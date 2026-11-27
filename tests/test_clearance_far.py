@@ -271,3 +271,19 @@ def test_a_pair_a_place_may_catch_is_read_exactly(work: Path) -> None:
     assert {caught["a"], caught["b"]} == {"slice.step as s0", "slice.step as s1"}
     assert caught["places"]["seam"]["verdict"] == "TOO CLOSE"
     assert far_off and all(p["places"]["seam"]["verdict"] == "NOT CAUGHT" for p in far_off)
+
+
+def test_a_need_on_a_pair_s_figure_reads_every_pair_exactly() -> None:
+    """The harness runs a `clearance` need on a figure under `pairs.` with `--exact`, so its
+    figure is the exact gap, never a bound; a need on the verdict alone runs as written."""
+    command = "clearance slice.step --placed ring.json --min-gap 0.2"
+    on_gap = Need("gap", "x", "chosen", "bench", command=command, number="pairs.3.gap_mm")
+    assert needs.read_argv(on_gap)[-1] == "--exact"
+    assert needs.read_argv(on_gap)[:-1] == on_gap.argv()
+    exact = f"{command} --exact"
+    given = Need("gap", "x", "chosen", "bench", command=exact, number="pairs.0.gap_mm")
+    assert needs.read_argv(given).count("--exact") == 1
+    verdict = Need("fit", "x", "chosen", "bench", command=command, verdicts=["CLEAR"])
+    assert needs.read_argv(verdict) == verdict.argv()
+    other = Need("wall", "x", "chosen", "bench", command="wall a.step", number="pairs.0.gap_mm")
+    assert needs.read_argv(other) == other.argv()

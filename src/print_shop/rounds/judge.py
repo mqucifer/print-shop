@@ -41,7 +41,16 @@ from typing import Any
 from print_shop.bench.limits import ARITHMETIC
 from print_shop.bench.solids import MARK as SOLIDS_MARK
 from print_shop.rounds.box import Box, Unanswered, answered
-from print_shop.rounds.needs import BED, GEOMETRY, UNSURE, Need, Reading, bed_reading, judge
+from print_shop.rounds.needs import (
+    BED,
+    GEOMETRY,
+    UNSURE,
+    Need,
+    Reading,
+    bed_reading,
+    judge,
+    read_argv,
+)
 from print_shop.rounds.paths import (
     content_hash,
     copy_plain,
@@ -115,7 +124,7 @@ def read_need(box: Box, need: Need, judged: Path, kept: Path) -> Reading:
         named = ", ".join(missing)
         return Reading(need.id, "bench", False, f"there's no {named}: a clean run has to leave it")
     out = f".judge-{uuid.uuid4().hex[:12]}"
-    argv = ["--out", out, *need.argv()]
+    argv = ["--out", out, *read_argv(need)]
     where = judged
     scratch: Path | None = None
     if need.argv()[0] == "params":

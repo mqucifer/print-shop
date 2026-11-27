@@ -726,6 +726,20 @@ def number_at(numbers: Any, path: str) -> Any:
     return here
 
 
+#: `clearance`'s flag that reads every pair by its exact distance (mqucifer/print-shop#354).
+EXACT = "--exact"
+
+
+def read_argv(need: Need) -> list[str]:
+    """The command a need's check runs. A `clearance` need on a figure under `pairs.` reads every
+    pair exactly: past 3 pairs, a pair far apart is otherwise read by its boxes, with a bound and
+    no gap, and a need holds the gap itself (mqucifer/print-shop#354)."""
+    words = need.argv()
+    if words[:1] == ["clearance"] and need.number.startswith("pairs.") and EXACT not in words:
+        return [*words, EXACT]
+    return words
+
+
 def _read_by_boxes(numbers: Any, path: str) -> str | None:
     """Why `clearance`'s `pairs.N...` has no figure where that pair was read by its bounds alone,
     far apart, with no exact gap (mqucifer/print-shop#354); else None."""

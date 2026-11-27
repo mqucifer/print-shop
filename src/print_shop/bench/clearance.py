@@ -856,10 +856,10 @@ def run(args: Any, report: Report) -> None:
         for name, place in r.get("places", {}).items():
             if not (folded and place["verdict"] == NOT_CAUGHT):
                 _place_said(report, i, r, name, place, args)
+    if beyond is not None:
+        _by_boxes_counted(report, results, beyond)
     if folded:
         _quiet_said(report, results, named, brep)
-    if beyond is not None:
-        _boxes_said(report, results, beyond)
     if args.min_gap is not None or max_gap is not None:
         exact = "OCCT's exact distance" if brep else "the mesh's distance"
         held = "each place's least gap" if named else "each pair's least gap"
@@ -1105,71 +1105,77 @@ def _pair_said(
 def _quiet_said(
     report: Report, results: list[dict[str, Any]], named: list[Place], brep: bool
 ) -> None:
-    """The pairs with nothing to report, as one counted line and one second check."""
+    """The pairs with nothing to report, as one counted line and one second check, with the
+    pairs read by their boxes counted at its end (mqucifer/print-shop#354)."""
     quiet = [(i, r) for i, r in enumerate(results) if _quiet(r) and not _boxed(r)]
-    if not quiet:
+    boxed = [(i, r) for i, r in enumerate(results) if _boxed(r)]
+    if not quiet and not boxed:
         return
-    tally = ", ".join(
-        f"{n} {w.lower()}" for w in QUIET if (n := sum(r["verdict"] == w for _, r in quiet))
-    )
-    i, least = min(quiet, key=lambda q: q[1]["gap_mm"])
-    line = (
-        f"{len(quiet)} other pair(s) with nothing to report ({tally}, no overlap; least gap "
-        f"{least['gap_mm']:.4f} mm, pairs.{i}, {least['a']} | {least['b']})"
-    )
-    # A place that catches no surface of one of a pair says nothing of it, whichever pair it is.
-    shown = {i for i, r in enumerate(results) if not _quiet(r)}
-    for place in named:
-        # A pair read by its boxes is said on its own line (`_boxes_said`).
-        read = [(k, r["places"][place.name]["verdict"]) for k, r in enumerate(results)]
-        read = [(k, v) for k, v in read if not _boxed(results[k])]
-        quiet_read = [v for k, v in read if k not in shown or v == NOT_CAUGHT]
-        missed = [v for _, v in read].count(NOT_CAUGHT)
-        got = [f"{n} {w.lower()}" for w in QUIET if (n := quiet_read.count(w))]
-        line += f"; at {place.name} " + ", ".join(
-            [*got, *[f"{missed} not caught"] * bool(missed)]
+    line, second = "", ""
+    if quiet:
+        tally = ", ".join(
+            f"{n} {w.lower()}" for w in QUIET if (n := sum(r["verdict"] == w for _, r in quiet))
         )
-    report.line(line + ". Each pair is whole in the record")
-    report.second(
-        f"the {len(quiet)} other pair(s): "
-        + (
+        i, least = min(quiet, key=lambda q: q[1]["gap_mm"])
+        line = (
+            f"{len(quiet)} other pair(s) with nothing to report ({tally}, no overlap; least gap "
+            f"{least['gap_mm']:.4f} mm, pairs.{i}, {least['a']} | {least['b']})"
+        )
+        # A place that catches no surface of one of a pair says nothing of it, whichever pair
+        # it is. A pair read by its boxes is caught by none, and counted with them below.
+        shown = {i for i, r in enumerate(results) if not _quiet(r)}
+        for place in named:
+            read = [
+                (k, r["places"][place.name]["verdict"])
+                for k, r in enumerate(results)
+                if not _boxed(r)
+            ]
+            quiet_read = [v for k, v in read if k not in shown or v == NOT_CAUGHT]
+            missed = [v for _, v in read].count(NOT_CAUGHT)
+            got = [f"{n} {w.lower()}" for w in QUIET if (n := quiet_read.count(w))]
+            line += f"; at {place.name} " + ", ".join(
+                [*got, *[f"{missed} not caught"] * bool(missed)]
+            )
+        second = f"the {len(quiet)} other pair(s): " + (
             "no overlap by OCCT common, by its cut or by the mesh, and the mesh's gaps within "
             f"the chords ({2 * FINE[0]:g} mm) of OCCT's"
             if brep
             else f"no overlap by {SECTIONS} sections or by the mesh, and sampled points agree "
             "with the mesh's gaps"
         )
-    )
+    if boxed:
+        by = report.numbers["by_boxes"]
+        far_off = (
+            f"{len(boxed)} pair(s) farther apart than any gap judged, read by their boxes, "
+            f"CLEAR: least box gap {by['least_box_gap_mm']:.4f} mm, pairs.{by['least']}"
+            + (", caught by no place" if named else "")
+        )
+        line = f"{line}; and {far_off}" if line else far_off
+        counted = {w: sum(r["box_by"] == w for _, r in boxed) for w in ("box", "hull")}
+        bounds = (
+            f"the {len(boxed)} by their boxes: {counted['box']} by axis-aligned boxes, "
+            f"{counted['hull']} by hulls, each never over the true gap"
+        )
+        second = f"{second}; {bounds}" if second else bounds
+    # A pair read by its boxes has only its bound in the record, not every figure.
+    report.line(line + f". Each pair is {'' if boxed else 'whole '}in the record")
+    report.second(second)
 
 
-def _boxes_said(report: Report, results: list[dict[str, Any]], beyond: float) -> None:
-    """The pairs read by their boxes, counted in one line with the least of their bound gaps,
-    and what bounded them as the second reading (mqucifer/print-shop#354)."""
+def _by_boxes_counted(report: Report, results: list[dict[str, Any]], beyond: float) -> None:
+    """The record's count of the pairs read by their boxes, past which gap, and the least of
+    their bound gaps, at which pair (mqucifer/print-shop#354)."""
     boxed = [(i, r) for i, r in enumerate(results) if _boxed(r)]
-    exact = len(results) - len(boxed)
     if not boxed:
         report.numbers["by_boxes"] = {"pairs": 0, "beyond_mm": beyond}
         return
     i, least = min(boxed, key=lambda q: q[1]["box_gap_mm"])
-    by = {w: sum(r["box_by"] == w for _, r in boxed) for w in ("box", "hull")}
     report.numbers["by_boxes"] = {
         "pairs": len(boxed),
         "beyond_mm": beyond,
         "least_box_gap_mm": least["box_gap_mm"],
         "least": i,
     }
-    report.line(
-        f"{len(boxed)} pair(s) farther apart than any gap judged ({beyond:g} mm), read by their "
-        f"boxes: CLEAR, least box gap {least['box_gap_mm']:.4f} mm, pairs.{i}, {least['a']} | "
-        f"{least['b']}. A box gap is never more than the true gap, so each is in the record by "
-        f"it, box_gap_mm, with no gap_mm; the other {exact} pair(s) are read exactly. --exact "
-        "reads every pair exactly"
-    )
-    report.second(
-        f"the {len(boxed)} pair(s) read by their boxes: {by['box']} ruled out by their "
-        f"axis-aligned boxes and {by['hull']} by their convex hulls along a way between them, "
-        f"each a bound no more than the true gap, padded {HULL_PAD:g} mm on a STEP's mesh"
-    )
 
 
 def _place_said(
