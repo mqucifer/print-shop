@@ -358,6 +358,9 @@ class _Alone(load._Model):
         self.feature = doc.addObject("Part::Feature", "Parts")
         self.feature.Shape = self.solid
         self.shape = self.feature.Shape
+        # The part's own solid, its faces in `shape`'s order, as the whole's join keeps it
+        # (`_Model.whole`, mqucifer/print-shop#346).
+        self.whole = self.solid
         self.solids = [self.shape]
         met = load.Faces(self.met_faces)
         self.between = [f for f in self.shape.Faces if met.has(f)]
@@ -490,23 +493,33 @@ class _Alone(load._Model):
         self.part_rows = {self.part.name: np.arange(len(self.points))}
 
 
-def _alone_solved(make: Any) -> dict[str, Any]:
+def _alone_solved(make: Any, coarser_of: tuple[list[Any], int] | None = None) -> dict[str, Any]:
     """One part on its own at one mesh, read; meshed again straight-sided where its curved
-    mesh fails, as the whole is."""
+    mesh fails, as the whole is; and given `coarser_of`, the coarser mesh of its finer one's
+    close pairs (`load.coarser`)."""
     import FreeCAD as App
 
     App.ParamGet("User parameter:BaseApp/Preferences/Mod/Fem/Gmsh").SetInt("NumOfThreads", 1)
     try:
         doc = App.newDocument("Alone")
+        curved = make(False)
+        load.coarser(curved, coarser_of)
         with load._quiet():
-            return _alone_read(make(False), doc)
+            return _alone_read(curved, doc)
     except load._Curved as curved:
-        why = str(curved)
+        why, closes, tight = str(curved), curved.closes, curved.tight
     # Outside the `except`, so the curved try's mesh is let go first, as the whole's is.
     give_back()
+    with load.step(
+        f"meshing again straight-sided, as the curved mesh didn't stand: {load.curved_said(why)}"
+    ):
+        pass
     doc = App.newDocument("Alone")
+    straight = make(True)
+    load.coarser(straight, coarser_of)
+    straight.closes, straight.tight = closes, tight
     with load._quiet():
-        found = _alone_read(make(True), doc)
+        found = _alone_read(straight, doc)
     found["straight"] = why
     return found
 
@@ -547,6 +560,8 @@ def _alone_read(model: _Alone, doc: Any) -> dict[str, Any]:
             "joined": model.joined_said,
             "iterated": model.iterated,
             "straight": None,
+            "finer": model.finer_said(),
+            "closes": (model.closes, model.tight),
         }
     finally:
         App.closeDocument(doc.Name)
@@ -649,7 +664,7 @@ def first(
     clock.check("whole", "the first pass's coarser mesh")
     coarse = load._solved(
         assembly, square, args, round(size * load.COARSER, 3), two_pass=True, weighed=placed,
-        spread=False,
+        spread=False, coarser_of=fine["closes"],
     )
     # Nothing more is read from the parts with their bores squared.
     load.unjoined(square)
@@ -665,6 +680,8 @@ def first(
         "seconds": round(time.time() - began, 1),
         "memory_peak": peak(),
         "iterated": fine["iterated"] or coarse["iterated"],
+        "finer": fine.get("finer"),
+        "coarse_finer": coarse.get("finer"),
     }
     clock.done.append(
         f"the first pass read the whole in {said['seconds']} s ({fine['elements']} elements)"
@@ -739,7 +756,9 @@ def second(
                 )  # fmt: skip
 
             with load.step(f"the second pass's part {part.name} on its own, at {mesh:g} mm"):
-                into[part.name] = _alone_solved(make)
+                into[part.name] = _alone_solved(
+                    make, reads[part.name]["closes"] if into is rough else None
+                )
             into[part.name]["seconds"] = round(time.time() - started, 1)
             clock.time(kind, time.time() - started)
         clock.done.append(f"the second pass read {part.name} on its own")
@@ -753,6 +772,7 @@ def second(
         "seconds": round(time.time() - began, 1),
         "memory_peak": peak(),
         "iterated": sorted(n for n, r in {**reads, **rough}.items() if r["iterated"]),
+        "finer": sorted(n for n, r in {**reads, **rough}.items() if r.get("finer")),
     }
     return reads, rough, said
 
@@ -781,6 +801,17 @@ def pass_lines(report: Any, firsts: dict[str, Any], seconds: dict[str, Any], why
         f"{firsts['coarse_nodes']} nodes; {firsts['seconds']} s, the container's memory at "
         f"most {_gib(firsts['memory_peak'])} by its end"
         + (f"; {firsts['iterated']}" if firsts["iterated"] else "")
+        + (
+            f"; at {firsts['mesh_mm']:g} mm{load._finer_said({'finer': firsts['finer']})}"
+            if firsts.get("finer")
+            else ""
+        )
+        + (
+            f"; at {firsts['coarse_mesh_mm']:g} mm"
+            f"{load._finer_said({'finer': firsts['coarse_finer']})}"
+            if firsts.get("coarse_finer")
+            else ""
+        )
     )
     report.line(
         f"pass 2, each part on its own: {seconds['parts']} parts at a mesh of at most "
@@ -792,6 +823,12 @@ def pass_lines(report: Any, firsts: dict[str, Any], seconds: dict[str, Any], why
             f"; {', '.join(seconds['iterated'])} solved by CalculiX's iterative solver, "
             "corrected, where its direct one met the container's memory"
             if seconds["iterated"]
+            else ""
+        )
+        + (
+            f"; {', '.join(seconds['finer'])} meshed finer where two of its faces that meet "
+            "nowhere lie closer than its triangles' sag"
+            if seconds.get("finer")
             else ""
         )
     )

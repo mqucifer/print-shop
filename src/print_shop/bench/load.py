@@ -74,7 +74,12 @@ turning one inside out, as on a traced glass frame, the mesh is made again with 
 and the reply says why. On that mesh a triangle is on a face where its corners are, as its
 mid-side nodes are on its chords, off a curved face, so a part drawn in its print pose and placed
 by its turns, as a design run places it, is told from the curved parts it meets
-(mqucifer/print-shop#319). Anything `load` can't read is `NO ANSWER`, naming the step, and the
+(mqucifer/print-shop#319). Where gmsh refuses the joined parts because its triangles on one face
+cross another's, as where a cap sits in its counterbore with play round it and the two
+cylinders' chords sag into each other, the pairs of faces that meet nowhere and lie closer than
+their mesh's sag are meshed again finer there, and the reply says so; a pair too close for any
+mesh is named, with its parts, its faces and how far apart they are (`close_faces.py`,
+mqucifer/print-shop#346). Anything `load` can't read is `NO ANSWER`, naming the step, and the
 part or the joint, where it stopped. CalculiX runs on one thread, as gmsh does, and each mesh's
 and solve's files are deleted from the container's /tmp, which is memory, once read. Where the
 solve still meets the container's memory, the reply says so from the container's own count, and
@@ -119,7 +124,16 @@ from typing import Any
 
 import numpy as np
 
-from . import as_printed, dovetail, infill, load_dovetail, load_through, progress, way_in
+from . import (
+    as_printed,
+    close_faces,
+    dovetail,
+    infill,
+    load_dovetail,
+    load_through,
+    progress,
+    way_in,
+)
 from .assembly import AXES, DIAMETER, Assembly, Held, Joint, PartAt, read
 from .cae import ccx_one_thread, freecad, give_back, gmsh, tidy_mesh, tidy_solve
 from .limits import over, said, under
@@ -576,6 +590,16 @@ class _Model:
         #: meshed at --mesh and no finer round them (mqucifer/print-shop#301).
         self.spread = spread
         self.iterated: str | None = None
+        #: The pairs of faces closer than the mesh's sag, meshed finer there
+        #: (`close_faces`, mqucifer/print-shop#346): filled by `solve`. And how many faces curve
+        #: tighter than gmsh's sizing would mesh at `close_faces.LEAST`, the least element then.
+        self.closes: list[close_faces.Close] = []
+        self.tight = 0
+        #: What each close pair's face is meshed at, as a share of the size that meshes it: the
+        #: finer of a solve's two meshes `1 / COARSER` of it, and the coarser one, given the
+        #: finer's pairs, all of it (`_solved`'s `coarser_of`), so that on those faces too the
+        #: coarser mesh is coarser and its second check reads them.
+        self.local_scale = 1 / COARSER
         #: Each node's axes held, as CalculiX is told them, by `_add_to`.
         self.constrained: dict[int, set[int]] = {}
         #: The solids each part's own weight is taken from, where they aren't `placed`: in
@@ -593,6 +617,9 @@ class _Model:
         self.feature = doc.addObject("Part::Feature", "Parts")
         self.feature.Shape = whole
         self.shape = shape = self.feature.Shape
+        #: The joined shape itself, as the fuse made it, its faces in `shape`'s order: what
+        #: FreeCAD caches of its faces can be let go, where the document's copy can't be changed.
+        self.whole = whole
         if len(shape.Solids) != len(placed):
             raise NoAnswer(
                 f"joined, the {len(placed)} parts are {len(shape.Solids)} solids: two of them "
@@ -658,6 +685,7 @@ class _Model:
         whole = self.shape.generalFuse([solid for *_, solid in given])[0]
         self.feature.Shape = whole
         self.shape = self.feature.Shape
+        self.whole = whole
         solids = self.shape.Solids
         if len(solids) != len(whole.Solids):
             raise NoAnswer("the parts with their cores fused in couldn't be read back")
@@ -838,38 +866,49 @@ class _Model:
         analysis.addObject(mesh)
         doc.recompute()
         began = time.time()
-        tools = GmshTools(mesh)
-        if not self.spread:
-            written = tools.write_geo
-
-            def write_geo() -> None:
-                written()
-                path = Path(tools.temp_file_geo)
-                text = path.read_text()
-                if "// meshing" not in text:
-                    raise NoAnswer("FreeCAD's gmsh input has no `// meshing` to set its sizes by")
-                path.write_text(
-                    text.replace(
-                        "// meshing", "Mesh.MeshSizeExtendFromBoundary = 0;\n// meshing", 1
-                    )
-                )
-
-            tools.write_geo = write_geo
-        gmsh(tools)
-        tidy_mesh(tools)
+        # Where the curved try found faces close, the straight one is meshed finer there from
+        # the start (mqucifer/print-shop#346).
+        tools = self._gmsh(
+            GmshTools, mesh, close_faces.fields(self.closes, self.size, self.local_scale)
+        )
+        said = None if mesh.FemMesh.VolumeCount else _gmsh_said(tools)
+        for _ in range(RETRIES):
+            if said is None or not CROSSED.search(said):
+                break
+            # gmsh's triangles on one face cross another's (mqucifer/print-shop#346): where two
+            # faces that meet nowhere lie closer than their sag, it's meshed again finer there.
+            try:
+                with step("finding faces closer than the mesh's sag, where gmsh refused them"):
+                    sizes, more = self._close(int(mesh.MeshSizeFromCurvature), said)
+            except NoAnswer as stopped:
+                if stopped.__cause__ is None:
+                    raise  # its own refusal, which says gmsh's words
+                # The search itself failed: what gmsh said is said with it.
+                raise NoAnswer(f"{stopped}; gmsh had refused the mesh: {said[:300]}") from stopped
+            if not more:
+                break
+            tools = self._gmsh(GmshTools, mesh, sizes)
+            said = None if mesh.FemMesh.VolumeCount else _gmsh_said(tools)
+        words = said
+        if said is not None:
+            if self.closes:
+                words = f"{words}; meshed again {self._finer_words()}, and refused again"
+            if CROSSED.search(said):
+                words = f"{words}{self._near_said(said)}"
         self.mesh_s = round(time.time() - began, 2)
         self.fem = fem = mesh.FemMesh
-        if not fem.VolumeCount:
+        if words is not None:
             # FreeCAD keeps no mesh where gmsh ends with an error, and says nothing of it: its
             # own words are in what it printed.
-            said = bytes(tools.process.readAllStandardOutput()).decode(errors="replace")
-            said += bytes(tools.process.readAllStandardError()).decode(errors="replace")
-            words = "; ".join(_gmsh_errors(said)) or "it gave no reason"
             if not self.straight:
-                raise _Curved(f"gmsh made no curved mesh of the joined parts: {words[:300]}")
+                raise _Curved(
+                    f"gmsh made no curved mesh of the joined parts: {words[:900]}",
+                    self.closes,
+                    self.tight,
+                )
             raise _Unread(
                 "gmsh made no mesh of the joined parts, with its elements' sides curved onto "
-                f"the parts' faces or straight: {words[:300]}"
+                f"the parts' faces or straight: {words[:900]}"
             )
         self.nodes = {n: np.array([p.x, p.y, p.z]) for n, p in fem.Nodes.items()}
         if self.two_pass and len(self.solids) > 1:
@@ -893,21 +932,25 @@ class _Model:
             self._stiffnesses(fea.inp_file_name)
         self._add_to(fea.inp_file_name)
         kills = oom_kills()
-        _ccx(fea, self.size)
-        fea.load_results()
+        with step("CalculiX's solve of the joined parts"):
+            _ccx(fea, self.size)
+            fea.load_results()
         self.solve_s = round(time.time() - began, 2)
         results = [o for o in analysis.Group if o.isDerivedFrom("Fem::FemResultObject")]
         if "nonpositive jacobian" in str(getattr(fea, "ccx_stdout", "")):
             tidy_solve(fea)
+            where = self._inverted_said(str(fea.ccx_stdout))
             if not self.straight:
                 raise _Curved(
                     "CalculiX found an element of the curved mesh, at most "
-                    f"{self.size:g} mm, turned inside out"
+                    f"{self.size:g} mm, turned inside out{where}",
+                    self.closes,
+                    self.tight,
                 )
             raise NoAnswer(
                 f"CalculiX solved nothing: an element of the mesh, at most {self.size:g} mm, is "
-                "turned inside out, as one with a curved side on a small hole or a tight round "
-                "can be. Give a finer --mesh"
+                f"turned inside out{where}. One with a curved side on a small hole or a tight "
+                "round can be: give a finer --mesh"
             )
         if (not results or not results[0].NodeStrainXX) and self.two_pass:
             full = memory_met(kills)
@@ -934,6 +977,172 @@ class _Model:
             self.printed = _printed(os.path.splitext(fea.inp_file_name)[0] + ".dat", self.row)
         tidy_solve(fea)
         self._balance()
+
+    def _gmsh(self, gmsh_tools: Any, mesh: Any, sizes: str) -> Any:
+        """gmsh's mesh, as FreeCAD makes it, with a pass that isn't spread told so, and `sizes`,
+        gmsh's local sizes where faces are close, where there are any; its files deleted once
+        read, and FreeCAD's tools, which keep what gmsh said."""
+        tools = gmsh_tools(mesh)
+        if not self.spread or sizes:
+            written = tools.write_geo
+
+            def write_geo() -> None:
+                written()
+                path = Path(tools.temp_file_geo)
+                text = path.read_text()
+                if "// meshing" not in text:
+                    raise NoAnswer("FreeCAD's gmsh input has no `// meshing` to set its sizes by")
+                if sizes and "Background Field" in text:
+                    raise NoAnswer(
+                        "FreeCAD's gmsh input has a background field of its own, and the local "
+                        "sizes where faces are close can't be set beside it"
+                    )
+                given = ("" if self.spread else "Mesh.MeshSizeExtendFromBoundary = 0;\n") + sizes
+                path.write_text(text.replace("// meshing", given + "// meshing", 1))
+
+            tools.write_geo = write_geo
+        gmsh(tools)
+        tidy_mesh(tools)
+        return tools
+
+    def _close(self, per_turn: int, words: str) -> tuple[str, bool]:
+        """Where gmsh's triangles crossed, the pairs of faces that meet nowhere and lie closer
+        than their mesh's sag (`close_faces`): every such pair of two parts' faces, and any
+        near where they crossed; gmsh's local sizes for them and the pairs found before, and
+        whether any is new. A pair that would need elements finer than `close_faces.LEAST` is
+        the parts' to fix: where one is within the mesh of where gmsh's triangles crossed, it's
+        said, with its parts, its faces and how far apart they are, and nothing is meshed;
+        elsewhere, it's left as gmsh meshed it."""
+        point = _crossed_at(words)
+        tight: list[int] = []
+        found = close_faces.found(
+            self.whole, self.size, per_turn, _measured(self.whole), self._face_owners(), point,
+            tight,
+        )  # fmt: skip
+        self.tight = len(tight)
+        refused = close_faces.too_close(found)
+        faces = self.whole.Faces
+        here = [
+            c for c in refused
+            if point is not None and min(
+                faces[n - 1].distToShape(point)[0] for n in (c.first, c.second)
+            ) < self.size
+        ]  # fmt: skip
+        if here or (refused and point is None):
+            refused = here or refused
+            raise NoAnswer(
+                f"{len(refused)} pair(s) of the parts' faces are too close together to mesh: "
+                "each pair meets nowhere, and gmsh's triangles on one cross the other's unless "
+                f"finer than {close_faces.LEAST:g} mm there, as gmsh found ({words[:300]}). "
+                + close_faces.said(faces, refused, self._owners, lambda f: _xyz(f.CenterOfMass))
+                + ". Draw each pair meeting face to face, or further apart"
+            )
+        before = {(c.first, c.second) for c in self.closes}
+        new = [c for c in found if c not in refused and (c.first, c.second) not in before]
+        self.closes += new
+        return close_faces.fields(self.closes, self.size, self.local_scale), bool(new)
+
+    def _finer_words(self) -> str:
+        finer = self.finer_said()
+        return _finer_said({"finer": finer}).removeprefix(", ") if finer else ""
+
+    def _near_said(self, words: str) -> str:
+        """The faces nearest where gmsh says its triangles cross, in words, for a design run to
+        find them by: their parts, their kinds and where they are."""
+        point = _crossed_at(words)
+        if point is None:
+            return ""
+        near = self._faces_near(point)
+        return f"; the faces nearest where gmsh's triangles cross: {near}" if near else ""
+
+    def _faces_near(self, point: Any) -> str:
+        """The `NEAREST` faces nearest a vertex, in words: each one's parts, kind and where it
+        is, how far from it, and whether it was meshed finer or is narrow, under a tenth of the
+        mesh across."""
+        finer = {n for c in self.closes for n in c.faces}
+        near = []
+        for number, face in enumerate(self.whole.Faces, 1):
+            box = face.BoundBox
+            box.enlarge(self.size)
+            if box.isInside(point.Point):
+                near.append((float(face.distToShape(point)[0]), number, face))
+            close_faces._let_go(face)
+        near.sort(key=lambda row: row[0])
+        said = []
+        for d, number, f in near[:NEAREST]:
+            length = sum(e.Length for e in f.Edges)
+            thin = length > 0 and 2 * f.Area / length < self.size / 10
+            flags = [w for w, yes in (("meshed finer", number in finer), ("narrow", thin)) if yes]
+            said.append(
+                f"{'/'.join(self._owners(f))}'s {close_faces.kind_of(f)} face"
+                + (f" of radius {f.Surface.Radius:g} mm" if hasattr(f.Surface, "Radius") else "")
+                + f" round {_xyz(f.CenterOfMass)}, {d:.4f} mm from it"
+                + (f" ({', '.join(flags)})" if flags else "")
+            )
+            close_faces._let_go(f)
+        return ", ".join(said)
+
+    def _inverted_said(self, said: str) -> str:
+        """Where CalculiX found elements turned inside out (mqucifer/print-shop#346), in words:
+        how many, and for the first, its part, where it is and the faces nearest it, so a
+        design run, or `load`, can tell a face meshed finer from a sliver the fuse left."""
+        numbers = list(dict.fromkeys(int(n) for n in INVERTED.findall(said)))
+        if not numbers or getattr(self, "fem", None) is None:
+            return ""
+        try:
+            return self._placed_said(numbers)
+        except Exception:  # noqa: BLE001 - placing it is only words: the try goes on as before
+            return f": {len(numbers)} element(s)"
+
+    def _placed_said(self, numbers: list[int]) -> str:
+        import FreeCAD as App
+        import Part
+
+        corners = [self.nodes[n] for n in self.fem.getElementNodes(numbers[0])[:4]]
+        middle = App.Vector(*np.mean(corners, axis=0))
+        parts = [p.name for p, solid in zip(self.assembly.parts, self.solids, strict=True)
+                 if solid.isInside(middle, 1e-6, True)] or ["none of the parts"]  # fmt: skip
+        longest = max(float(np.linalg.norm(a - b)) for a in corners for b in corners)
+        near = self._faces_near(Part.Vertex(middle))
+        return (
+            f": {len(numbers)} element(s), the first in {'/'.join(parts)}, round "
+            f"{_xyz(middle)}, its longest side {longest:.4f} mm"
+            + (f"; the faces nearest it: {near}" if near else "")
+        )
+
+    def _face_owners(self) -> list[frozenset[int]]:
+        """Each face of the joined shape's parts, by their number from 0, in the shape's order:
+        two where they meet, and none for a core's."""
+        if getattr(self, "_owners_by_face", None) is None:
+            owned: list[set[int]] = [set() for _ in self.shape.Faces]
+            for k, solid in enumerate(self.solids):
+                for face in solid.Faces:
+                    owned[int(self._face_name(face).removeprefix("Face")) - 1].add(k)
+                close_faces._let_go(solid)
+            self._owners_by_face = [frozenset(o) for o in owned]
+        return self._owners_by_face
+
+    def _owners(self, face: Any) -> list[str]:
+        """The parts a face of the joined shape is a face of: two where they meet."""
+        number = int(self._face_name(face).removeprefix("Face"))
+        names = [self.assembly.parts[k].name for k in sorted(self._face_owners()[number - 1])]
+        return names or ["a core"]
+
+    def finer_said(self) -> dict[str, Any] | None:
+        """What's meshed finer where faces are close, for the reply: none where nothing is."""
+        if not self.closes:
+            return None
+        faces = {n for c in self.closes for n in c.faces}
+        return {
+            "pairs": len(self.closes),
+            "faces": len(faces),
+            "closest_mm": round(min(c.apart for c in self.closes), 4),
+            "tight_faces": self.tight,
+            "least_mm": close_faces.LEAST,
+            "finest_mm": round(
+                close_faces.stepped(min(c.finest for c in self.closes) * self.local_scale), 4
+            ),
+        }
 
     def _stiffnesses(self, path: str) -> None:
         """Each core's elements, and its own stiffness, written into FreeCAD's CalculiX input
@@ -2000,6 +2209,37 @@ _SUMMED = re.compile(
 )
 
 
+#: gmsh's words where its surface mesh crosses itself (mqucifer/print-shop#346).
+CROSSED = re.compile(r"intersect", re.I)
+#: How many of the faces nearest where gmsh's triangles cross are named.
+NEAREST = 4
+#: CalculiX's words for each element it finds turned inside out, with its number.
+INVERTED = re.compile(r"determinant in element\s+(\d+)")
+#: How many times the parts are meshed again finer where gmsh's triangles cross, each time
+#: where it says they cross again.
+RETRIES = 4
+
+
+def _gmsh_said(tools: Any) -> str:
+    """gmsh's own error lines, from what FreeCAD's tools kept of what it printed."""
+    said = bytes(tools.process.readAllStandardOutput()).decode(errors="replace")
+    said += bytes(tools.process.readAllStandardError()).decode(errors="replace")
+    return "; ".join(_gmsh_errors(said)) or "it gave no reason"
+
+
+def _crossed_at(words: str) -> Any:
+    """Where gmsh says its triangles cross, as a vertex: none where it gives no point."""
+    found = re.search(
+        r"(?:intersection|at point) \(([-\d.e+]+), ?([-\d.e+]+), ?([-\d.e+]+)\)", words
+    )
+    if found is None:
+        return None
+    import FreeCAD as App
+    import Part
+
+    return Part.Vertex(App.Vector(*(float(v) for v in found.groups())))
+
+
 def _gmsh_errors(said: str) -> list[str]:
     """gmsh's own error lines in what it printed, each once, less its summary of them."""
     found = []
@@ -2179,10 +2419,7 @@ def keep(shapes: list[Any]) -> None:
 
 def forget() -> None:
     """What FreeCAD cached of the kept shapes' faces, let go: it's read again as it's asked."""
-    for shape in _kept:
-        clear = getattr(shape, "clearCache", None)
-        if clear is not None:
-            clear()
+    close_faces._let_go(*_kept)
 
 
 #: The parts joined, by the shapes joined, while one `load` runs (mqucifer/print-shop#336): each
@@ -2206,10 +2443,34 @@ def fused(placed: list[Any]) -> Any:
     return _joined[key][1]
 
 
+#: What's measured of each joined shape's faces where gmsh's triangles crossed
+#: (`close_faces.found`, mqucifer/print-shop#346), by the shape's hash: each entry the shape,
+#: held so no hash is another's, and how far apart its pairs of faces are.
+_apart: dict[int, tuple[Any, dict[tuple[int, int], float]]] = {}
+
+
+def _measured(shape: Any) -> dict[tuple[int, int], float]:
+    """How far apart `shape`'s pairs of faces were measured, so far, while this `load` runs:
+    the same parts joined are asked of at two meshes, curved and straight, and on the made-up
+    traced glass frame of `test_cae.py`, 2,400 faces, measuring them took 50 s. The shape is
+    kept as the joins are (`keep`), so what FreeCAD caches of its faces is let go as each step
+    ends."""
+    key = shape.hashCode()
+    held = _apart.get(key)
+    if held is None or not held[0].isSame(shape):
+        held = _apart[key] = (shape, {})
+        keep([shape])
+    return held[1]
+
+
 def unjoined(placed: list[Any]) -> None:
     """The join of `placed` let go, once nothing more is read from it."""
     let_go = _joined.pop(tuple(id(s) for s in placed), None)
     if let_go is not None:
+        for key, (shape, _) in list(_apart.items()):
+            if shape.isSame(let_go[1]):
+                del _apart[key]
+                _kept[:] = [s for s in _kept if s is not shape]
         # A part the squaring left as it was is a part as placed still, and stays kept.
         gone = [t for t in (*let_go[0], let_go[1]) if all(t is not b for b in _placed_now)]
         _kept[:] = [s for s in _kept if all(s is not t for t in gone)]
@@ -2233,7 +2494,28 @@ class Faces:
 
 class _Curved(NoAnswer):
     """The mesh with its elements' sides curved onto the parts' faces has an element turned
-    inside out, or none at all: it's meshed again with them straight."""
+    inside out, or none at all: it's meshed again with them straight. With the pairs of faces
+    the curved try found close (mqucifer/print-shop#346), so the straight one starts from them:
+    the same parts at the same mesh, and gmsh's triangles cross the same way."""
+
+    def __init__(
+        self, said: str, closes: list[close_faces.Close] | None = None, tight: int = 0
+    ) -> None:
+        super().__init__(said)
+        self.closes = list(closes or [])
+        self.tight = tight
+
+
+def curved_said(why: str) -> str:
+    """Why the curved try didn't stand, in a few words, for the step that follows it: what met
+    it, never a figure or a name."""
+    if why.startswith("CalculiX"):
+        return "CalculiX found an element turned inside out"
+    if "made no curved mesh" in why:
+        return "gmsh made no curved mesh" + (
+            ", with faces meshed finer where they're close" if "meshed again" in why else ""
+        )
+    return "it didn't stand"
 
 
 def _solved(
@@ -2245,12 +2527,15 @@ def _solved(
     weighed: list[Any] | None = None,
     spread: bool = True,
     cores: dict[str, list[Any]] | None = None,
+    coarser_of: tuple[list[Any], int] | None = None,
 ) -> dict[str, Any]:
     """One solve at one mesh, and everything read from it. Where gmsh can't curve every
     element's sides onto the parts' faces without turning one inside out, as on a traced
     glass frame's many small curves and sharp corners (mqucifer/print-shop#295), it's meshed
     again with them straight, and `straight` says why: every mesh that solves curved is as it
-    was."""
+    was. Given `coarser_of`, the finer mesh's close pairs and tight faces, it's that mesh's
+    coarser one: meshed on the same pairs from the start, at their own size where the finer
+    is meshed finer still (`_Model.local_scale`, mqucifer/print-shop#346)."""
     import FreeCAD as App
 
     # One thread, so the same parts are the same mesh, and the same figures, every time.
@@ -2259,6 +2544,7 @@ def _solved(
         made = _Model(assembly, placed, args, size, straight, two_pass, spread, cores)
         if weighed is not None:
             made.weighed = weighed
+        coarser(made, coarser_of)
         return made
 
     try:
@@ -2266,16 +2552,32 @@ def _solved(
         with _quiet():
             return _read_solved(assembly, model(False), doc, size)
     except _Curved as curved:
-        why = str(curved)
+        why, closes, tight = str(curved), curved.closes, curved.tight
     # Meshed again outside the `except`, so what the curved try held, its model and its mesh,
     # which its traceback keeps, is let go first (mqucifer/print-shop#336): held through the
     # straight try, a design run's whole table had 0.8 GiB more in use there.
     give_back()
+    with step(f"meshing again straight-sided, as the curved mesh didn't stand: {curved_said(why)}"):
+        pass
     doc = App.newDocument("Load")
-    with _quiet():
-        found = _read_solved(assembly, model(True), doc, size)
+    straight = model(True)
+    straight.closes, straight.tight = closes, tight
+    try:
+        with _quiet():
+            found = _read_solved(assembly, straight, doc, size)
+    except NoAnswer as stopped:
+        # What turned the curved try away is said too, as the reply would have said it.
+        stopped.args = (f"{stopped}; before it, the curved mesh: {why[:600]}", *stopped.args[1:])
+        raise
     found["straight"] = why
     return found
+
+
+def coarser(model: _Model, of: tuple[list[Any], int] | None) -> None:
+    """A model made the coarser mesh of a finer one's close pairs and tight faces, `of`, where
+    one's given: meshed on them from the start, each at the size that meshes it."""
+    if of is not None:
+        model.closes, model.tight, model.local_scale = list(of[0]), of[1], 1.0
 
 
 def _read_solved(assembly: Assembly, model: _Model, doc: Any, size: float) -> dict[str, Any]:
@@ -2314,6 +2616,8 @@ def _read_solved(assembly: Assembly, model: _Model, doc: Any, size: float) -> di
             "mesh_s": model.mesh_s,
             "solve_s": model.solve_s,
             "straight": None,
+            "finer": model.finer_said(),
+            "closes": (model.closes, model.tight),
             "iterated": model.iterated,
             "planes": model.planes,
             **({"tractions": model.tractions()} if model.two_pass else {}),
@@ -2323,7 +2627,30 @@ def _read_solved(assembly: Assembly, model: _Model, doc: Any, size: float) -> di
 
 
 def _straight_said(solved: dict[str, Any]) -> str:
-    """Where a mesh's elements are straight-sided, why (mqucifer/print-shop#295)."""
+    """Where a mesh's elements are straight-sided, why (mqucifer/print-shop#295); and where
+    it's finer where faces are close (mqucifer/print-shop#346)."""
+    return _finer_said(solved) + _only_straight_said(solved)
+
+
+def _finer_said(solved: dict[str, Any]) -> str:
+    finer = solved.get("finer")
+    if not finer:
+        return ""
+    return (
+        f", finer, to at most {finer['finest_mm']:g} mm, on {finer['faces']} face(s) where "
+        f"{finer['pairs']} pair(s) of faces that meet nowhere lie closer than its triangles' "
+        f"sag, the closest {finer['closest_mm']:g} mm apart, and nowhere finer than "
+        f"{finer['least_mm']:g} mm"
+        + (
+            f": {finer['tight_faces']} face(s) curve tighter than a print's round, and are "
+            "meshed at that"
+            if finer.get("tight_faces")
+            else ""
+        )
+    )
+
+
+def _only_straight_said(solved: dict[str, Any]) -> str:
     if not solved.get("straight"):
         return ""
     return (
@@ -2620,7 +2947,9 @@ def _run(
         if one is not None:
             one.whole_read()
             one.check_coarser(round(size * COARSER, 3))
-        coarse = _solved(assembly, placed, args, round(size * COARSER, 3), cores=cores)
+        coarse = _solved(
+            assembly, placed, args, round(size * COARSER, 3), cores=cores, coarser_of=fine["closes"]
+        )
     force = float(sum(np.linalg.norm(one["force"]) for one in fine["raw_loads"]))
     meshed = (
         f"a mesh of at most {size:g} mm ({fine['nodes']} nodes, {fine['elements']} elements, "
