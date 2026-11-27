@@ -23,6 +23,8 @@ failed (exit 1, or a need's own command that didn't pass its need) stays named i
 - **No answer to rely on** (`DISAGREE`, `NO ANSWER`, a container's exit) leaves it as it was, and a
   wrong command (exit 3) isn't a try.
 - `thin` at the harness's settings is `unprintable.py`'s, and isn't said twice.
+- `thin` on given files alone, at any settings, isn't held: a given file isn't printed
+  (mqucifer/print-shop#365).
 
 **What lets it go.** Its files are all gone; or a `done` after it named the part, and none of its
 files is in it. A check is the model's own files or the given references, so both are held.
