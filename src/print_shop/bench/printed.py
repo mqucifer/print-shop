@@ -33,9 +33,10 @@ Orca's own modifiers (`slicer.regions`). In an assembly file each part may carry
   - `mesh`: an STL file, named relative to the assembly or job file, already the shape it is:
     made from the part's own faces offset by a margin, so its walls follow the part. Nothing
     reading it offsets it again;
-  - `layers`: `[low, high]`, heights in mm above the bed as the part prints: along its up way
-    (the assembly's `layers` axis), from its lowest point that way. Orca's height range modifier,
-    which holds whole layers. It alone may set `layer_height`.
+  - `layers`: `[low, high]`, in mm, in the part's own file's coordinates along its layers axis
+    (the assembly's `layers`): own z from 3 to 6, for layers along z. Orca's height range
+    modifier, which holds whole layers; the slice turns it into heights above the bed by the
+    pose it slices with, either way up. It alone may set `layer_height`.
 - **The infill's direction** (`infill_angle`) is in the part's own axes, so `load` needs
   nothing of the pose: degrees in the plane of its layers, with its layers along its own axis
   `a`, from its own axis `a+1` toward `a+2`, cyclic (`own_way`). Layers along z: from +x toward
@@ -233,14 +234,14 @@ class Mesh:
 
 @dataclass(frozen=True)
 class Layers:
-    """Whole layers: heights in mm above the bed as the part prints, along its up way from its
-    lowest point that way."""
+    """Whole layers: from `low` to `high` mm in the part's own file's coordinates along its
+    layers axis, whichever way up it prints."""
 
     low: float
     high: float
 
     def said(self) -> str:
-        return f"the layers from {self.low:g} to {self.high:g} mm above the bed"
+        return f"the layers from {self.low:g} to {self.high:g} mm along the part's layers axis"
 
 
 Shape = Box | Cylinder | Mesh | Layers
@@ -281,18 +282,18 @@ class Region:
             return "layers"
         return "box"
 
-    def contains(self, point: Point, height: float | None = None,
+    def contains(self, point: Point, layers: str | None = None,
                  in_mesh: Callable[[Point], bool] | None = None) -> bool:
         """Whether a point of the part, in its own axes, is inside. A `layers` region needs the
-        point's `height` above the bed as it prints, and a `mesh` one a test of its mesh."""
+        part's `layers` axis (x, y or z), and a `mesh` one a test of its mesh."""
         shape = self.shape
         if isinstance(shape, Cylinder):
             return shape.contains(point)
         if isinstance(shape, Layers):
-            if height is None:
-                raise ValueError(f"the region {self.name} is layers: a point's height above the "
-                                 "bed is needed to place it")
-            return shape.low <= height <= shape.high
+            if layers not in ("x", "y", "z"):
+                raise ValueError(f"the region {self.name} is layers: the part's layers axis is "
+                                 "needed to place a point in it")
+            return shape.low <= point["xyz".index(layers)] <= shape.high
         if isinstance(shape, Mesh):
             if in_mesh is None:
                 raise ValueError(f"the region {self.name} is the mesh {shape.file}: it's read "
@@ -316,15 +317,18 @@ class Printed:
     settings: Settings = field(default_factory=Settings)
     regions: tuple[Region, ...] = ()
 
-    def at(self, point: Point, height: float | None = None,
+    def at(self, point: Point, layers: str | None = None,
            in_mesh: Mapping[str, Callable[[Point], bool]] | None = None) -> Settings:
-        """The settings a point of the part, in its own axes, is printed with: the last region
-        that holds it, over the part's. `height` and `in_mesh` are as `Region.contains` takes
-        them, a mesh's test by its region's name."""
+        """The settings a point of the part, in its own axes, is printed with, as Orca applies
+        them: a `layers` region that holds it over the part's, then each volume region that
+        holds it, the later over the earlier. `layers` and `in_mesh` are as `Region.contains`
+        takes them, a mesh's test by its region's name."""
         found = self.settings
-        for region in self.regions:
+        banded = [r for r in self.regions if isinstance(r.shape, Layers)]
+        volumes = [r for r in self.regions if not isinstance(r.shape, Layers)]
+        for region in (*banded, *volumes):
             test = (in_mesh or {}).get(region.name)
-            if region.contains(point, height, test):
+            if region.contains(point, layers, test):
                 found = region.settings.over(found)
         return found
 
@@ -454,10 +458,10 @@ def _mesh(raw: Any, where: str) -> Mesh:
 def _layers(raw: Any, where: str) -> Layers:
     here = f"{where}'s layers"
     if not isinstance(raw, list | tuple) or len(raw) != 2:
-        raise ValueError(f"{here} are [low, high], heights in mm above the bed as it prints")
+        raise ValueError(f"{here} are [low, high], in mm along the part's layers axis")
     low, high = (_finite(v, here) for v in raw)
-    if not 0 <= low < high:
-        raise ValueError(f"{here} run from {low:g} to {high:g}: from 0 or more, the lower first")
+    if not low < high:
+        raise ValueError(f"{here} run from {low:g} to {high:g}: the lower first")
     return Layers(low, high)
 
 
