@@ -70,6 +70,9 @@ standing and placed by the one turn about z, exactly where it is, and by its `at
 lofted through 9 sections bowing 25 mm along its layers, its flat sides B-spline as a loft makes
 them; and the leg bowing along its layers with a notch 6 x 4 in its flat side.
 
+`load/web*` (mqucifer/print-shop#363): two round bosses 12 across and 20 tall, 40 apart, joined
+by a web 1.75 thick, and 2.0 thick.
+
 `capped/` (mqucifer/print-shop#346): a top 40 x 40 and 6 thick with a counterbore 10 across and
 2 deep at its middle, and a cap 2 tall standing on the counterbore's floor with play round it,
 turned 15° about its axis so its seam isn't the counterbore's: 0.15 mm of play, a fit's, and
@@ -1235,6 +1238,26 @@ def bowed() -> None:
     (out / "bowed-at.json").write_text(json.dumps(at))
 
 
+#: The webbed bosses (mqucifer/print-shop#363): two round bosses 12 across and 20 tall, their
+#: axes 40 apart, joined by a web between them, 1.75 thick, its core 0.12 mm across between its
+#: 2 walls, under what Orca's opening leaves infill in, and 2.0 thick, 0.37 mm, over it.
+WEB_BOSS_R, WEB_APART, WEB_TALL, WEB_THIN, WEB_WIDE = 6.0, 40.0, 20.0, 1.75, 2.0
+
+
+def webbed() -> None:
+    """The webbed bosses (mqucifer/print-shop#363), each printed and solid, held on their bed
+    face and pushed across the web's top at its middle."""
+    out = Path("load")
+    for name, web in (("web", WEB_THIN), ("web-wide", WEB_WIDE)):
+        bosses = [Part.makeCylinder(WEB_BOSS_R, WEB_TALL, App.Vector(x, 0, 0))
+                  for x in (0.0, WEB_APART)]  # fmt: skip
+        plate = box((0, -web / 2, 0), (WEB_APART, web / 2, WEB_TALL))
+        save(bosses[0].fuse([bosses[1], plate]).removeSplitter(), out / f"{name}.step")
+        for kind, extra in (("", {}), ("printed-", {"print": {**PRINT, "walls": 2, "infill": 20}})):
+            row = {"name": "webbed", "file": f"{name}.step", "layers": "z", **extra}
+            assembly(out / f"{kind}{name}.json", [row], held=[{"plane": "z=0", "how": "fixed"}])
+
+
 #: The capped top (mqucifer/print-shop#346): its side and thickness, the counterbore's radius
 #: and depth, and the cap's play round it, a fit's and a hair's, and its turn, in mm and degrees.
 CAPPED_SIDE, CAPPED_T, CAPPED_BORE_R, CAPPED_DEEP = 40.0, 6.0, 5.0, 2.0
@@ -1272,6 +1295,7 @@ def main() -> None:
     capped()
     printed()
     bowed()
+    webbed()
     throughs()
     peaks()
     shears()

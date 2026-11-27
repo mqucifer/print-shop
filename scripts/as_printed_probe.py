@@ -15,7 +15,8 @@ how many are smooth, the faces tangent there. Then for each of two cuts of its c
 
 - main's before mqucifer/print-shop#356: the part's common with 16 copies of itself, each moved
   its walls' thickness round, and with its shells;
-- this branch's (`as_printed.cut_core`): OCCT's offset of the part stretched along its layers,
+- this branch's (`as_printed.cut_core`), opened where its layers are too thin for infill
+  (mqucifer/print-shop#363): OCCT's offset of the part stretched along its layers,
   or else the 16 copies mitred at its concave edges, each held to each layer's own outline
   offset in by its walls, and its slivers merged, or refused;
 
@@ -92,7 +93,7 @@ def inner(  # pragma: no cover
     branch_cut = as_printed.cut_core
 
     def mains_cut(part: object, layers: int, walls: float, top: float, bottom: float,
-                  up: float, bead: float, name: str) -> object:
+                  up: float, bead: float, name: str, open_by: float = 0.0) -> object:
         """Main's cut before mqucifer/print-shop#356: the common with 16 copies, unchecked."""
         inside = as_printed.eroded_in_plane(part, layers, walls)
         shelled = as_printed.eroded_along(part, layers, top, bottom, up)
@@ -262,6 +263,10 @@ def inner(  # pragma: no cover
             for words, n in counted.most_common():
                 print(f"    {n} sliver(s): {words}", flush=True)
 
+        open_by = as_printed.open_radius(bead, height)
+        thin = as_printed.thin_runs(own, layers, walls, open_by)
+        print(f"  part {k}: {len(thin)} run(s) of layers too thin for infill, to open",
+              flush=True)  # fmt: skip
         sources = [("the part", own)]
         simple = as_printed.simplified(own, bead)
         print(f"  part {k} simplified, its faces under a bead merged: "
@@ -291,7 +296,9 @@ def inner(  # pragma: no cover
                 core = None
                 if inside is not None and shelled is not None:
                     core = as_printed._one(as_printed._solids(inside.common(shelled)))
-                check = as_printed.checked(own, core, layers, walls, top, bottom, up)
+                if core is not None and thin:
+                    core = as_printed._one(as_printed._solids(core.cut(Part.makeCompound(thin))))
+                check = as_printed.checked(own, core, layers, walls, top, bottom, up, open_by)
                 found = as_printed.slivers(core, bead) if core is not None else []
                 print(f"    checked at {check.read} of {check.planes} planes, short by "
                       f"{100 * check.short:.1f}% of its walls and over by "

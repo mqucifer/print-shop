@@ -29,9 +29,20 @@ its shells are no thinner than a third of them; and so does the mitre, a square 
 disc at a concave corner, 21% of the walls' square at a right angle. The 16 copies err the
 other way, a wall between two of them read at least cos(11.25°), 98%, as thick as it is.
 
+**Too thin for infill** (mqucifer/print-shop#363). Orca opens the area inside the walls before
+it lays sparse infill, by half of 0.6 of a solid infill line's spacing (`open_radius`), so it
+lays none where that area is narrower than about 0.24 mm: the walls and gap fill make it solid.
+Each layer is read so, every 0.5 mm along the part's layers (`thin_runs`), and where 3 or more
+in a row have the same thin gap, as a web's or a joint's detail's does, it's taken out of the
+core through them, grown into the walls past the core's own faces, so that it meets the core
+only where the kept infill ends: the skin is solid there, as printed. A gap that moves from
+layer to layer, as a bowed face's wedge-shaped tip does, is left in the core, which is then a
+little too big there, the safe side. Orca's `minimum_sparse_infill_area`, which fills an area
+of sparse infill under it solid, isn't read: `load` isn't given it.
+
 Each cut is held to the core each layer has as Orca slices it (`checked`): the part's section,
-each face of it offset in by its walls with OCCT's 2D offset on its own, and cut by its
-sections its shells away, at 7 of its layers' planes spread over its height and at its own
+each face of it offset in by its walls with OCCT's 2D offset on its own, opened as Orca opens
+it, and cut by its sections its shells away, at 7 of its layers' planes spread over its height and at its own
 features' heights, just off each face in its layers' plane and at each concave edge's and
 cylinder's middle (`heights`). It's compared as shapes, so a miss isn't made up by an excess
 beside it: the core may be short of a layer's by no more than 2% of the walls along the
@@ -301,28 +312,71 @@ class _Unread(Exception):
     """A plane OCCT can't offset a face of, though the face isn't thinner than its walls."""
 
 
-def _collapses(face: Any, layers: int, walls: float) -> bool:
-    """Whether a face in the layers' plane is gone, offset in by its walls: its common with
-    `ROUND` copies of itself moved its walls round is nothing, as OCCT's 2D offset of a face
-    thinner than its walls raises."""
-    import FreeCAD as App
-
-    first, second = (a for a in range(3) if a != layers)
-    left = face
-    for k in range(ROUND):
-        move = [0.0, 0.0, 0.0]
-        move[first] = walls * math.cos(2 * math.pi * k / ROUND)
-        move[second] = walls * math.sin(2 * math.pi * k / ROUND)
-        left = left.common(face.translated(App.Vector(*move)))
-        if left.Area <= 1e-6:
-            return True
-    return False
-
-
 def open_radius(line_width: float, layer_height: float) -> float:
     """The radius Orca opens the area inside the walls by before it lays sparse infill, in mm:
     half of `OPEN_SHARE` of a line's spacing, by Orca's own flow (`wall_thickness`)."""
     return OPEN_SHARE * wall_thickness(1, line_width, layer_height) / 2
+
+
+#: How many copies a face in a layer's plane is moved round, where OCCT's 2D offset of it fails
+#: (`_offset_2d`): a wall between two is read at least cos(180°/32), 99.5%, as thick as it is.
+ROUND_2D = 32
+#: How far a face's outline in a layer's plane may be from its polygon, in mm, where OCCT's 2D
+#: offset of its own curves fails (`_polygonal`).
+POLYGON = 1e-3
+
+
+def _polygonal(face: Any) -> Any:
+    """A face in a layer's plane with its outline and holes as polygons, each `POLYGON` from
+    its curves at most: OCCT's 2D offset of an offset curve, as a section of an offset face
+    has, can fail where one of straight lines holds."""
+    import Part
+
+    wires = []
+    for wire in face.Wires:
+        points = wire.discretize(Deflection=POLYGON)
+        if points[0].distanceToPoint(points[-1]) > 1e-9:
+            points.append(points[0])
+        wires.append(Part.makePolygon(points))
+    return Part.makeFace(wires, "Part::FaceMakerBullseye").Faces[0]
+
+
+def _offset_2d(face: Any, by: float, layers: int) -> list[Any]:
+    """A face in a layer's plane grown by `by`, or with `by` under naught shrunk, as faces:
+    OCCT's 2D offset, rounded at its corners; where that fails, OCCT's 2D offset of the face's
+    polygon (`_polygonal`); and where that fails too and it's shrunk, its common with
+    `ROUND_2D` copies of it moved `by` round in its plane, flat faces' booleans, which hold.
+    Nothing where it's thinner than twice `-by`.
+
+    Raises:
+        _Unread: Where none can be made.
+    """
+    import FreeCAD as App
+
+    if by == 0:
+        return [face]
+    for shape in (face, None):
+        try:
+            given = face if shape is not None else _polygonal(face)
+            made = given.makeOffset2D(by, 0, False, False, False)
+            return [f for f in made.Faces if f.Area > 1e-9]
+        except Exception:  # noqa: BLE001 - OCCT raises for a face it can't offset, or that's gone
+            continue
+    if by > 0:
+        raise _Unread("OCCT couldn't grow a face in a layer's plane, nor its polygon")
+    first, second = (a for a in range(3) if a != layers)
+    try:
+        left = face
+        for k in range(ROUND_2D):
+            move = [0.0, 0.0, 0.0]
+            move[first] = -by * math.cos(2 * math.pi * k / ROUND_2D)
+            move[second] = -by * math.sin(2 * math.pi * k / ROUND_2D)
+            left = left.common(face.translated(App.Vector(*move)))
+            if left.Area <= 1e-9:
+                return []
+        return [f for f in left.Faces if f.Area > 1e-9]
+    except Exception as exc:  # noqa: BLE001
+        raise _Unread(str(exc)) from exc
 
 
 def _inside_walls(part: Any, layers: int, at: float, walls: float) -> tuple[list[Any], float]:
@@ -339,43 +393,31 @@ def _inside_walls(part: Any, layers: int, at: float, walls: float) -> tuple[list
         return [], 0.0
     inner = []
     for face in own.Faces:
-        if walls <= 0:
-            inner.append(face)
-            continue
-        try:
-            made = face.makeOffset2D(-walls, 0, False, False, False)
-        except Exception as exc:  # noqa: BLE001 - OCCT raises where nothing's left of a face
-            if _collapses(face, layers, walls):
-                continue
-            raise _Unread(str(exc)) from exc
-        inner.extend(f for f in made.Faces if f.Area > 1e-9)
+        inner += _offset_2d(face, -walls, layers)
     return inner, float(sum(w.Length for w in own.Wires))
 
 
 def opened(faces: list[Any], radius: float, layers: int) -> list[Any]:
     """Faces in a layer's plane opened by `radius`, as Orca opens the area inside the walls:
-    offset in by it and out again, OCCT's 2D offsets, so that what's narrower than twice it is
-    gone, and the corners it can't reach rounded. A face narrower everywhere is gone.
+    shrunk by it and grown back (`_offset_2d`), so that what's narrower than twice it is gone,
+    and the corners it can't reach rounded; what's grown back kept within the face. A face
+    narrower everywhere is gone.
 
     Raises:
-        _Unread: Where OCCT can't offset a face that isn't narrower than twice `radius`: never
-            read as gone (mqucifer/print-shop#356's review).
+        _Unread: Where neither OCCT's offset nor the copies can be made: never read as gone
+            (mqucifer/print-shop#356's review).
     """
     if radius <= 0:
         return list(faces)
     kept = []
     for face in faces:
-        try:
-            smaller = face.makeOffset2D(-radius, 0, False, False, False)
-        except Exception as exc:  # noqa: BLE001 - OCCT raises where nothing's left of a face
-            if _collapses(face, layers, radius):
-                continue
-            raise _Unread(str(exc)) from exc
-        try:
-            kept += [f for f in smaller.makeOffset2D(radius, 0, False, False, False).Faces
-                     if f.Area > 1e-9]  # fmt: skip
-        except Exception as exc:  # noqa: BLE001
-            raise _Unread(str(exc)) from exc
+        grown = [g for f in _offset_2d(face, -radius, layers)
+                 for g in _offset_2d(f, radius, layers)]  # fmt: skip
+        for g in grown:
+            try:
+                kept += [f for f in g.common(face).Faces if f.Area > 1e-9]
+            except Exception as exc:  # noqa: BLE001
+                raise _Unread(str(exc)) from exc
     return kept
 
 

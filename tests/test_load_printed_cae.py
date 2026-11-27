@@ -400,3 +400,33 @@ def test_the_cut_s_check_holds_it_to_each_layer_and_to_the_part(cae: Any) -> Non
     assert "only 1 of" in found["unread"]["refused"]
     assert "planes could be read to check it" in found["unread"]["refused"]
     assert found["outside"]["cut"] is not None and found["outside"]["outside_mm3"] == 0.0
+
+
+def test_a_web_too_thin_for_infill_reads_solid_and_its_bosses_skin_and_core(cae: Any) -> None:
+    """mqucifer/print-shop#363: two bosses joined by a web 1.75 mm thick, at 2 walls, 0.81 mm
+    each, leave 0.12 mm inside them, under what Orca's opening of the area inside its walls
+    lays infill in. The web reads solid skin, opened at one run of its layers, and the core is
+    the bosses' alone, as Orca prints it, each held to its layers as Orca opens them. At 2.0
+    mm, 0.37 mm inside, Orca lays infill, and the core runs through the web."""
+    side = as_printed.wall_thickness(2, 0.45, 0.2)
+    boss = math.pi * (6.0 - side) ** 2 * (20.0 - 1.0 - 0.6)
+    read = {}
+    for name in ("web", "web-wide"):
+        solid = cae("load", f"load/{name}.json", "--weight", "1", "--at", "20,0,20",
+                    "--toward", "-y")  # fmt: skip
+        printed = cae("load", f"load/printed-{name}.json", "--weight", "1", "--at", "20,0,20",
+                      "--toward", "-y")  # fmt: skip
+        assert solid.verdict != "NO ANSWER" and "printed" not in solid.numbers, solid.text
+        assert printed.verdict != "NO ANSWER", printed.text
+        assert "inside out" not in printed.text
+        cell = printed.numbers["printed"]["webbed"][0]
+        assert cell["cut_planes_read"] >= max(5, 0.8 * cell["cut_planes"]), cell
+        assert cell["cut_short_walls_pct"] <= 100 * as_printed.SHORT, cell
+        assert cell["cut_over_walls_pct"] <= 100 * as_printed.AGREE, cell
+        read[name] = cell
+    assert "opened where its layers are too thin for infill, at 1 run(s)" in read["web"]["cut"]
+    assert read["web"]["core_mm3"] == pytest.approx(2 * boss, rel=0.01)
+    assert "opened" not in read["web-wide"]["cut"]
+    # The wide web's 0.37 mm of core between the bosses' own, through its height less shells.
+    strip = (2.0 - 2 * side) * (40.0 - 2 * (6.0 - side)) * (20.0 - 1.6)
+    assert read["web-wide"]["core_mm3"] > 2 * boss + 0.9 * strip
