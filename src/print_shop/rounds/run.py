@@ -115,6 +115,9 @@ SAID_KINDS = {
 }
 #: A round's opening where every need passed and a check of the harness's own didn't.
 OWN_CHECKS_DIDNT = "and the harness's own checks on the files to be printed didn't."
+#: A request's `## Kind` word that makes its run an assembly run, `assembly` or
+#: `furniture-assembly` (mqucifer/print-shop#365).
+ASSEMBLY_KIND = "assembly"
 #: How much of a person's message the compaction note quotes, where it asks nothing.
 SAID_CHARS = 300
 VARIANT = re.compile(r"[A-Za-z0-9_-]{1,24}")
@@ -1679,11 +1682,17 @@ class Run:
         if failing:
             lines.append(unprintable.said(failing))
             detail["thin_failing"] = [one.file for one in failing]
+        # A `thin` on a given file isn't held against the part, and the reply says why
+        # (mqucifer/print-shop#365).
+        on_given = unprintable.on_given(argv)
+        if on_given:
+            lines.append(unprintable.given_said(on_given))
+            detail["thin_on_given"] = on_given
         held = self._holding()
         if held:
             lines.append(holding.said(held))
             detail["held"] = holding.plain(held)
-        if tries and failed >= nudge.AFTER:
+        if tries and failed >= nudge.AFTER and not on_given:
             lines.append(nudge.said(check, tries, wanted))
             detail["nudge"] = {
                 "command": check[0],
@@ -2314,7 +2323,11 @@ class Run:
         ):
             argv = json.loads(row["argv"])
             code = int(row["exit"])
-            if code == nudge.USAGE or unprintable.counted(argv) is not None:
+            if (
+                code == nudge.USAGE
+                or unprintable.counted(argv) is not None
+                or unprintable.on_given(argv)
+            ):
                 continue
             verdict, why = str(row["verdict"] or ""), str(row["why"] or "")
             passed: bool | None = {0: True, 1: False}.get(code)
@@ -3543,7 +3556,8 @@ class Run:
         if assembly_wrong:
             reply += "\n" + assembly_wrong
         elif given is not None and judgement.met:
-            reply += "\n" + "\n".join(_assembly_said(given, placed_read))
+            others = sorted(self._references())
+            reply += "\n" + "\n".join(_assembly_said(given, placed_read, others))
         if only_faults:
             reply = reply.replace(OWN_CHECKS_DIDNT, "and a fault named to fix first still stands.")
         if faults_read:
@@ -3955,11 +3969,32 @@ class Run:
             groups.append({"name": name, "about": str(entry.get("about") or ""), "files": files})
         return groups
 
+    def _assembly_run_by(self) -> str | None:
+        """Why this is an assembly run, or None for a part run: marked by whoever started it or a
+        person at a resume (mqucifer/print-shop#310); the request's `## Kind` naming an assembly;
+        or its latest breakdown naming only given parts, two or more, so nothing of the run's own
+        to print (mqucifer/print-shop#365)."""
+        if self.state.assembly_run:
+            return "marked"
+        if self.state.kind and ASSEMBLY_KIND in self.state.kind.split("-"):
+            return "kind"
+        breakdown = self._breakdown_latest() or {}
+        names = [
+            str(part["name"])
+            for part in breakdown.get("parts") or []
+            if isinstance(part, dict) and part.get("name")
+        ]
+        given = holds.given_names(breakdown, self._references())
+        if len(names) >= assembled.FEWEST and all(name in given for name in names):
+            return "breakdown"
+        return None
+
     def _assembly_named(self, given: Any) -> tuple[str | None, Any] | Judged:
         """The assembly file `part` names, if it names one, and the rest of `part`: the files
-        the run made, each read as a print (mqucifer/print-shop#310). Only an assembly run's:
-        any other run's `part` is passed on as it was given, and read as it always was."""
-        if not self.state.assembly_run or not isinstance(given, list):
+        the run made, each read as a print (mqucifer/print-shop#310). Only an assembly run's
+        (`_assembly_run_by`): any other run's `part` is passed on as it was given, and read as
+        it always was."""
+        if not isinstance(given, list) or self._assembly_run_by() is None:
             return None, given
         found = [e for e in given if isinstance(e, str) and assembled.is_assembly(e)]
         if not found:
@@ -4154,7 +4189,8 @@ class Run:
             if delivered.get("placed"):
                 lines += ["", f"## {assembled.PLACED_HEADING}", ""]
                 lines += [f"- `{one.command}`: {one.why}" for one in delivered["placed"]]
-            lines += ["", assembled.not_read_on_given(given)]
+            others = sorted(self._references())
+            lines += ["", assembled.not_read_on_given(given, others)]
         lines += [
             "",
             "## Every file to be printed, by `thin`, whatever the needs say",
@@ -4544,7 +4580,10 @@ class Run:
             return declared
         # A file in `scratch/` is drawn, and never read as the part (mqucifer/print-shop#315).
         of_part = [f for f in drawn if not paths.in_scratch(_plain_name(f))]
-        standing = self._standing_at_ask(of_part, declared) if of_part else []
+        # Nor is a given file read for printing (mqucifer/print-shop#365): a need still reads it.
+        given_drawn = [f for f in of_part if unprintable.given(f)]
+        to_print = [f for f in of_part if f not in given_drawn]
+        standing = self._standing_at_ask(to_print, declared) if of_part else []
         self.state.draft = {
             "question": question,
             "need": need,
@@ -4589,6 +4628,8 @@ class Run:
             lines += ["What the bench says it drew:", *[f"- {line}" for line in bench_said]]
         if len(of_part) < len(drawn):
             lines.append(SCRATCH_DRAWN)
+        if given_drawn:
+            lines.append(unprintable.given_said(given_drawn))
         if pictures:
             lines.append(f"Your pictures go as they are: {', '.join(f'`{p}`' for p in pictures)}.")
         undrawn = [name for name in looks if name not in drawn]
@@ -5530,14 +5571,16 @@ def _assembly_why(checked: assembled.Checked) -> str:
     return "assembly_changed"
 
 
-def _assembly_said(given: assembled.Checked, placed: list[judge.Standing]) -> list[str]:
+def _assembly_said(
+    given: assembled.Checked, placed: list[judge.Standing], others: list[str]
+) -> list[str]:
     """What `done`'s reply says of an assembly run's result: what it places, the harness's
-    placed reading, and the printed-file readings it doesn't run on given parts."""
+    placed reading, and the printed-file readings it doesn't run on given files."""
     lines = assembled.said(given)
     if placed:
         lines += [f"{assembled.PLACED_HEADING}:"]
         lines += [f"- `{one.command}`: {one.why}" for one in placed]
-    lines.append(assembled.not_read_on_given(given))
+    lines.append(assembled.not_read_on_given(given, others))
     return lines
 
 

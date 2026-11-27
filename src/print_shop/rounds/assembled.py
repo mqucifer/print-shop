@@ -22,6 +22,11 @@ the file is held to. The latest stated hash holds, and with none stated, the sta
 differs from its start, with no hash stated for it since, is refused as changed. A run from
 before the start's hashes, with no hash stated, holds none, and is refused.
 
+**Which run is one** (mqucifer/print-shop#365): marked by whoever started it or a person at a
+resume, or a request whose `## Kind` names an assembly, or a run whose latest breakdown names only
+given parts (`Run._assembly_run_by`). A given file is never read for printing: the reply names the
+placed parts' approving runs, and each other given file, a stand-in say, as not read either.
+
 **The run that approved each.** The line that states a file's hash may say `approved in <run>`,
 and a fact named for the file may too. Where neither names a run, it's said: "approved run not
 named". It's a record, and it decides nothing.
@@ -336,14 +341,23 @@ def is_assembly(name: str) -> bool:
 # What's said
 
 
-def not_read_on_given(checked: Checked) -> str:
-    """What the reply says of the printed-file readings, which aren't run on a given file."""
+def not_read_on_given(checked: Checked, others: list[str] | None = None) -> str:
+    """What the reply says of the printed-file readings, which aren't run on a given file: on
+    the placed parts, and on each other given file, a stand-in say (mqucifer/print-shop#365)."""
     named = "; ".join(f"`{one.file}`, {one.approved_said()}" for one in checked.given)
-    return (
+    said = (
         "The printed-file readings, `thin`, the side on the bed, the downward faces and the "
         "glass checks, aren't run on the given parts: each was read in its own approved run "
         f"({named})."
     )
+    rest = [name for name in others or [] if name not in checked.files()]
+    if rest:
+        listed = ", ".join(f"`{name}`" for name in rest)
+        said += (
+            f" Nor on the other given files, {listed}: each is given and not placed, such as a "
+            "stand-in for a load, and isn't printed."
+        )
+    return said
 
 
 def said(checked: Checked) -> list[str]:
