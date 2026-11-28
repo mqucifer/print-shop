@@ -2714,3 +2714,31 @@ def test_a_lift_on_a_banded_frame_hung_two_ways_says_no_share_in_the_loop_is_a_b
     }
     # A joint in the loop carries less without the band: so a share there isn't a bound.
     assert min(change.values()) < -0.01 * read["force_n"], change
+
+
+@pytest.mark.assembly
+@pytest.mark.bands
+def test_parts_where_the_first_pass_s_mesh_won_t_fit_read_back_reads_a_glass_band_s_bound(
+    cae: Any, small_glass: Path
+) -> None:
+    """A design run's assembly on mqucifer/print-shop#376 was killed in `load`'s own process,
+    holding its mesh read back: FreeCAD's reader aborts where it meets the memory, so nothing
+    could catch it. Now the mesh's need, by its file's size, is held against the container's
+    room before it's read. Here a process of its own takes all of the room but a few MB as the
+    first pass's mesh is about to be read back (`cae_cases/room_forced.py`): it isn't read, the
+    whole is unread for memory, and the traced frame reads its band's lower bound, the container
+    standing."""
+    args = ["load", f"{small_glass.name}/joined.json", "--weight", "1", "--at", BANDS_AT,
+            "--parts"]  # fmt: skip
+    forced = _forced(cae, "room_forced.py", args, timeout=host.TWO_PASSES)
+    assert forced["verdict"] == "OK", forced["text"]
+    assert "killed" not in forced["text"]
+    lower = forced["numbers"]["lower_bound"]
+    assert lower["parts"] == ["frame"]
+    assert lower["why"].startswith(
+        "read in two passes, as --parts asks: gmsh meshed the joined parts at a mesh of at most "
+    ), lower["why"]
+    assert "GiB read back, where the container's memory has " in lower["why"]
+    assert forced["why"].startswith(
+        "read as a lower bound, frame with its glass band left out, the band unread: "
+    ), forced["why"]

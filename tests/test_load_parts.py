@@ -1513,3 +1513,121 @@ def test_a_killed_command_s_scratch_folders_go_at_the_next_load_s_start_and_only
     cae.scratch("load-")
     cae.clear_own()
     assert not root.exists(), "an empty scratch folder goes too"
+
+
+# `load`'s own process held to the container's room (a design run's assembly on
+# mqucifer/print-shop#376)
+
+
+def _cgroup(tmp_path: Path, most: str, now: int, inactive: int) -> Path:
+    folder = tmp_path / "cgroup"
+    folder.mkdir(exist_ok=True)
+    (folder / "memory.max").write_text(most + "\n")
+    (folder / "memory.current").write_text(f"{now}\n")
+    (folder / "memory.stat").write_text(f"anon 1\nactive_file 999999\ninactive_file {inactive}\n")
+    return folder
+
+
+def test_the_room_load_has_is_the_container_s_own_count_of_what_s_left(tmp_path: Path) -> None:
+    """What `load`'s own process may still take: the container's limit, less what it holds,
+    plus the file pages it holds that the kernel would drop first, less `ROOM_MARGIN`. None off
+    the container, or with no limit."""
+    from print_shop.bench import cae
+
+    gib = 2**30
+    folder = _cgroup(tmp_path, str(4 * gib), 3 * gib, gib // 4)
+    assert cae.room(folder) == 4 * gib - 3 * gib + gib // 4 - cae.ROOM_MARGIN
+    assert cae.room(_cgroup(tmp_path, "max", gib, 0)) is None
+    assert cae.room(tmp_path / "none") is None
+
+
+def test_a_mesh_that_won_t_fit_read_back_isn_t_read_and_is_said_for_memory(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A failed allocation in FreeCAD's own mesh reader aborts the process, never a Python
+    error (tried in the image): so before gmsh's mesh is read back, what it takes, `READ_BACK`
+    times its file (2.37 to 2.40 measured), is held against the container's room. Where it
+    won't fit, it isn't read, and it's said for memory, so two passes or the band's read can
+    follow. Where it fits, it's read as before."""
+    import sys
+    import types
+
+    from print_shop.bench import cae
+
+    binary = tmp_path / "gmsh"
+    binary.write_text("#!/bin/sh\nexit 0\n")
+    binary.chmod(0o755)
+    unv = tmp_path / "mesh.unv"
+    unv.write_bytes(b"x" * 1000)
+    params = types.SimpleNamespace(GetString=lambda key, default: "3")
+    monkeypatch.setitem(
+        sys.modules, "FreeCAD", types.SimpleNamespace(ParamGet=lambda path: params)
+    )
+    monkeypatch.setattr(cae, "DISK", tmp_path / "none")
+    for left, reads in ((cae.READ_BACK * 1000 - 1, False), (cae.READ_BACK * 1000 + 1, True)):
+        monkeypatch.setattr(cae, "room", lambda left=left: left)
+        read: list[bool] = []
+        tools = types.SimpleNamespace(
+            prepare=lambda: None, gmsh_bin=str(binary), temp_file_geo="shape.geo",
+            temp_file_mesh=str(unv), update_properties=lambda read=read: read.append(True),
+            get_tmp_file_paths=lambda *given: None,
+        )  # fmt: skip
+        assert cae.gmsh(tools, first=True) is reads
+        assert read == ([True] if reads else [])
+        if not reads:
+            assert tools.memory == (cae.READ_BACK * 1000, left)
+            assert "Error   : the mesh gmsh made takes about " in tools.said
+
+
+def test_a_set_up_that_won_t_fit_is_the_whole_unread_for_memory(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """After the mesh is read back, `load` sets it up in its own process: each node's place
+    and, in two passes, each element's faces. Its need, by the mesh's own counts at the least
+    measured per node and per element, is held against the container's room: where it won't
+    fit, the whole is unread for memory, before anything is allocated. A mesh gmsh's read-back
+    was refused for is unread too."""
+    import types
+
+    from print_shop.bench import cae
+
+    fem = types.SimpleNamespace(NodeCount=1000, VolumeCount=500)
+    need = 1000 * load.SET_UP_NODE + 500 * load.SET_UP_FACES
+    for two_pass, left, fits in ((True, need - 1, False), (True, need, True),
+                                 (False, 1000 * load.SET_UP_NODE, True)):  # fmt: skip
+        monkeypatch.setattr(cae, "room", lambda left=left: left)
+        model: Any = types.SimpleNamespace(
+            size=3.0, straight=False, two_pass=two_pass, solids=[1, 2]
+        )
+        if fits:
+            load._Model._set_up_fits(model, fem)
+            continue
+        with pytest.raises(load._Unread) as met:
+            load._Model._set_up_fits(model, fem)
+        assert met.value.memory
+        assert met.value.evidence.startswith(
+            "the mesh of the joined parts at a mesh of at most 3 mm"
+        )
+    monkeypatch.setattr(cae, "room", lambda: None)
+    unasked: Any = types.SimpleNamespace(two_pass=True, solids=[1, 2])
+    load._Model._set_up_fits(unasked, fem)
+    model = types.SimpleNamespace(size=3.0, straight=False)
+    mesh = types.SimpleNamespace(FemMesh=types.SimpleNamespace(VolumeCount=0))
+    tools = types.SimpleNamespace(memory=(3 * 2**30, 2**30))
+    with pytest.raises(load._Unread) as refused:
+        load._Model._mesh_met(model, mesh, None, tools)
+    assert refused.value.memory and "takes about 3.00 GiB read back" in refused.value.evidence
+
+
+def test_a_step_that_meets_python_s_memory_is_the_whole_unread_for_it() -> None:
+    """Where `load`'s own Python meets the memory in a step, the whole is unread for it, saying
+    the step, so two passes or the band's read can follow."""
+    with pytest.raises(load._Unread) as said, load.step("meshing and solving the joined parts"):
+        raise MemoryError()
+    assert said.value.memory
+    assert said.value.evidence.startswith(
+        "load's own process met the container's memory, meshing and solving the joined parts"
+    ), said.value.evidence
+    with pytest.raises(NoAnswer) as other, load.step("reading"):
+        raise RuntimeError("something else")
+    assert not isinstance(other.value, load._Unread)

@@ -12,6 +12,7 @@ import contextlib
 import ctypes
 import gc
 import os
+import re
 import shutil
 import subprocess
 import tempfile
@@ -63,6 +64,38 @@ SCRATCH_KINDS = ("gmsh-", "load-")
 STALE = 2 * 3600
 #: The folders this command made there.
 _own: list[str] = []
+
+
+#: The container's own cgroup, where the kernel counts its memory.
+CGROUP = Path("/sys/fs/cgroup")
+#: What's kept back from the container's room, in bytes: the kernel's own, and the steps' small
+#: allocations around the big ones.
+ROOM_MARGIN = 64 * 2**20
+#: What gmsh's mesh takes read back into `load`'s process, as a share of its file: 2.37 to
+#: 2.40 times it on three second-order meshes of 8 to 207 MB in the image, curved and
+#: straight-sided (a design run's assembly on mqucifer/print-shop#376). Held a tenth under the
+#: least, so a mesh is refused only where even this doesn't fit.
+READ_BACK = 2.3
+
+
+def room(cgroup: Path | None = None) -> int | None:
+    """What the container's memory has left, in bytes, by its own counts: its limit less what
+    it holds, plus the file pages it holds that the kernel drops before it stops a process, less
+    `ROOM_MARGIN`. None off the container, or with no limit. A failed allocation in FreeCAD's
+    own code aborts the process, never a Python error (tried in the image: the mesh reader, the
+    nodes on a face, the elements' nodes), so a big step's need is held against this before
+    it's begun, not caught after."""
+    cgroup = CGROUP if cgroup is None else cgroup
+    try:
+        most = (cgroup / "memory.max").read_text().strip()
+        now = int((cgroup / "memory.current").read_text())
+        stat = (cgroup / "memory.stat").read_text()
+    except (OSError, ValueError):
+        return None
+    if not most.isdigit():
+        return None
+    found = re.search(r"^inactive_file (\d+)$", stat, re.M)
+    return int(most) - now + (int(found.group(1)) if found else 0) - ROOM_MARGIN
 
 
 def scratch(prefix: str) -> str:
@@ -144,6 +177,22 @@ def gmsh(tools: Any, first: bool = False) -> Any:
     tools.said = (done.stdout + done.stderr).decode(errors="replace")
     tools.returncode = done.returncode
     if done.returncode != 0:
+        return False
+    # FreeCAD's reader aborts the process where it meets the memory: held against the room
+    # first, its need from the mesh file's size.
+    give_back()
+    try:
+        size = os.path.getsize(tools.temp_file_mesh)
+    except (OSError, AttributeError):
+        size = 0  # no mesh file: FreeCAD's reader says so, as before
+    need, left = READ_BACK * size, room()
+    if size and left is not None and left < need:
+        tools.memory = (need, left)
+        tools.said += (
+            f"\nError   : the mesh gmsh made takes about {need / 2**30:.2f} GiB read back, "
+            f"{READ_BACK:g} times its {size / 2**20:.0f} MB file, and the container has "
+            f"{max(left, 0) / 2**30:.2f} GiB left\n"
+        )
         return False
     try:
         with progress.step("reading gmsh's mesh back"):

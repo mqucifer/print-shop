@@ -119,7 +119,7 @@ import sys
 import time
 from collections.abc import Iterator
 from pathlib import Path
-from typing import Any
+from typing import Any, NoReturn
 
 import numpy as np
 
@@ -160,6 +160,12 @@ OVERLAP = 1e-4
 NOTHING = 1e-3
 #: A push's point is on the faces that meet within this, in mm.
 ON_FACE = 0.01
+#: What setting a mesh up takes in `load`'s own process, in bytes (`_Model._set_up_fits`): each
+#: node's place, 371 to 430 measured on three meshes in the image, and in two passes each
+#: element's faces, 636 on a mesh of 646,197 elements (a design run's assembly on
+#: mqucifer/print-shop#376). Each held about a tenth under the least.
+SET_UP_NODE = 340
+SET_UP_FACES = 560
 #: How a mesh whose elements' sides are straight is said where a step names it.
 STRAIGHT = ", its elements straight-sided"
 #: A face of a part read without its glass band is where the band met it where a point inside it
@@ -929,7 +935,7 @@ class _Model:
         tools = self._gmsh(
             GmshTools, mesh, close_faces.fields(self.closes, self.size, self.local_scale)
         )
-        self._mesh_met(mesh, kills)
+        self._mesh_met(mesh, kills, tools)
         said = None if mesh.FemMesh.VolumeCount else _gmsh_said(tools)
         for _ in range(RETRIES):
             if said is None or not CROSSED.search(said):
@@ -948,7 +954,7 @@ class _Model:
                 break
             kills = oom_kills()
             tools = self._gmsh(GmshTools, mesh, sizes)
-            self._mesh_met(mesh, kills)
+            self._mesh_met(mesh, kills, tools)
             said = None if mesh.FemMesh.VolumeCount else _gmsh_said(tools)
         words = said
         if said is not None:
@@ -971,6 +977,7 @@ class _Model:
                 "gmsh made no mesh of the joined parts, with its elements' sides curved onto "
                 f"the parts' faces or straight: {words[:900]}"
             )
+        self._set_up_fits(fem)
         self.nodes = {n: np.array([p.x, p.y, p.z]) for n, p in fem.Nodes.items()}
         if self.two_pass and len(self.solids) > 1:
             # Each part has elements of its own, before anything is solved: a mesh that doesn't
@@ -1061,30 +1068,54 @@ class _Model:
             return _Unread(str(unparted))
         return unparted
 
-    def _mesh_met(self, mesh: Any, kills: int | None) -> None:
+    def _set_up_fits(self, fem: Any) -> None:
+        """Whether the mesh, read back, can be set up in `load`'s own process
+        (mqucifer/print-shop#376): each node's place, and in two passes each element's faces,
+        to find each part's own. Its need, by the mesh's counts, at the least measured per node
+        and per element (`SET_UP_NODE`, `SET_UP_FACES`), is held against the container's room
+        (`cae.room`). Where it won't fit, the whole is unread for memory before anything is
+        allocated, where the kernel would have stopped `load`; off the container, nothing's
+        asked."""
+        faces = self.two_pass and len(self.solids) > 1
+        need = fem.NodeCount * SET_UP_NODE + (fem.VolumeCount * SET_UP_FACES if faces else 0)
+        give_back()
+        left = cae.room()
+        if left is None or left >= need:
+            return
+        _memory_unread(
+            f"the mesh of the joined parts at a mesh of at most {self.size:g} mm"
+            f"{STRAIGHT if self.straight else ''}, {fem.VolumeCount:,} elements and "
+            f"{fem.NodeCount:,} nodes, takes about {need / 2**30:.2f} GiB to set up in load's "
+            f"own process, and the container's memory has {max(left, 0) / 2**30:.2f} GiB left, "
+            "by its own count: so it isn't set up"
+        )
+
+    def _mesh_met(self, mesh: Any, kills: int | None, tools: Any = None) -> None:
         """Where gmsh made no mesh and the kernel stopped a process in the container for memory
-        while it ran, `kills` its count before (mqucifer/print-shop#375): the whole is unread,
-        for the container's memory, as where CalculiX meets it, never meshed again straight,
-        which takes as much. gmsh is the first to go (`cae.gmsh`), so this read is left to say
-        so, and to read in two passes or each glass band left out, where it can."""
+        while it ran, `kills` its count before (mqucifer/print-shop#375), or where its mesh
+        won't fit read back (`cae.gmsh`, `tools.memory`, mqucifer/print-shop#376): the whole is
+        unread, for the container's memory, as where CalculiX meets it, never meshed again
+        straight, which takes as much. gmsh is the first to go (`cae.gmsh`), so this read is
+        left to say so, and to read in two passes or each glass band left out, where it can."""
         if mesh.FemMesh.VolumeCount:
             return
+        refused = getattr(tools, "memory", None)
+        if refused is not None:
+            need, left = refused
+            _memory_unread(
+                f"gmsh meshed the joined parts at a mesh of at most {self.size:g} mm"
+                f"{STRAIGHT if self.straight else ''}, and its mesh takes about "
+                f"{need / 2**30:.2f} GiB read back, where the container's memory has "
+                f"{max(left, 0) / 2**30:.2f} GiB left, by its own count: so it isn't read back"
+            )
         full = memory_met(kills)
         if full is None:
             return
-        evidence = (
+        _memory_unread(
             f"gmsh made no mesh of the joined parts at a mesh of at most {self.size:g} mm"
             f"{STRAIGHT if self.straight else ''}: it met the container's memory, "
             f"{full / 2**30:g} GiB, meshing them, and the kernel stopped it there, as the "
             "container's own count of what it stopped for memory says"
-        )
-        raise _Unread(
-            "nothing of the assembly is read, as its mesh is past what the container's memory "
-            "holds: name each glass frame's `band` in the assembly file, and it's read as a "
-            "lower bound with its band left out, or give a coarser --mesh, or read fewer of "
-            f"the parts at once. {evidence}. Every part, joint and bolt of it is left unread",
-            evidence,
-            memory=True,
         )
 
     def _gmsh(self, gmsh_tools: Any, mesh: Any, sizes: str) -> Any:
@@ -2356,6 +2387,15 @@ def step(what: str) -> Iterator[None]:
             yield
     except NoAnswer:
         raise
+    except MemoryError as met:
+        # Python's own allocation failed: the whole unread for memory (mqucifer/print-shop#376).
+        evidence = f"load's own process met the container's memory, {what}"
+        raise _Unread(
+            f"nothing of the assembly is read, as {evidence}. Every part, joint and bolt of it is "
+            "left unread",
+            evidence,
+            memory=True,
+        ) from met
     except Exception as exc:  # noqa: BLE001 - whatever stops a step is said with the step
         raise NoAnswer(f"load stopped {what}: {type(exc).__name__}: {exc}"[:500]) from exc
     finally:
@@ -2433,6 +2473,19 @@ class _Unparted(NoAnswer):
     def __init__(self, said: str, empty: list[str]) -> None:
         super().__init__(said)
         self.empty = empty
+
+
+def _memory_unread(evidence: str) -> NoReturn:
+    """The whole unread for the container's memory, `evidence` what it met
+    (mqucifer/print-shop#375, mqucifer/print-shop#376)."""
+    raise _Unread(
+        "nothing of the assembly is read, as its mesh is past what the container's memory "
+        "holds: name each glass frame's `band` in the assembly file, and it's read as a "
+        "lower bound with its band left out, or give a coarser --mesh, or read fewer of "
+        f"the parts at once. {evidence}. Every part, joint and bolt of it is left unread",
+        evidence,
+        memory=True,
+    )
 
 
 class _Slow(_Unread):
