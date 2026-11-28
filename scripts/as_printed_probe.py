@@ -175,7 +175,9 @@ def main(argv: list[str]) -> int:
                   f"meshed at {cell.get('held_mesh_mm') or 'the mesh own'} mm, "
                   f"{cell.get('held_zone_mm') or 0} mm deep, its finest cell met "
                   f"{cell.get('held_finest_met')}; its straight elements "
-                  f"{cell.get('straight_short_pct')}% under the curved mesh", flush=True)
+                  f"{cell.get('straight_short_pct')}% under the curved mesh; "
+                  f"{cell.get('layers_read')} of its {cell.get('layers')} layers read, every "
+                  f"{cell.get('layers_stride_mm')} mm", flush=True)
     return 0
 
 

@@ -94,14 +94,29 @@ def _span(shape: Any, layers: int) -> tuple[float, float]:
     box = shape.BoundBox
     return ((box.XMin, box.XMax), (box.YMin, box.YMax), (box.ZMin, box.ZMax))[layers]
 
+#: Each shape's sections already made, by the shape, its layers' axis and the height, with
+#: the shape itself kept so its id isn't another's (`_section`): a layer's section is read
+#: for itself and again for the layers its shells reach, and slicing was the most of a tall
+#: part's reading (mqucifer/print-shop#363).
+_SECTIONS: dict[tuple[int, int, float], tuple[Any, Any]] = {}
+#: How many are kept, the oldest let go first.
+SECTIONS_KEPT = 20_000
+
+
 def _section(shape: Any, layers: int, at: float) -> Any | None:
-    """`shape`'s section in its layers' plane at `at` along them, as faces, or None for none."""
+    """`shape`'s section in its layers' plane at `at` along them, as faces, or None for none:
+    each made once for each shape and height."""
     import Part
 
+    key = (id(shape), layers, round(float(at), 9))
+    if key in _SECTIONS:
+        return _SECTIONS[key][1]
     wires = shape.slice(_vector(layers, 1.0), at)
-    if not wires:
-        return None
-    return Part.makeFace(wires, "Part::FaceMakerBullseye")
+    face = Part.makeFace(wires, "Part::FaceMakerBullseye") if wires else None
+    if len(_SECTIONS) >= SECTIONS_KEPT:
+        del _SECTIONS[next(iter(_SECTIONS))]
+    _SECTIONS[key] = (shape, face)
+    return face
 
 def _moved_to(face: Any, layers: int, at: float) -> Any:
     """A section moved along the layers to `at`."""

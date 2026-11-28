@@ -899,6 +899,11 @@ class _Model:
                     "held_zone_mm": None if self.held_mesh() is None
                     else round(self.held_mesh()[1], 3),  # type: ignore[index]
                     "held_finest_met": (self.finest_cell() or 0) * HELD_CELLS >= HELD_FINEST,
+                    # Its layers read every `classify.STRIDE_MM`, each within reach of a face
+                    # making shells read on its own (`Layered.read_at`).
+                    "layers": layered.count,
+                    "layers_stride_mm": round(layered.stride * layered.height, 3),
+                    "layers_read": len({k for k, _ in layered._sparse}),
                     "cells_in_plane": found.in_plane,
                     # The scale its core's strain is read at (`_core_read`).
                     "cell_mm": round(infill.cell_mm(
@@ -3675,8 +3680,11 @@ def _as_printed(assembly: Assembly, report: Report, printed: dict[str, list[dict
                 f"{cell['faces_inverted']} whose wedge would be too sharp or turned over, each "
                 f"read by its layers instead, and {cell['wedges_thinned']} made shallower to "
                 f"stand, the rest of their skin read by its layers; and its mesh read element "
-                f"by element exactly by its layers' rings, each element straight-sided between "
-                f"its corners, {cell['straight_short_pct']:.2f}% under the curved mesh's volume"
+                f"by element exactly by its layers' rings, {cell['layers_read']} of its "
+                f"{cell['layers']} layers read, every {cell['layers_stride_mm']:g} mm and each "
+                f"one within reach of a face that makes shells, each element straight-sided "
+                f"between its corners, {cell['straight_short_pct']:.2f}% under the curved "
+                f"mesh's volume"
                 + (f"; the mesh at its held faces {cell['held_mesh_mm']:g} mm, twice its finest "
                    f"core's cell, {cell['held_zone_mm']:g} mm deep, so that core is read at its "
                    "own scale where a held face's corner is singular"

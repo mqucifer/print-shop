@@ -154,6 +154,17 @@ class Layered:
         #: One ring of an island's walls, a bead's spacing (`as_printed.wall_thickness`).
         self.ring = as_printed.wall_thickness(1, self.line, self.height)
         self.cells = [self._cell(())]
+        #: Every how many layers its rings are read where no face making shells is near
+        #: (`read_at`), and its deepest shells over all its cells, for their reach.
+        self.stride = max(1, round(STRIDE_MM / self.height))
+        self.top_most = max([settings.top or 0 for settings in self._all_settings()]) * self.height
+        self.bottom_most = max([settings.bottom or 0 for settings in self._all_settings()]
+                               ) * self.height  # fmt: skip
+        self._full: set[int] | None = None
+
+    def _all_settings(self) -> list[Settings]:
+        base = self.printed.settings
+        return [base, *(r.settings.over(base) for r, _ in self.regions)]
 
     # Which cell
 
@@ -276,11 +287,9 @@ class Layered:
         solid = self.part if shape is None else shape
         cache = (id(solid), round(at, 9))
         if cache not in self._profiles:
-            way = [0.0, 0.0, 0.0]
-            way[self.layers] = 1.0
-            import FreeCAD as App
-
-            wires = solid.slice(App.Vector(*way), float(at))
+            # From its section as `as_printed` makes it, once for each height.
+            section = as_printed._section(solid, self.layers, float(at))
+            wires = [] if section is None else list(section.Wires)
             first, second = (a for a in range(3) if a != self.layers)
             found = []
             for wire in wires:
@@ -328,7 +337,52 @@ class Layered:
                     found[mine] = inside(rings, points[mine][:, [first, second]])
         return found
 
+    def read_at(self, layer: int) -> int:
+        """The layer whose rings a layer is read by (mqucifer/print-shop#363): itself where a
+        face that makes shells, or a band of layers' edge, is within reach of it
+        (`full_layers`); else the nearest of every `STRIDE_MM`'s, the part's section changing
+        little between them, and the reply saying so."""
+        if self._full is None:
+            self._full = self.full_layers()
+        if layer in self._full or self.stride <= 1:
+            return layer
+        return int(min(self.count - 1, round(layer / self.stride) * self.stride))
+
+    def full_layers(self) -> set[int]:
+        """Every layer within reach of a face that makes shells, one leaning `SHELL_DEGREES` or
+        more from upright to the layers, its top and bottom shells and a margin either side;
+        and of each band of layers' edges."""
+        reach = max(1, math.ceil((self.top_most + self.bottom_most) / self.height)) + 2
+        spans: list[tuple[float, float]] = []
+        lean = math.sin(math.radians(SHELL_DEGREES))
+        for face in self.part.Faces:
+            u0, u1, v0, v1 = face.ParameterRange
+            steep = False
+            for u in np.linspace(u0, u1, 5):
+                for v in np.linspace(v0, v1, 5):
+                    try:
+                        normal = face.normalAt(float(u), float(v))
+                    except Exception:  # noqa: BLE001 - a face that has no normal there
+                        continue
+                    if abs((normal.x, normal.y, normal.z)[self.layers]) >= lean:
+                        steep = True
+            if steep:
+                box = face.BoundBox
+                spans.append(((box.XMin, box.YMin, box.ZMin)[self.layers],
+                              (box.XMax, box.YMax, box.ZMax)[self.layers]))  # fmt: skip
+        for region, _ in self.regions:
+            if isinstance(region.shape, Layers):
+                spans += [(region.shape.low, region.shape.low), (region.shape.high,
+                                                                 region.shape.high)]  # fmt: skip
+        full: set[int] = set()
+        for low, high in spans:
+            first = int(self.layer_of(np.array([low]))[0]) - reach
+            last = int(self.layer_of(np.array([high]))[0]) + reach
+            full.update(range(max(0, first), min(self.count, last + 1)))
+        return full
+
     def _readable(self, layer: int, cell: Cell) -> list[np.ndarray] | None:
+        layer = self.read_at(layer)
         for step in range(self.count):
             for k in (layer - step, layer + step):
                 if 0 <= k < self.count:
@@ -337,6 +391,14 @@ class Layered:
                         return rings
         return None
 
+
+#: How far apart the layers are read whose rings are taken for those between, in mm, where no
+#: face that makes shells is near (`Layered.read_at`, mqucifer/print-shop#363): a tall part
+#: whose section moves with its height, as a bowed leg's, has no two layers alike, and each
+#: layer's OCCT offsets and booleans were most of its reading.
+STRIDE_MM = 1.0
+#: How far a face leans from upright to the layers before its shells are read layer by layer.
+SHELL_DEGREES = 30.0
 
 #: Each sub-tetrahedron of a tetrahedron split at its sides' midpoints, by its corners: the 4
 #: at its corners and the 4 its middle octahedron makes, each an eighth of it.
