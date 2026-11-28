@@ -46,11 +46,35 @@ def give_back() -> None:
         ctypes.CDLL("libc.so.6").malloc_trim(0)
 
 
-def gmsh(tools: Any) -> Any:
+def gmsh(tools: Any, first: bool = False) -> Any:
     """gmsh's mesh, as FreeCAD's `GmshTools.create_mesh` makes it, with what this process has
-    freed given back first (`give_back`)."""
+    freed given back first (`give_back`). With `first`, gmsh is started as CalculiX is, the
+    first the kernel stops where the container runs out of memory (`first_to_go`,
+    mqucifer/print-shop#375): FreeCAD starts it by Qt, which can't be told so, so it's run here
+    as FreeCAD's own run does, the same program, the same input and the same mesh read back.
+    Where it ends with an error, or is stopped, no mesh is read and what it said is kept as
+    `tools.said`, with its exit code as `tools.returncode`."""
     give_back()
-    return tools.create_mesh()
+    if not first:
+        return tools.create_mesh()
+    import FreeCAD
+
+    tools.prepare()
+    level = FreeCAD.ParamGet("User parameter:BaseApp/Preferences/Mod/Fem/Gmsh").GetString(
+        "LogVerbosity", "3"
+    )
+    done = subprocess.run(
+        [tools.gmsh_bin, "-v", level, "-", tools.temp_file_geo],
+        capture_output=True,
+        check=False,
+        preexec_fn=first_to_go,
+    )
+    tools.said = (done.stdout + done.stderr).decode(errors="replace")
+    tools.returncode = done.returncode
+    if done.returncode != 0:
+        return False
+    tools.update_properties()
+    return True
 
 
 def tidy_mesh(tools: Any) -> None:

@@ -114,6 +114,11 @@ ABLE = "bench: two passes could read it"
 #: times what the one pass's try took, held back for the band's lower bound: on the traced frame
 #: bolted to a block its read took 0.41 of the try on CI's amd64 runner, and 0.37 on the Mac.
 RESERVE = 1.25
+#: A one pass's limit, in s: the container's own where it isn't offered the hour, the same as
+#: `host.TIMEOUT`, which runs outside the image. With `--parts` no one pass is tried to time a
+#: glass band's read by, so two passes keep back `RESERVE` times this for it, and the band's
+#: read, in one pass, is taken to take it at the most (mqucifer/print-shop#375).
+ONE_PASS = 600.0
 
 
 # The first pass
