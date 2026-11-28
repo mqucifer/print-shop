@@ -186,6 +186,14 @@ def test_a_printed_bar_reads_stiffer_and_stronger_as_its_walls_and_infill_rise(c
     bar(high, 4, 60)
     assert solid.numbers["moves_mm"] < high.numbers["moves_mm"] < low.numbers["moves_mm"]
     assert worst(high) < worst(low)
+    # Each core read at its own cell's scale at the clamped root, the same on both meshes: the
+    # 60% core's cell, 1.36 mm, finer than the mesh, its held face meshed at twice it.
+    for answer in (low, high):
+        core = answer.numbers["parts"]["beam"]["cores"][0]
+        assert core["coarse_stretch_pct"] == pytest.approx(core["stretch_pct"], rel=0.05), core
+    cell = high.numbers["printed"]["beam"][0]
+    assert cell["held_mesh_mm"] == pytest.approx(2 * cell["cell_mm"], rel=1e-3)
+    assert low.numbers["printed"]["beam"][0]["held_mesh_mm"] is None
     # The solid beam is read as before: one material, no cores.
     assert "printed" not in solid.numbers
     assert solid.numbers["moves_mm"] == pytest.approx(1.870, abs=0.002)

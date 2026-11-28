@@ -701,6 +701,70 @@ class _Model:
         as well, its skin and core read from its layers (mqucifer/print-shop#363)."""
         return [solid]
 
+    def finest_cell(self) -> float | None:
+        """The finest core's cell of any printed part, in mm, over its own settings and each of
+        its regions' over them (`infill.cell_mm`): what its mesh is held to at its held faces
+        (`_held_fine`). None where no part is printed."""
+        found = []
+        for layered in self.cores.values():
+            base = layered.printed.settings
+            for settings in [base, *(r.settings.over(base) for r, _ in layered.regions)]:
+                if settings.infill and settings.pattern:
+                    spacing = as_printed.wall_thickness(1, settings.line_width,
+                                                        settings.layer_height)
+                    found.append(infill.cell_mm(str(settings.pattern), float(settings.infill),
+                                                spacing))  # fmt: skip
+        return min(found) if found else None
+
+    def held_mesh(self) -> tuple[float, float] | None:
+        """The mesh's size at a printed part's held faces and how deep that reaches, in mm, or
+        None where it's the mesh's own (mqucifer/print-shop#363): no coarser than `HELD_CELLS`
+        of its finest core's cell, so that core is read at its own scale (`classify.
+        element_averaged`) where a held face's corner is singular; no finer than
+        `HELD_FINEST`; out to `HELD_DEPTH` cells or `HELD_ZONE` mm, whichever is more."""
+        cell = self.finest_cell()
+        if cell is None:
+            return None
+        near = max(HELD_CELLS * cell, HELD_FINEST)
+        if near >= self.size:
+            return None
+        return near, max(HELD_DEPTH * cell, HELD_ZONE)
+
+    def _held_fine(self, sizes: str) -> str:
+        """gmsh's local sizes, `sizes`, and the held faces of an assembly with a printed part
+        meshed finer (`held_mesh`), growing to the mesh's own past their zone: the least of
+        them all."""
+        fine = self.held_mesh()
+        held = [*self.fixed, *sum(self.standing.values(), [])]
+        if fine is None or not held:
+            return sizes
+        near, zone = fine
+        surfaces = sorted({int(self._face_name(face).removeprefix("Face")) for face in held})
+        taken = [int(n) for n in re.findall(r"^Field\[(\d+)\]", sizes, re.M)]
+        distance = max(taken, default=0) + 1
+        threshold = distance + 1
+        lines = [
+            "// the held faces, meshed at the printed parts' finest cell (mqucifer/print-shop#363)",
+            f"Field[{distance}] = Distance;",
+            f"Field[{distance}].SurfacesList = {{{', '.join(map(str, surfaces))}}};",
+            f"Field[{distance}].Sampling = {close_faces.SAMPLING};",
+            f"Field[{threshold}] = Threshold;",
+            f"Field[{threshold}].InField = {distance};",
+            f"Field[{threshold}].SizeMin = {near:.6g};",
+            f"Field[{threshold}].SizeMax = {self.size:.6g};",
+            f"Field[{threshold}].DistMin = {zone:.6g};",
+            f"Field[{threshold}].DistMax = {zone + close_faces.GRADE * (self.size - near):.6g};",
+            f"Field[{threshold}].StopAtDistMax = 1;",
+        ]
+        least = re.search(r"^Field\[(\d+)\] = Min;\nField\[\1\]\.FieldsList = \{([^}]*)\};",
+                          sizes, re.M)  # fmt: skip
+        if least is None:
+            return "\n".join([*lines, f"Background Field = {threshold};", ""]) + sizes
+        listed = f"{least.group(2)}, {threshold}"
+        joined = sizes.replace(least.group(0), f"Field[{least.group(1)}] = Min;\n"
+                               f"Field[{least.group(1)}].FieldsList = {{{listed}}};")
+        return "\n".join(lines) + "\n" + joined
+
     def _classify(self) -> None:
         """Each element of each printed part read by its layers (`classify.shares`,
         mqucifer/print-shop#363): skin, core, or a share of each in `classify.STEPS` steps. A
@@ -828,6 +892,13 @@ class _Model:
                     "covered_mm3": round(float((found.in_wedges - found.wedges_core)[
                         in_cell].sum()), 1),  # fmt: skip
                     "straight_short_pct": round(straight_short, 3),
+                    # Its held faces' mesh and how deep it reaches (`held_mesh`), and whether
+                    # its finest cell asked for finer than `HELD_FINEST`.
+                    "held_mesh_mm": None if self.held_mesh() is None
+                    else round(self.held_mesh()[0], 3),  # type: ignore[index]
+                    "held_zone_mm": None if self.held_mesh() is None
+                    else round(self.held_mesh()[1], 3),  # type: ignore[index]
+                    "held_finest_met": (self.finest_cell() or 0) * HELD_CELLS >= HELD_FINEST,
                     "cells_in_plane": found.in_plane,
                     # The scale its core's strain is read at (`_core_read`).
                     "cell_mm": round(infill.cell_mm(
@@ -1087,8 +1158,8 @@ class _Model:
         # Where the curved try found faces close, the straight one is meshed finer there from
         # the start (mqucifer/print-shop#346).
         with step("gmsh's mesh of the joined parts"):
-            tools = self._gmsh(
-                GmshTools, mesh, close_faces.fields(self.closes, self.size, self.local_scale))
+            tools = self._gmsh(GmshTools, mesh, self._held_fine(
+                close_faces.fields(self.closes, self.size, self.local_scale)))
         said = None if mesh.FemMesh.VolumeCount else _gmsh_said(tools)
         for _ in range(RETRIES):
             if said is None or not CROSSED.search(said):
@@ -1106,7 +1177,7 @@ class _Model:
             if not more:
                 break
             with step("gmsh's mesh of the joined parts, finer where faces were close"):
-                tools = self._gmsh(GmshTools, mesh, sizes)
+                tools = self._gmsh(GmshTools, mesh, self._held_fine(sizes))
             said = None if mesh.FemMesh.VolumeCount else _gmsh_said(tools)
         words = said
         if said is not None:
@@ -2608,6 +2679,15 @@ _SUMMED = re.compile(
 CROSSED = re.compile(r"intersect", re.I)
 #: How many of the faces nearest where gmsh's triangles cross are named.
 NEAREST = 4
+#: A printed part's mesh at its held faces, as many of its finest core's cells, no finer than
+#: `HELD_FINEST` mm, out to `HELD_DEPTH` cells or `HELD_ZONE` mm (`_Model.held_mesh`,
+#: mqucifer/print-shop#363): a held face's corner is singular, and a core whose cell is finer
+#: than the mesh's sub-elements was read there at the mesh's scale, the 60% beam's core 0.718%
+#: and 0.609% on its two meshes, where at its own cell it reads the same on both.
+HELD_CELLS = 2.0
+HELD_FINEST = 1.0
+HELD_DEPTH = 2.0
+HELD_ZONE = 3.0
 #: Whether a part read as printed is solved by CalculiX's iterative solver from the start
 #: (`_Model.solve`, mqucifer/print-shop#363). It isn't: the direct solver reads the planted beam
 #: faster, and the iterative one solves it where the direct one meets the container's memory.
@@ -3597,6 +3677,14 @@ def _as_printed(assembly: Assembly, report: Report, printed: dict[str, list[dict
                 f"stand, the rest of their skin read by its layers; and its mesh read element "
                 f"by element exactly by its layers' rings, each element straight-sided between "
                 f"its corners, {cell['straight_short_pct']:.2f}% under the curved mesh's volume"
+                + (f"; the mesh at its held faces {cell['held_mesh_mm']:g} mm, twice its finest "
+                   f"core's cell, {cell['held_zone_mm']:g} mm deep, so that core is read at its "
+                   "own scale where a held face's corner is singular"
+                   if cell.get("held_mesh_mm") else "")
+                + ("; its finest core's cell asks for a mesh at its held faces finer than "
+                   f"{HELD_FINEST:g} mm, and it's {HELD_FINEST:g} mm: that core is read there at "
+                   "the mesh's scale, coarser than its cell" if not cell.get("held_finest_met",
+                                                                           True) else "")
                 + ("; a region cutting a layer across its plane, each element's part of it by "
                    "its section's middle" if cell.get("cells_in_plane") else "")
                 + f", where no wedge lies: "
