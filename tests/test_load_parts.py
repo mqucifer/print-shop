@@ -1059,7 +1059,9 @@ def test_parts_on_a_glass_band_that_meets_the_time_reads_its_lower_bound_and_say
     assert lower["parts"] == ["frame"]
     assert lower["why"] == f"read in two passes, as --parts asks: {late}"
     assert "weight_kept_g" not in lower
-    assert report.why.startswith("read as a lower bound, frame with its glass band left out: ")
+    assert report.why.startswith(
+        "read as a lower bound, frame with its glass band left out, the band unread: "
+    )
     assert report.facts[0].startswith("read as a lower bound: frame read with its glass band left")
     assert load.BOUND in report.facts[0]
     assert report.facts[1:] == ["read without bands"], "what two passes said is gone"
@@ -1159,8 +1161,9 @@ def test_a_lift_on_a_glass_band_that_can_t_be_read_whole_keeps_the_band_s_weight
     """mqucifer/print-shop#375: a lift on a frame whose whole can't be read was refused, as read
     without its band the frame would hang by less than its weight. Now the band's weight is
     kept, hung where it met the frame, with its stiffness left out: the reply leads with that,
-    says each part's strain, each joint's share and the movement are upper bounds under the full
-    weight, and gives the weight kept. In two passes asked for, and after the one pass's."""
+    says the movement and each joint's and bolt's share are upper bounds under the full weight,
+    never a part's strain, that the band is unread, and gives the weight kept. In two passes
+    asked for, and after the one pass's."""
     monkeypatch.setenv(load_parts.TIMEOUT, str(host.TWO_PASSES))
     calls: list[dict[str, Any]] = []
     met = load._Unread("met", "the whole met the container's memory", memory=True)
@@ -1183,13 +1186,15 @@ def test_a_lift_on_a_glass_band_that_can_t_be_read_whole_keeps_the_band_s_weight
     lower = report.numbers["lower_bound"]
     assert lower["parts"] == ["frame"] and lower["weight_kept_g"] == {"frame": 12.5}
     assert report.why.startswith(
-        "read as a bound, frame with its glass band's stiffness left out and its weight kept: "
+        "read as a bound, frame with its glass band's stiffness left out and its weight kept, "
+        "the band unread: "
     )
     fact = report.facts[0]
     assert fact.startswith("read as a bound: frame read with its glass band's stiffness left out "
                            "and its weight kept")  # fmt: skip
     assert load.LIFT_BOUND in fact and load.BOUND not in fact
-    assert "upper bounds under the full weight" in load.LIFT_BOUND
+    assert "are upper bounds under the full weight" in load.LIFT_BOUND
+    assert "Each part's strain isn't one" in load.LIFT_BOUND
 
 
 def test_a_one_pass_s_limit_for_the_band_is_the_host_s() -> None:
@@ -1257,3 +1262,56 @@ def test_gmsh_first_to_go_runs_freecad_s_own_command_and_reads_its_mesh_only_whe
     assert read == ([True] if code == 0 else [])
     assert tools.returncode == code and "Error   : stopped" in tools.said
     assert load._gmsh_said(tools) == "stopped"
+
+
+def _bands_probe() -> Any:
+    import importlib.util
+    import sys
+
+    folder = Path(__file__).parent.parent / "scripts"
+    sys.path.insert(0, str(folder))
+    try:
+        path = folder / "load_bands_probe.py"
+        spec = importlib.util.spec_from_file_location("load_bands_probe", path)
+        assert spec is not None and spec.loader is not None
+        probe = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(probe)
+    finally:
+        sys.path.remove(str(folder))
+    return probe
+
+
+def test_the_bands_probe_says_how_it_was_read_and_what_stopped_the_whole_by_kinds_alone() -> None:
+    """`scripts/load_bands_probe.py` is run on a design's own assembly: it says how the reply
+    was read and what stopped the whole as kinds and counts, never a figure or a name. Made-up
+    replies only."""
+    probe = _bands_probe()
+    lifted = {
+        "numbers": {
+            "lower_bound": {
+                "parts": ["frame-a", "frame-b"],
+                "why": "read in two passes, as --parts asks: gmsh made no mesh of the joined "
+                "parts at a mesh of at most 7.25 mm: it met the container's memory, 4 GiB",
+                "tried_s": 412.0, "band_s": 96.5, "weight_kept_g": {"frame-a": 31.7},
+            },
+            "loads": [{"part": "frame-a", "band_mm2": 210.4}, {"part": "block", "grams": 9.0}],
+        }
+    }  # fmt: skip
+    said = probe.summary(lifted)
+    assert said == [
+        "read: each band left out, lifted, each band's weight kept",
+        "what stopped the whole: memory meshing",
+        "parts read without their band: 2",
+        "of them, with the band's weight hung where it met them: 1",
+        "the try took 412.0 s, the band's read 96.5 s",
+    ]
+    assert not any(n in " ".join(said) for n in ("frame-a", "7.25", "31.7", "210.4"))
+    assert probe.kinds(
+        "it met the container's memory, 3 GiB; and in two passes, two passes met the container's "
+        "time, 3600 s"
+    ) == ["memory solving", "time"]
+    assert probe.kinds("the mesh gives block no element of its own") == ["unparted"]
+    assert probe.kinds("gmsh made no mesh of the joined parts: it gave no reason") == ["no mesh"]
+    assert probe.summary({"numbers": {"parts": {"a": {}}, "two_passes": {}}}) == [
+        "read: the whole, in two passes"
+    ]

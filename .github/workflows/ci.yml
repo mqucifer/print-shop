@@ -172,4 +172,28 @@ jobs:
           name: cae-image
       - run: zstd -d --stdout cae-image.tar.zst | docker load && rm cae-image.tar.zst
       - run: uv run python scripts/bench.py check
-      - run: uv run pytest -q -m "cae and assembly and not proof" -n 2 -rps --durations=20
+      - run: uv run pytest -q -m "cae and assembly and not bands and not proof" -n 2 -rps --durations=20
+
+  # The `-m bands` tests, a glass frame's band under `--parts` and a lift
+  # (mqucifer/print-shop#375), in a job of their own beside `cae-assembly`, which is near its 30
+  # minutes as it is. The same steps, on the same image.
+  cae-bands:
+    needs: [image, cae-image]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          python-version: "3.12"
+      - run: uv sync --locked
+      - uses: actions/download-artifact@v4
+        with:
+          name: bench-image
+      - run: zstd -d --stdout bench-image.tar.zst | docker load && rm bench-image.tar.zst
+      - uses: actions/download-artifact@v4
+        with:
+          name: cae-image
+      - run: zstd -d --stdout cae-image.tar.zst | docker load && rm cae-image.tar.zst
+      - run: uv run python scripts/bench.py check
+      - run: uv run pytest -q -m "cae and bands and not proof" -n 2 -rps --durations=20

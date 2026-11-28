@@ -2978,9 +2978,10 @@ def _band_read(
     be read (mqucifer/print-shop#295), `why`, said first, with `done`, what was tried. The read
     has the container's time left: where that's less than `tried`, what the band's read is
     taken to take, s, it says so. Under a weight it's a lower bound (`BOUND`). Lifted, each band's
-    weight is kept, hung from where it met its part (`_Model._band_weight`), and each part's
-    strain, each joint's share and the movement are upper bounds (`LIFT_BOUND`,
-    mqucifer/print-shop#375). `tried_s` is what's said the try took, `tried` unless given."""
+    weight is kept, hung from where it met its part (`_Model._band_weight`), and the movement and
+    each joint's and bolt's share are upper bounds, never a part's strain (`LIFT_BOUND`,
+    mqucifer/print-shop#375). Either way the verdict's line says the band is unread. `tried_s`
+    is what's said the try took, `tried` unless given."""
     report.again()
     from . import load_parts
 
@@ -3003,7 +3004,7 @@ def _band_read(
         )
         report.why = (
             f"read as a bound, {names} with its glass band's stiffness left out and its weight "
-            f"kept: {report.why}"
+            f"kept, the band unread: {report.why}"
         )
     else:
         report.facts.insert(
@@ -3014,7 +3015,10 @@ def _band_read(
             "with the band gone, never with a stiffness made up for it, and the band itself is "
             f"unread. {BOUND}",
         )
-        report.why = f"read as a lower bound, {names} with its glass band left out: {report.why}"
+        report.why = (
+            f"read as a lower bound, {names} with its glass band left out, the band unread: "
+            f"{report.why}"
+        )
     report.numbers["lower_bound"] = {
         "parts": banded,
         "why": why,
@@ -3046,8 +3050,11 @@ BOUND = (
 #: And lifted, with each band's weight kept (mqucifer/print-shop#375).
 LIFT_BOUND = (
     "Lifted, every part hangs by its whole weight still, the band's in it, with less of the "
-    "part to carry it: each part's strain, and each joint's and bolt's share of the load, are "
-    "upper bounds under the full weight, the safe side, and so is how far each part moves"
+    "part to carry it: how far each part moves, and each joint's and bolt's share of the load, "
+    "are upper bounds under the full weight, the safe side. Each part's strain isn't one: a "
+    "banded part's is read on the rest of it alone, and its band, where its worst may be, is "
+    "unread; and any part's, at a corner where parts meet, reads by the mesh there, which "
+    "differs with the band left out"
 )
 
 

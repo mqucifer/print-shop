@@ -54,6 +54,7 @@ markers = [
     "bench_local: runs the CAD bench on a file only the Mac holds, and skips where it's absent",
     "cae: runs the bench's second image, with FreeCAD, built by scripts/bench.py build cae (deselect with -m 'not cae')",
     "assembly: a cae test of a whole furniture assembly, run by CI in a job of its own (mqucifer/print-shop#295)",
+    "bands: an assembly test of a glass frame's band under --parts or a lift, run by CI in a job of its own beside assembly (mqucifer/print-shop#375)",
     "proof: a cae proof too long for CI's job, run by hand on the Mac with -m proof (mqucifer/print-shop#325)",
     "remote: runs bench jobs on a real remote host over SSH; runs only with PRINT_SHOP_TEST_REMOTE=SSH-TARGET (mqucifer/print-shop#373)",
 ]
