@@ -1657,33 +1657,38 @@ def _read_with(core: dict[str, object]) -> dict[str, object]:
 
 
 def test_a_core_read_near_its_limit_in_coarse_elements_is_meshed_again_finer() -> None:
-    """mqucifer/print-shop#363: where a printed core's worst reading is within
-    `REFINE_MARGIN` of its limit, either side, the verdict hangs on it, and every place its cell
-    reads near its limit in coarse elements (`_Model._near_limit`) is meshed again finer, at
-    `REFINE_SIZE_CELLS` of its cell, no finer than `HELD_FINEST`, out `REFINE_CELLS` cells
-    or `HELD_ZONE`, whichever is more, each
-    with what it read first. Far from its limit, or where that's no finer than the mesh, it's
-    read as it was."""
+    """mqucifer/print-shop#363: where a printed core's verdict is in doubt, its two meshes'
+    worst readings either side of its limit or either within `REFINE_DOUBT` of it, every place
+    either reads near its limit in coarse elements (`_Model._near_limit`) is meshed again
+    finer, at `REFINE_SIZE_CELLS` of its cell, no finer than `HELD_FINEST`, out `REFINE_CELLS`
+    cells or `HELD_ZONE`, whichever is more, each with what it read first, one to a box. A
+    verdict not in doubt, or a mesh no coarser than that, is read as it was."""
     near = max(load.REFINE_SIZE_CELLS * 1.2, load.HELD_FINEST)
     reach = max(load.REFINE_CELLS * 1.2, load.HELD_ZONE)
-    # Over its limit, as a real leg's core across its layers read: both places.
-    over = _read_with({"across_layers_pct": 0.55})
-    found = load.refined(over, 20.0)
-    assert [p[:3] for p in found] == [([0.0, 0.0, 0.0], near, reach),
-                                      ([5.0, 5.0, 5.0], near, reach)]
-    why = found[0][3]
+    # Either side of its limit, as a real leg's core across its layers read: both places.
+    over, under = _read_with({"across_layers_pct": 0.55}), _read_with({"across_layers_pct": 0.40})
+    found = load.refined(over, under, 20.0)
+    assert sorted(p[:3] for p in found) == [([0.0, 0.0, 0.0], near, reach),
+                                            ([5.0, 5.0, 5.0], near, reach)]
+    why = next(p[3] for p in found if p[0] == [0.0, 0.0, 0.0])
     assert why["reading"] == "across" and why["first_pct"] == 0.5
     assert why["limit_pct"] == 0.481 and why["first_cell_mesh_mm"] == 20.0
-    assert found[1][3]["limit_pct"] == 1.51
-    # Under its limit within the margin: the same.
-    assert len(load.refined(_read_with({"stretch_pct": 1.2}), 20.0)) == 2
-    # Far from it either way: the verdict doesn't hang on it.
-    assert load.refined(_read_with({}), 20.0) == []
-    assert load.refined(_read_with({"across_layers_pct": 1.5}), 20.0) == []
+    # Both under it, one within `REFINE_DOUBT`: in doubt.
+    close = _read_with({"stretch_pct": 1.45})
+    assert len(load.refined(close, _read_with({"stretch_pct": 1.2}), 20.0)) == 2
+    # Both well under it, though within the margin, the meshes apart: not in doubt.
+    assert load.refined(_read_with({"stretch_pct": 1.23}), _read_with({"stretch_pct": 0.94}),
+                        20.0) == []  # fmt: skip
+    # Both well over it: a FAIL either way.
+    high = _read_with({"across_layers_pct": 1.5})
+    assert load.refined(high, high, 20.0) == []
     # No place near its limit in coarse elements: read as it was.
-    assert load.refined(_read_with({"across_layers_pct": 0.55, "near_limit": []}), 20.0) == []
+    bare = _read_with({"across_layers_pct": 0.55, "near_limit": []})
+    assert load.refined(bare, bare, 20.0) == []
     # A mesh no coarser than its aim already.
-    assert load.refined(over, near) == []
+    assert load.refined(over, under, near) == []
     # A solid part, or one with no cell: nothing.
-    assert load.refined({"parts": {"leg": {"part": {}}}}, 20.0) == []
-    assert load.refined(_read_with({"cell_mm": 0, "across_layers_pct": 0.55}), 20.0) == []
+    solid: dict[str, Any] = {"parts": {"leg": {"part": {}}}}
+    assert load.refined(solid, solid, 20.0) == []
+    none = _read_with({"cell_mm": 0, "across_layers_pct": 0.55})
+    assert load.refined(none, none, 20.0) == []
