@@ -824,6 +824,7 @@ class _Model:
         steps = np.full(len(elements), -1, dtype=int)
         kinds = np.full(len(elements), -1, dtype=int)
         groups: list[tuple[int, str, Any, Any]] = []
+        blends: list[int] = []
         tensors: list[np.ndarray] = []
         recovered: list[np.ndarray] = []
         core_points = np.zeros((len(elements), classify.POINTS), dtype=bool)
@@ -909,6 +910,7 @@ class _Model:
                             continue
                         kinds[mine[hit]] = len(groups)
                         groups.append((number, part.name, cell, figures))
+                        blends.append(kind)
                         given = assembly_ways[way] if way >= 0 else None
                         if kind == classify.LAMINATE and given is not None:
                             tensor = classify.laminate(skin, core, share, given)
@@ -995,6 +997,7 @@ class _Model:
         self.core_solids = groups
         self.core_tensors = tensors
         self.core_strains = recovered
+        self.group_kinds = blends
         self.core_points = core_points
         self.element_core_mm3 = core_mm3
         self._number_wedges(order, points, skin)
@@ -2415,6 +2418,7 @@ class _Model:
                                              for n in numbers]))  # fmt: skip
             averaged = np.einsum("i,nij,j->n", way, self.strain[rows], way) if rows.size else [0]
             read["averaged_across_layers_pct"] = 100 * max(float(np.max(averaged)), 0.0)
+            read["core_nodal_across_pct"] = self._core_nodal(numbers, way)
             mixed = int((which & (self.element_step < classify.STEPS)).sum())
             cores.append({"cell": cell.name, "elements": len(mine), "mixed_elements": mixed,
                           **figures.said(), **read})  # fmt: skip
@@ -2516,6 +2520,52 @@ class _Model:
         read["at_elements_across_layers_pct"] = 100 * max(peak_across, 0.0)
         read["at_elements_stretch_pct"] = 100 * peak_stretch
         return read
+
+    def _core_nodal(self, numbers: list[int], way: np.ndarray) -> float:
+        """The highest pull across its layers of a core's own nodal mean (mqucifer/print-shop#363's
+        review, the operator's ruling): at each node of its elements, the mean of their own
+        strains there, each its core's as its blend recovers it, no skin's or wedge's among
+        them; none at a node of an element read in series, where three faces meet, or within a
+        held face's zone, a singular corner whose mean isn't the core's figure. In %."""
+        moved = self.printed if self.printed is not None else self.moved
+        wired = self._wired()
+        total: dict[int, np.ndarray] = {}
+        count: dict[int, int] = {}
+        barred: set[int] = set()
+        kinds = getattr(self, "group_kinds", [])
+        for number in numbers:
+            hit = np.flatnonzero(self.element_core == number)
+            if not len(hit):
+                continue
+            share, _, _, _ = self.core_solids[number]
+            corner = kinds[number] == classify.SERIES if number < len(kinds) else False
+            for chunk in range(0, len(hit), CHUNK):
+                some = hit[chunk : chunk + CHUNK]
+                its = wired[some]
+                strain, _ = element_strains(self.points[its], moved[its], _CORNERS)
+                if self.core_strains:
+                    strain = np.einsum("ijkl,npkl->npij", self.core_strains[number], strain)
+                for e, row in enumerate(its[:, :4].tolist()):
+                    for k, node in enumerate(row):
+                        if corner and share < classify.STEPS:
+                            barred.add(node)
+                        total[node] = total.get(node, 0.0) + strain[e, k]
+                        count[node] = count.get(node, 0) + 1
+        if not total:
+            return 0.0
+        nodes = np.array(sorted(total))
+        mean = np.array([total[n] / count[n] for n in nodes.tolist()])
+        keep = np.array([n not in barred for n in nodes.tolist()])
+        zone = max((self.held_mesh() or (0.0, 0.0))[1], HELD_ZONE)
+        for face in [*self.fixed, *sum(self.standing.values(), [])]:
+            box = face.BoundBox
+            low = np.array([box.XMin, box.YMin, box.ZMin]) - zone
+            high = np.array([box.XMax, box.YMax, box.ZMax]) + zone
+            keep &= ~np.all((self.points[nodes] >= low) & (self.points[nodes] <= high), axis=1)
+        if not keep.any():
+            return 0.0
+        across = np.einsum("i,nij,j->n", way, mean[keep], way)
+        return 100 * max(float(across.max()), 0.0)
 
     def _near_limit(self, averaged: Any, whose: np.ndarray, way: np.ndarray,
                     read: dict[str, Any], cell: float) -> list[dict[str, Any]]:

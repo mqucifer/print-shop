@@ -17,7 +17,7 @@ one: the Reuss bound, skin and core in series, their compliances added by their 
 (`reuss`). Voigt's, their stiffnesses added, is the stiffest any mix of them can be, and a
 part read by it could read stiffer and stronger than it prints. Each blend's strength is read
 from the weaker side too: the element against the core's limits, and against the skin's.
-Elements are blended in 9 steps of share, an eighth apart, one CalculiX set each.
+Elements are blended in 17 steps of share, a sixteenth apart, toward core, one CalculiX set each.
 
 The mesh is checked against the layers it's read by (`checked`): at each of the planes
 `as_printed.heights` picks, each element crossing the plane is held to the layer's own share
@@ -40,9 +40,11 @@ from . import as_printed, slices
 from .printed import Cylinder, Layers, Mesh, Printed, Region, Settings
 from .report import NoAnswer
 
-#: How many steps of share the mixed elements are blended in, past skin: an eighth each, as
-#: each element's share is its 8 sub-tetrahedra's.
-STEPS = 8
+#: How many steps of share the mixed elements are blended in, past skin, each stepped toward
+#: core, the soft side (`step_of`): sixteenths, as eighths read the planted 60% beam 8.9% softer
+#: than the sandwich formula, past its 8%, sixteenths 5.7% and thirty-seconds 4.1%, each in the
+#: same seconds (mqucifer/print-shop#363's review).
+STEPS = 16
 #: How far a polygon of a layer's sparse area may be from its curves, in mm.
 POLYGON = 1e-3
 
