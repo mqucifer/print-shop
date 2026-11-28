@@ -960,10 +960,14 @@ class _Model:
             base += len(layer.new)
             numbers.append(mapped)
             parts.append(np.full(len(rows), k))
-            for c in layer.cells:
+            # Each cell's core once, not once for each of its wedges.
+            cores: dict[int, np.ndarray] = {}
+            for c in np.unique(layer.cells):
                 cell = layered.cells[int(c)]
-                core = infill.core(cell.settings, part.material).stiffness(*frame_of[part.name])
-                tensors.append(skin - core)
+                cores[int(c)] = skin - infill.core(cell.settings, part.material).stiffness(
+                    *frame_of[part.name])
+            for c in layer.cells:
+                tensors.append(cores[int(c)])
                 cells.append(f"{k}_{int(c)}")
         if not numbers:
             return
@@ -971,6 +975,16 @@ class _Model:
         self.wedge_part = np.concatenate(parts)
         self.wedge_tensor = np.array(tensors)
         self.wedge_set = cells
+
+    def _nodes_by_face(self, face: Any) -> list[int]:
+        """The mesh's nodes on a face (FreeCAD's `getNodesByFace`), once for each face and
+        mesh: a held face's are asked for by the skin's wedges, the balance, the joints and
+        the input's writing, and on a fine mesh each ask took a second or more."""
+        key = (id(self.fem), face.hashCode())
+        cache = self.__dict__.setdefault("_face_nodes_cache", {})
+        if key not in cache:
+            cache[key] = list(self.fem.getNodesByFace(face))
+        return list(cache[key])
 
     def _curved_volumes(self, elements: list[int]) -> np.ndarray:
         """Each second-order tetrahedron's own volume, its sides as the mesh curves them, by its
@@ -1024,7 +1038,7 @@ class _Model:
         # A held face's skin is held: a wedge there, its outer face held and its inner tied to
         # nothing but its neighbours, would be strained by them alone. Its solid's layers read it.
         held_nodes = {row[n] for f in [*self.fixed, *sum(self.standing.values(), [])]
-                      for n in self.fem.getNodesByFace(f) if n in row}  # fmt: skip
+                      for n in self._nodes_by_face(f) if n in row}  # fmt: skip
         held = np.array([all(int(n) in held_nodes for n in r[:3]) for r in rows], dtype=bool)
 
         built = wedges.layer(points, rows, normals, depth, cells, over_core & ~held, inside,
@@ -1238,8 +1252,11 @@ class _Model:
             # leave unbalanced (`_iterated`, mqucifer/print-shop#363): by the direct solver,
             # or the iterative one where that meets the memory or it's asked for.
             with step(f"CalculiX's solve of the joined parts, as a part is printed, {made}"):
+                # Corrected where a joint's force is read from the nodes' balance; with no
+                # joint, the first solve is the answer.
                 solved = not ITERATE_PRINTED and self._iterated(
-                    fea, analysis, 0, printed=True, direct=True)
+                    fea, analysis, 0, printed=True, direct=True,
+                    least=1 if self.assembly.joints else 0)
                 if not solved:
                     self._iterated(fea, analysis, memory_met(kills) or 0, printed=True)
             self.solve_s = round(time.time() - began, 2)
@@ -1566,7 +1583,7 @@ class _Model:
         )
 
     def _iterated(self, fea: Any, analysis: Any, limit: int, printed: bool = False,
-                  direct: bool = False) -> bool:
+                  direct: bool = False, least: int = 1) -> bool:
         """Solved by CalculiX's iterative solver, where its direct one met the container's
         memory (mqucifer/print-shop#301), and corrected: the iterative solver stops at a fixed
         residual, which moves a strain by a percent or so, so what's left unbalanced at each
@@ -1580,7 +1597,8 @@ class _Model:
         movement, some 4e-6 mm where a part moves 4 mm, leave a skin's thin wedges, stiff
         across their depth, unbalanced by a part in a few hundred of the load, and the
         correction's own seven figures are of what's left, so a joint's force read from the
-        nodes' balance is as good as statics. False where the direct solver gave no result."""
+        nodes' balance is as good as statics; corrected `least` times at least, none where
+        there's no joint to read. False where the direct solver gave no result."""
         path = Path(fea.inp_file_name)
         text = path.read_text()
         static = re.search(r"^\*STATIC\s*$", text, re.M)
@@ -1631,7 +1649,9 @@ class _Model:
                 analysis.Document.removeObject(result.Name)
             left = self._unbalanced()
             runs.append(float(np.abs(left).sum()) / loaded if loaded else 0.0)
-            if runs[-1] <= RESIDUAL and (not direct or run >= 1):
+            if direct and least == 0:
+                break  # the direct solve, with no joint to read: its seven figures will do
+            if runs[-1] <= RESIDUAL and (not direct or run >= least):
                 break
             text = _cload(text, left, self.row)
         self.residuals = runs
@@ -1649,6 +1669,9 @@ class _Model:
             f"{why} and corrected {len(runs) - 1} time(s), each time for what was left "
             f"unbalanced, to {runs[-1]:.1e} of the load"
         )
+        if direct and least == 0:
+            self.iterated = None
+            return True
         if runs[-1] > RESIDUAL:
             raise NoAnswer(
                 f"{self.iterated}: more than the {RESIDUAL:g} it's held to, so nothing is read"
@@ -1863,7 +1886,7 @@ class _Model:
             own = Faces(solid.Faces)
             mine = [f for f in [*self.fixed, *sum(self.standing.values(), [])] if own.has(f)]
             # The held faces' nodes as FreeCAD holds them, and as CalculiX sums their reaction.
-            for node in {n for f in mine for n in self.fem.getNodesByFace(f)}:
+            for node in {n for f in mine for n in self._nodes_by_face(f)}:
                 if node in self.held_force:
                     self.outside[name][self.row[node]] += self.held_force.pop(node)
         # A pin's reaction, on no held face of its own: it's nothing where the load is square.
@@ -1999,7 +2022,7 @@ class _Model:
             return [self.fem.getElementNodes(e) for e in self.fem.getFacesByFace(face)]
         import FreeCAD as App
 
-        on = set(self.fem.getNodesByFace(face))
+        on = set(self._nodes_by_face(face))
         surface = face.Surface
         found = []
         for nodes in self._surface():
@@ -2024,7 +2047,7 @@ class _Model:
         triangles' mid-side nodes, which are off a curved face, or past a curved edge of a flat
         one (`_on_face`); within the tolerance the joined parts hold it to (`as_joined`). A held
         face's are FreeCAD's own, as its constraint holds those."""
-        found = self.fem.getNodesByFace(as_joined(face))
+        found = self._nodes_by_face(as_joined(face))
         if not self.straight:
             return list(found)
         return sorted({*found, *(n for nodes in self._on_face(face) for n in nodes)})
@@ -2175,15 +2198,15 @@ class _Model:
                 n
                 for f in [*self.fixed, *sum(self.standing.values(), [])]
                 # As FreeCAD holds them: its own constraint's nodes.
-                for n in self.fem.getNodesByFace(f)
+                for n in self._nodes_by_face(f)
             }
         )
         for face in self.fixed:
-            for node in self.fem.getNodesByFace(face):
+            for node in self._nodes_by_face(face):
                 self.constrained.setdefault(node, set()).update(range(3))
         for axis, faces in self.standing.items():
             for face in faces:
-                for node in self.fem.getNodesByFace(face):
+                for node in self._nodes_by_face(face):
                     self.constrained.setdefault(node, set()).add(axis)
         step = "*CLOAD\n" + "".join(
             f"{node},{axis + 1},{push[axis]:.9g}\n"

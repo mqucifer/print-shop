@@ -60,6 +60,10 @@ STEPS = (
     ("CalculiX's solve", "CalculiX's direct solve"),
     ("reading the joint", "reading a joint"),
     ("reading the loaded places", "reading the loaded places"),
+    ("the first pass's squaring", "the first pass's squaring of the bolts' bores"),
+    ("the second pass's joining", "the second pass's joining"),
+    ("the second pass's part", "the second pass's part on its own"),
+    ("clearance:", "clearance"),
 )
 MESHED = re.compile(r"a mesh of (\d+) elements and (\d+) nodes")
 
