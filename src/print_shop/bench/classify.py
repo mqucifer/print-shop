@@ -29,6 +29,7 @@ resolves the walls, and a finer mesh near the part's faces (`load`) is what meet
 from __future__ import annotations
 
 import math
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -661,7 +662,8 @@ LAMINATE, COLUMN, SERIES = 1, 2, 0
 
 
 def band_normals(read: Read, mixed: np.ndarray, centres: np.ndarray, faces: np.ndarray,
-                 normals: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+                 normals: np.ndarray, group_of: Callable[[np.ndarray], np.ndarray] | None = None
+                 ) -> tuple[np.ndarray, np.ndarray]:
     """Each mixed element's blend and its way (mqucifer/print-shop#363), in the part's own axes.
     Its core points and its skin points are parted by the way that best parts them, Fisher's,
     their mean apart over their spread. Where that parts every one, as in a band of walls or
@@ -671,7 +673,13 @@ def band_normals(read: Read, mixed: np.ndarray, centres: np.ndarray, faces: np.n
     misses by some degrees. Where it doesn't, and one face is all there is near it, it's that
     face's laminate still; where two faces are, two bands meet, and along the edge they share,
     the two nearby normals furthest apart, it's a column (`column`); where a third face leans
-    along that edge, a corner of three, it's in series every way (`reuss`)."""
+    along that edge, a corner of three, it's in series every way (`reuss`).
+
+    With `group_of`, each boundary triangle's face, by their numbers in `faces`, the part's own
+    faces grouped where they meet smoothly, two faces and a third are told by it, not by their
+    triangles' normals: round a hole's edge, the hole's own triangles further round lean along
+    the edge, and read as a third face, where there are two. Each face's way there is its
+    nearest triangle's."""
     ways = np.zeros((len(read.share), 3))
     kinds = np.full(len(read.share), SERIES, dtype=int)
     clean = np.zeros(len(read.share), dtype=bool)
@@ -715,6 +723,12 @@ def band_normals(read: Read, mixed: np.ndarray, centres: np.ndarray, faces: np.n
                 continue
             others = nearby[row]
             cos = np.abs(others @ first[row])
+            if group_of is not None and cos.min() <= apart_cos:
+                found = _by_faces(group_of(near[row]), others,
+                                  apart[row, near[row]], dots[row], lean_sin)  # fmt: skip
+                if found is not None:
+                    ways[e], kinds[e] = found
+                continue
             if cos.min() > apart_cos:
                 # One face is all there is near it: its band's, which its 64 points part
                 # only roughly, not a corner.
@@ -727,6 +741,29 @@ def band_normals(read: Read, mixed: np.ndarray, centres: np.ndarray, faces: np.n
                 continue
             ways[e], kinds[e] = edge, COLUMN
     return ways, kinds
+
+
+def _by_faces(groups: np.ndarray, normals: np.ndarray, apart: np.ndarray, along: np.ndarray,
+              lean_sin: float) -> tuple[np.ndarray, int] | None:
+    """A mixed element's blend from its nearest triangles' faces (`band_normals`): one face,
+    its laminate, across the nearest of its triangles; two, a column along the edge they share
+    there, each face's nearest triangle's normal; a third leaning along that edge, None, in
+    series every way."""
+    faces = list(dict.fromkeys(groups.tolist()))
+    local = {f: normals[np.flatnonzero(groups == f)[apart[groups == f].argmin()]] for f in faces}
+    # The face its points part best by, and the other face whose normal is furthest from it.
+    first = int(groups[along.argmax()])
+    if len(faces) == 1:
+        return local[first], LAMINATE
+    second = min((f for f in faces if f != first), key=lambda f: abs(local[f] @ local[first]))
+    edge = np.cross(local[first], local[second])
+    size = np.linalg.norm(edge)
+    if size < 1e-9:
+        return local[first], LAMINATE
+    edge /= size
+    if any(abs(local[f] @ edge) > lean_sin for f in faces if f not in (first, second)):
+        return None
+    return edge, COLUMN
 
 
 def boundary(corners: np.ndarray, numbers: np.ndarray) -> tuple[np.ndarray, np.ndarray]:

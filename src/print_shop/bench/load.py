@@ -831,7 +831,21 @@ class _Model:
             core_points[mine] = true.core
             mixed = (step_of > 0) & (step_of < classify.STEPS)
             faces, normals = classify.boundary(own, numbers[mine])
-            ways, blend = classify.band_normals(read, mixed, own.mean(axis=1), faces, normals)
+            put_on = self._face_groups(k)
+            labelled: dict[int, int] = {}
+
+            def group_of(numbers_of: np.ndarray, faces: np.ndarray = faces,
+                         turn: np.ndarray = turn, at: np.ndarray = at,
+                         put_on: Any = put_on, labelled: dict[int, int] = labelled
+                         ) -> np.ndarray:
+                wanted = [int(n) for n in numbers_of if int(n) not in labelled]
+                if wanted:
+                    found = put_on(faces[wanted] @ turn.T + at)
+                    labelled.update(zip(wanted, found.tolist(), strict=True))
+                return np.array([labelled[int(n)] for n in numbers_of])
+
+            ways, blend = classify.band_normals(read, mixed, own.mean(axis=1), faces, normals,
+                                                group_of)  # fmt: skip
             way_bin, spread = classify.way_groups(ways)
             # Each way in the assembly's axes, where the part's stiffness is.
             assembly_ways = spread @ turn.T
@@ -975,6 +989,71 @@ class _Model:
         self.wedge_part = np.concatenate(parts)
         self.wedge_tensor = np.array(tensors)
         self.wedge_set = cells
+
+    def _face_groups(self, k: int) -> Any:
+        """A part's faces grouped where they meet smoothly, and what puts points on them.
+
+        Two of its faces sharing an edge are one where their normals at its middle are within
+        `classify.EDGE_DEGREES`, each turned by its face's orientation: a cylinder split at its
+        seam, a blend into a flat. The callable it gives puts each point on its nearest face,
+        by its exact distance among the faces whose box, grown `GROUP_REACH_MM`, holds it, and
+        says that face's group (`classify.band_normals`)."""
+        import FreeCAD as App
+        import Part
+
+        cache = self.__dict__.setdefault("_face_groups_cache", {})
+        if k in cache:
+            return cache[k]
+        solid = self.solids[k]
+        faces = list(solid.Faces)
+        parent = list(range(len(faces)))
+
+        def root(i: int) -> int:
+            while parent[i] != i:
+                parent[i] = parent[parent[i]]
+                i = parent[i]
+            return i
+
+        def normal_at(face: Any, point: Any) -> np.ndarray:
+            u, v = face.Surface.parameter(point)
+            n = face.normalAt(u, v)
+            given = np.array([n.x, n.y, n.z])
+            return -given if face.Orientation == "Reversed" else given
+
+        smooth = math.cos(math.radians(classify.EDGE_DEGREES))
+        on_edge: dict[int, list[tuple[Any, int]]] = {}
+        for i, face in enumerate(faces):
+            for edge in face.Edges:
+                on_edge.setdefault(edge.hashCode(), []).append((edge, i))
+        for shared in on_edge.values():
+            owners = sorted({i for _, i in shared})
+            if len(owners) != 2:
+                continue
+            edge = shared[0][0]
+            middle = edge.valueAt(0.5 * (edge.FirstParameter + edge.LastParameter))
+            try:
+                a, b = (normal_at(faces[i], middle) for i in owners)
+            except Exception:  # noqa: BLE001 - a face OCCT can't take a normal of stays its own
+                continue
+            if a @ b > smooth * np.linalg.norm(a) * np.linalg.norm(b):
+                parent[root(owners[0])] = root(owners[1])
+        group = np.array([root(i) for i in range(len(faces))])
+        boxes = np.array([[f.BoundBox.XMin, f.BoundBox.YMin, f.BoundBox.ZMin,
+                           f.BoundBox.XMax, f.BoundBox.YMax, f.BoundBox.ZMax] for f in faces])
+
+        def groups_of(where: np.ndarray) -> np.ndarray:
+            out = np.empty(len(where), dtype=int)
+            for i, point in enumerate(np.asarray(where, dtype=float)):
+                near = np.flatnonzero(np.all(point >= boxes[:, :3] - GROUP_REACH_MM, axis=1)
+                                      & np.all(point <= boxes[:, 3:] + GROUP_REACH_MM, axis=1))
+                if not len(near):
+                    near = np.arange(len(faces))
+                vertex = Part.Vertex(App.Vector(*point))
+                out[i] = group[min(near, key=lambda f: faces[f].distToShape(vertex)[0])]
+            return out
+
+        cache[k] = groups_of
+        return groups_of
 
     def _nodes_by_face(self, face: Any) -> list[int]:
         """The mesh's nodes on a face (FreeCAD's `getNodesByFace`), once for each face and
@@ -2707,6 +2786,9 @@ _SUMMED = re.compile(
 CROSSED = re.compile(r"intersect", re.I)
 #: How many of the faces nearest where gmsh's triangles cross are named.
 NEAREST = 4
+#: How far past a face's box a point may be and still be put on that face, in mm
+#: (`_Model._face_groups`): a straight-sided element's face is off a curved one by its sag.
+GROUP_REACH_MM = 0.5
 #: A printed part's mesh at its held faces, as many of its finest core's cells, no finer than
 #: `HELD_FINEST` mm, out to `HELD_DEPTH` cells or `HELD_ZONE` mm (`_Model.held_mesh`,
 #: mqucifer/print-shop#363): a held face's corner is singular, and a core whose cell is finer
