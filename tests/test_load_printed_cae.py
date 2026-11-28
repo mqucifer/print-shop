@@ -139,32 +139,6 @@ def worst(answer: Answer) -> float:
     return float(max(shares))
 
 
-#: How far under its own elements' nodal mean a core's cell may read where its cell is no
-#: coarser than its elements, a like scale: the planted 60% beam's, 1.36 mm cell, 0.154% over
-#: its cell against 0.162% at its elements' nodes (mqucifer/print-shop#363's review).
-LIKE_SCALE = 0.95
-
-
-def like_scale(core: dict[str, Any]) -> None:
-    """A core's reading over its cell against its own elements' nodal mean, like for like
-    (mqucifer/print-shop#363's review, the operator's ruling): main held a core no lower than
-    CalculiX's mean at a node, but that mixes skin and wedges at a singular corner, so it isn't
-    the core's figure; the core's own is, held where its cell is no coarser than its elements,
-    within `LIKE_SCALE`. Where the cell is coarser, a cell-scale read sits under element-scale
-    nodes wherever the strain varies within a cell, a property of reading at the cell's scale,
-    not a fault: planted, across the layers,
-
-        part           cell     over its cell  core's own nodes  all elements' nodes
-        4-60 beam      1.36 mm  0.154%         0.162%            0.235%
-        2-20 beam      4.07 mm  0.156%         0.230%            0.237%
-        pulled block   4.07 mm  0.343%         0.452%            0.369%
-        lines-0 beam   4.07 mm  0.360%         0.847%            1.176%
-
-    Which predicts a print is for the beam test bed, so the reply says both."""
-    if core["cell_mm"] <= core["across_cell_mesh_mm"]:
-        assert core["across_layers_pct"] >= LIKE_SCALE * core["core_nodal_across_pct"], core
-
-
 def read_or_cornered(answer: Answer) -> None:
     """Read, OK; or, where a held face's edge or a sharp inside corner has no one figure in any
     mesh, its two meshes either side of a limit, DISAGREE, the reply saying to round it: the
@@ -200,11 +174,9 @@ def bar(answer: Answer, walls: int, density: int) -> None:
     assert beam["cores"][0]["pattern"] == "grid"
     assert beam["cores"][0]["density_pct"] == density
     assert answer.numbers["moves_mm"] == pytest.approx(sandwich(walls, density), rel=AGREE)
-    # Its core averaged over its own cell, never under the section's own arithmetic at its root,
-    # and like for like, no lower than its own elements' nodal mean (`like_scale`).
+    # Its core averaged over its own cell, never under the section's own arithmetic at its root.
     core = beam["cores"][0]
     assert core["stretch_pct"] >= core_at_root(walls, density), core
-    like_scale(core)
     assert core["cell_mm"] == pytest.approx(infill.cell_mm(
         "grid", density, as_printed.wall_thickness(1, 0.45, 0.2)), abs=1e-3)
     printed = answer.numbers["printed"]["beam"][0]
@@ -317,7 +289,8 @@ def test_a_core_truly_overloaded_at_its_root_fails_there(cae: Any) -> None:
     """Twice the weight at which the section's arithmetic stretches the beam's core at its
     root to its limit: read over its own cell, the core is over its limit, at its root, and
     no less stretched than that arithmetic says. An overload spans many cells, so its cell's
-    average doesn't hide it."""
+    average doesn't hide it; and it reaches past its held face's zone, so judged from that
+    zone's edge on, Saint-Venant's way, it's still caught (mqucifer/print-shop#363's review)."""
     limit = infill.core(Settings(pattern="grid", infill=20, infill_angle=0),
                         MATERIALS["petg"]).along_pct  # fmt: skip
     kg = math.ceil(2 * limit / core_at_root(2, 20))
@@ -327,6 +300,8 @@ def test_a_core_truly_overloaded_at_its_root_fails_there(cae: Any) -> None:
     assert core["stretch_pct"] > core["stretch_limit_pct"], core
     assert core["stretch_pct"] >= core_at_root(2, 20, kg), core
     assert core["stretch_at"][0] < 10, core
+    assert core["stretch_at"][0] >= core["held_zone"]["depth_mm"] - 1e-6, core
+    assert "judged from its held faces' zone's edge on" in heavy.text
     assert "the part beam's core in the part is stretched" in heavy.text
 
 
@@ -455,11 +430,16 @@ def test_a_core_pulled_across_its_layers_is_read_at_its_own_elements(cae: Any) -
     column = 1.6 / MODULUS + 8.4 / across
     stretch = 50 * G / (inner / column + MODULUS * (40**2 - inner) / 10)
     assert core["across_layers_pct"] > 100 * stretch / column / across
-    # The core's own nodal mean beside it: its elements' own strains at a node, no skin's or
-    # wedge's, away from held zones and three-face corners. Held where the core's cell is no
-    # coarser than its elements, a like scale (`like_scale`); here its 4.07 mm cell is coarser
-    # than its 2.5 mm elements, so it's said, not held.
-    like_scale(core)
+    # The core's own nodal mean is said beside it and held nowhere (the operator's ruling):
+    # main held a core no lower than CalculiX's mean at a node, but that mixes skin and wedges
+    # at a singular corner, so it isn't the core's figure. Its own elements' nodes, no skin's
+    # or wedge's, read over its cell, planted, across the layers (an open finding, for the beam
+    # test bed): the 4-60 beam 0.154% over its 1.36 mm cell and 0.162% at its nodes; the 2-20
+    # beam 0.156% and 0.230%, its highest nodes on its bottom face's edges, in elements stepped
+    # to all core whose corners lie in its shells; this block 0.343% and 0.452%, 0.355% at its
+    # all-core elements', the rest its mixed elements' core recovered beside its shells; the
+    # lines-0 beam 0.360% and 0.847%. The guard held in full is the section's arithmetic.
+    assert core["core_nodal_across_pct"] > 0, core
 
 
 @pytest.mark.parametrize(

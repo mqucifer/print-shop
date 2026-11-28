@@ -573,10 +573,6 @@ class _Model:
         #: worst cell held too few elements for its reading to be its cell's (`refined`,
         #: mqucifer/print-shop#363).
         self.refine_at: list[Refine] = []
-        #: Boxes, each a middle in the assembly's axes and how far it reaches each way, whose
-        #: skin isn't read: a held face's zone meshed finer for its core, whose skin, a point
-        #: reading at a singular edge, is read from the mesh as it was (`skin_kept`).
-        self.skin_unread: list[tuple[np.ndarray, float]] = []
         #: Each mixed or core element's step of core share, 0 for skin, `classify.STEPS` for
         #: core, -1 for a part read solid; and each printed part's cells as read (`_classify`).
         self.element_step: np.ndarray | None = None
@@ -2492,7 +2488,18 @@ class _Model:
                 np.concatenate(weights), size, up=layered.layers, core_at=core_at,
                 step=layered.height)  # fmt: skip
             averaged.at = averaged.at @ turn.T + at
+        # Judged outside the held faces' zone; what's in it said as a point reading.
+        inside = self._in_held_zone(averaged.at) if len(averaged.at) else np.zeros(0, dtype=bool)
+        zone_read = None
+        if inside.any() and not inside.all():
+            zone_read = figures.read(averaged.strain[inside], way, first, second)
+            averaged = classify.Averaged(averaged.strain[~inside], averaged.at[~inside],
+                                         averaged.fill[~inside], averaged.rows[~inside])
         read: dict[str, Any] = dict(figures.read(averaged.strain, way, first, second))
+        if zone_read is not None:
+            read["held_zone"] = {"depth_mm": round(self.held_zone_mm(), 3),
+                                 "across_layers_pct": zone_read["across_layers_pct"],
+                                 "stretch_pct": zone_read["stretch_pct"]}
         for key, fill in (("across_at", "across_cell_fill"), ("stretch_at", "stretch_cell_fill")):
             row = read.pop(key)
             read[key] = _list(averaged.at[row], 3)
@@ -2614,24 +2621,45 @@ class _Model:
                 f.distToShape(vertex)[0] for f in held_faces) <= zone + reach  # fmt: skip
         return ordered
 
-    def _skin_read_at(self, places: np.ndarray) -> np.ndarray:
-        """Which of the skin's `places` are read: none within `skin_unread`'s boxes and a held
-        face's zone at once, each held face's box grown by its zone; all of them where that
-        would leave none, as `skin_kept` takes the first read's there."""
-        if not self.skin_unread:
-            return np.ones(len(places), dtype=bool)
-        zone = max((self.held_mesh() or (0.0, 0.0))[1], HELD_ZONE)
-        near_held = np.zeros(len(places), dtype=bool)
+    def held_zone_mm(self) -> float:
+        """How deep a printed part's held faces' zone is, in mm: where a held face's idealised,
+        rigid hold is singular, at its edges and corners, and the part isn't judged, Saint-
+        Venant's way, but read from the zone's edge on (mqucifer/print-shop#363's review, the
+        operator's ruling): `HELD_DEPTH` of its finest core's cell, or `HELD_ZONE`, whichever
+        is more; none where nothing's held."""
+        if not [*self.fixed, *sum(self.standing.values(), [])]:
+            return 0.0
+        return max((self.held_mesh() or (0.0, 0.0))[1], HELD_ZONE)
+
+    def _in_held_zone(self, places: np.ndarray) -> np.ndarray:
+        """Which of `places` lie within a held face's zone (`held_zone_mm`): each held face's
+        box grown by the zone's depth."""
+        zone = self.held_zone_mm()
+        found = np.zeros(len(places), dtype=bool)
+        if zone <= 0:
+            return found
         for face in [*self.fixed, *sum(self.standing.values(), [])]:
             box = face.BoundBox
             low = np.array([box.XMin, box.YMin, box.ZMin]) - zone
             high = np.array([box.XMax, box.YMax, box.ZMax]) + zone
-            near_held |= np.all((places >= low) & (places <= high), axis=1)
-        boxed = np.zeros(len(places), dtype=bool)
-        for middle, half in self.skin_unread:
-            boxed |= np.all(np.abs(places - middle) <= half, axis=1)
-        kept = ~(boxed & near_held)
-        return kept if kept.any() else np.ones(len(places), dtype=bool)
+            found |= np.all((places >= low) & (places <= high), axis=1)
+        return found
+
+    def _judged(self, part: PartAt, strain: np.ndarray, places: np.ndarray,
+                read: Any = None) -> dict[str, Any]:
+        """Strains at `places` read outside the held faces' zone, the verdict's, with what's
+        in it beside them as a point reading, never judged (`held_zone`); all of them where
+        none lies outside. `read` reads them, `_read_tensors` unless given."""
+        read = read or (lambda s_, p_: self._read_tensors(part, s_, p_))
+        inside = self._in_held_zone(places)
+        if inside.all() or not inside.any():
+            return dict(read(strain, places))
+        found = dict(read(strain[~inside], places[~inside]))
+        zone = read(strain[inside], places[inside])
+        found["held_zone"] = {"depth_mm": round(self.held_zone_mm(), 3),
+                              "across_layers_pct": zone["across_layers_pct"],
+                              "stretch_pct": zone["stretch_pct"]}
+        return found
 
     def _read_rows(self, part: PartAt, rows: np.ndarray) -> dict[str, Any]:
         """The worst pull across its layers and largest stretch any way, of a part's `rows`."""
@@ -2648,10 +2676,11 @@ class _Model:
         web too thin for infill: the worse of each, against the material's own limits."""
         k = [p.name for p in self.assembly.parts].index(part.name)
         rows = self.skin_rows.get(part.name, np.zeros(0, dtype=int))
-        rows = rows[self._skin_read_at(self.points[rows])] if len(rows) else rows
         read = []
         if len(rows):
-            read.append(self._read_rows(part, rows))
+            found_rows = self._judged(part, self.strain[rows], self.points[rows])
+            found_rows["nodes"] = len(rows)
+            read.append(found_rows)
         mine = np.flatnonzero(self.wedge_part == k)
         if len(mine):
             moved = self.printed if self.printed is not None else self.moved
@@ -2663,8 +2692,7 @@ class _Model:
                 strain.append(one.reshape(-1, 3, 3))
                 at.append(where.reshape(-1, 3))
             places, tensors = np.concatenate(at), np.concatenate(strain)
-            kept = self._skin_read_at(places)
-            found = self._read_tensors(part, tensors[kept], places[kept])
+            found = self._judged(part, tensors, places)
             found["nodes"] = len(np.unique(wired))
             read.append(found)
         if not read:
@@ -2673,6 +2701,12 @@ class _Model:
         most = max(read, key=lambda r: r["stretch_pct"])
         for key in ("stretch_pct", "stretch_is", "stretch_at", "stretch_from_layers_deg"):
             best[key] = most[key]
+        zones = [r["held_zone"] for r in read if "held_zone" in r]
+        if zones:
+            best["held_zone"] = {
+                "depth_mm": zones[0]["depth_mm"],
+                "across_layers_pct": max(z["across_layers_pct"] for z in zones),
+                "stretch_pct": max(z["stretch_pct"] for z in zones)}
         best["nodes"] = sum(r["nodes"] for r in read)
         best["wedges"] = len(mine)
         return best
@@ -3387,8 +3421,7 @@ def _solved(
     def model(straight: bool) -> _Model:
         made = _Model(assembly, placed, args, size, straight, two_pass, spread, cores)
         made.refine_at = list(refine or [])
-        made.skin_unread = [(np.asarray(at, dtype=float), half) for at, _, half, why
-                            in (refine or []) if why.get("held")]  # fmt: skip
+
         if weighed is not None:
             made.weighed = weighed
         coarser(made, coarser_of)
@@ -3492,30 +3525,15 @@ def refined(fine: dict[str, Any], coarse: dict[str, Any], size: float) -> list[R
     return [place for _, place in ordered[:REFINE_MOST]]
 
 
-def skin_kept(first: dict[str, Any], refined: dict[str, Any], places: list[Refine]) -> None:
-    """A refined read's printed parts' skin, with its first read's where that was in a held
-    face's zone meshed finer for its core, and the higher (mqucifer/print-shop#363, the
-    operator's ruling): there the refined read leaves its skin out (`_Model.skin_unread`), as
-    a point reading at a singular edge only rises with a finer mesh; its own averaging scale is
-    mqucifer/print-shop#378."""
-    boxes = [(np.asarray(at, dtype=float), half) for at, _, half, why in places
-             if why.get("held")]  # fmt: skip
-    if not boxes:
-        return
-    for name, part in refined.get("parts", {}).items():
-        was = first.get("parts", {}).get(name) or {}
-        if not part.get("printed") or not was:
-            continue
-        for value, at, extra in (("across_layers_pct", "across_at", ()),
-                                 ("stretch_pct", "stretch_at",
-                                  ("stretch_is", "stretch_from_layers_deg"))):
-            where = np.asarray(was.get(at, [np.inf] * 3), dtype=float)
-            inside = any(np.all(np.abs(where - middle) <= half) for middle, half in boxes)
-            if inside and float(was.get(value, 0)) > float(part.get(value, 0)):
-                part[value], part[at] = was[value], was[at]
-                for key in extra:
-                    if key in was:
-                        part[key] = was[key]
+def held_zone_said(zone: dict[str, Any] | None) -> str:
+    """What the reply says of a printed part's held faces' zone (`_Model.held_zone_mm`): read
+    there as a point reading at the idealised hold's singular edge, never judged."""
+    if not zone:
+        return ""
+    return (f"; judged from its held faces' zone's edge on, {zone['depth_mm']:g} mm from them, "
+            f"Saint-Venant's way: within it, at the idealised hold's singular edge, a point "
+            f"reading of {zone['across_layers_pct']:.3f}% across its layers and "
+            f"{zone['stretch_pct']:.3f}% any way, at the mesh's scale, not judged")
 
 
 def coarser_refine(places: list[Refine]) -> list[Refine]:
@@ -3964,15 +3982,13 @@ def _run(
             # finer round every place it reads near its limit, and read again, both meshes.
             with step("meshing again finer round a printed core's worst cells"):
                 pass
-            first_fine, first_coarse = fine, coarse
             fine = {**_solved(assembly, placed, args, size, cores=cores, refine=places),
                     "refined": places}
             coarse = _solved(
                 assembly, placed, args, round(size * COARSER, 3), cores=cores,
                 coarser_of=fine["closes"], refine=coarser_refine(places),
             )
-            skin_kept(first_fine, fine, places)
-            skin_kept(first_coarse, coarse, places)
+
     force = float(sum(np.linalg.norm(one["force"]) for one in fine["raw_loads"]))
     if fine.get("refined"):
         report.numbers["refined"] = [{"at": at, "mesh_mm": near, "reach_mm": half, **why}
@@ -4266,10 +4282,11 @@ def _as_printed(assembly: Assembly, report: Report, printed: dict[str, list[dict
     report.numbers["printed"] = found
     if found and assembly.held:
         report.note(
-            "a printed part's skin at a held face's edge is read at its wedges' own points, a "
-            "point reading at the mesh's scale: a held edge is singular, so it has no one "
-            "figure, and a mesh refined there for the core leaves its skin as the mesh first "
-            "read it; its own averaging scale is mqucifer/print-shop#378"
+            "a printed part is judged from its held faces' zone's edge on, Saint-Venant's way: "
+            "a held face's rigid hold is an idealisation, singular at its edges and corners, so "
+            "within that zone its skin and core are said as point readings at the mesh's scale "
+            "and never judged; a real overload at the root reaches past it. The skin's own "
+            "averaging scale is mqucifer/print-shop#378"
         )
     patterns = sorted({c["pattern"] for cells in found.values() for c in cells})
     reach = "; ".join(
@@ -4368,7 +4385,7 @@ def _parts(
             f"{one['across_limit_pct']:g}%; its largest stretch any way is a {one['stretch_is']} "
             f"of {one['stretch_pct']:.3f}%, at {_xyz(one['stretch_at'])}, {lies:.0f}° out of "
             f"its layers' plane ({'across them' if lies > 45 else 'along them'}), against "
-            f"{one['stretch_limit_pct']:g}%"
+            f"{one['stretch_limit_pct']:g}%" + held_zone_said(one.get("held_zone"))
         )
         report.second(
             f"the part {name}{skin} on the coarser mesh: {other['across_layers_pct']:.3f}% "
@@ -4424,6 +4441,7 @@ def _core(
     core["coarse_across_layers_pct"] = rough["across_layers_pct"]
     core["coarse_stretch_pct"] = rough["stretch_pct"]
     where = f"the part {name}'s core in {core['cell']}"
+    zone_said = held_zone_said(core.get("held_zone"))
     report.line(
         f"{where} ({core['said']}): pulled across its layers by "
         f"{core['across_layers_pct']:.3f}% at most, at {_xyz(core['across_at'])}, against "
@@ -4431,7 +4449,7 @@ def _core(
         f"of {core['stretch_pct']:.3f}% at {_xyz(core['stretch_at'])}, "
         f"{core['stretch_from_layers_deg']:.0f}° out of its layers' plane and "
         f"{core['stretch_from_lines_deg']:.0f}° off its lines, against "
-        f"{core['stretch_limit_pct']:.3g}%"
+        f"{core['stretch_limit_pct']:.3g}%" + zone_said
         + (f"; each averaged over its own cell, {core['cell_mm']:.2f} mm each way, "
            f"{100 * core['across_cell_fill']:.0f}% and {100 * core['stretch_cell_fill']:.0f}% "
            f"of it core there, its peak at its elements "
