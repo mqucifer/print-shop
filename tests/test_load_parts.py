@@ -1549,6 +1549,8 @@ def test_the_room_load_has_is_the_container_s_own_count_of_what_s_left(tmp_path:
     gib = 2**30
     folder = _cgroup(tmp_path, str(4 * gib), 3 * gib, gib // 4)
     assert cae.room(folder) == 4 * gib - 3 * gib + gib // 4 - cae.ROOM_MARGIN
+    # Held high, where a lower bound can follow, the file pages aren't counted on.
+    assert cae.room(folder, files=False) == 4 * gib - 3 * gib - cae.ROOM_MARGIN
     assert cae.room(_cgroup(tmp_path, "max", gib, 0)) is None
     assert cae.room(tmp_path / "none") is None
 
@@ -1576,8 +1578,17 @@ def test_a_mesh_that_won_t_fit_read_back_isn_t_read_and_is_said_for_memory(
         sys.modules, "FreeCAD", types.SimpleNamespace(ParamGet=lambda path: params)
     )
     monkeypatch.setattr(cae, "DISK", tmp_path / "none")
+    asked: list[bool] = []
+
+    def asking(left: float) -> Any:
+        def room(files: bool = True) -> float:
+            asked.append(files)
+            return left
+
+        return room
+
     for left, reads in ((cae.READ_BACK * 1000 - 1, False), (cae.READ_BACK * 1000 + 1, True)):
-        monkeypatch.setattr(cae, "room", lambda left=left: left)
+        monkeypatch.setattr(cae, "room", asking(left))
         read: list[bool] = []
         tools = types.SimpleNamespace(
             prepare=lambda: None, gmsh_bin=str(binary), temp_file_geo="shape.geo",
@@ -1587,8 +1598,20 @@ def test_a_mesh_that_won_t_fit_read_back_isn_t_read_and_is_said_for_memory(
         assert cae.gmsh(tools, first=True) is reads
         assert read == ([True] if reads else [])
         if not reads:
-            assert tools.memory == (cae.READ_BACK * 1000, left)
+            assert tools.memory == (cae.READ_BACK * 1000, left, False)
             assert "Error   : the mesh gmsh made takes about " in tools.said
+    assert asked == [True, True]
+    # With a lower bound to fall to, held high: above the most measured, a half again.
+    monkeypatch.setattr(cae, "room", asking(3000))
+    tools = types.SimpleNamespace(
+        prepare=lambda: None, gmsh_bin=str(binary), temp_file_geo="shape.geo",
+        temp_file_mesh=str(unv), update_properties=lambda: None,
+        get_tmp_file_paths=lambda *given: None,
+    )  # fmt: skip
+    assert cae.READ_BACK_HIGH * 1000 > 3000 > cae.READ_BACK * 1000
+    assert cae.gmsh(tools, first=True, high=True) is False
+    assert tools.memory == (cae.READ_BACK_HIGH * 1000, 3000, True) and asked[-1] is False
+    assert "may not fit" in tools.said
 
 
 def test_a_set_up_that_won_t_fit_is_the_whole_unread_for_memory(
@@ -1605,12 +1628,19 @@ def test_a_set_up_that_won_t_fit_is_the_whole_unread_for_memory(
 
     fem = types.SimpleNamespace(NodeCount=1000, VolumeCount=500)
     need = 1000 * load.SET_UP_NODE + 500 * load.SET_UP_FACES
-    for two_pass, left, fits in ((True, need - 1, False), (True, need, True),
-                                 (False, 1000 * load.SET_UP_NODE, True)):  # fmt: skip
-        monkeypatch.setattr(cae, "room", lambda left=left: left)
+    high = 1000 * load.SET_UP_NODE_HIGH + 500 * load.SET_UP_FACES_HIGH
+    cases = [
+        (True, need - 1, False, False), (True, need, True, False),
+        (False, 1000 * load.SET_UP_NODE, True, False),
+        (True, high - 1, False, True), (True, high, True, True),
+    ]  # fmt: skip
+    for two_pass, left, fits, falls in cases:
+        monkeypatch.setattr(cae, "room", lambda files=True, left=left: left)
+        monkeypatch.setattr(load._Model, "_falls_back", lambda self, falls=falls: falls)
         model: Any = types.SimpleNamespace(
-            size=3.0, straight=False, two_pass=two_pass, solids=[1, 2]
-        )
+            size=3.0, straight=False, two_pass=two_pass, solids=[1, 2],
+            _falls_back=lambda falls=falls: falls,
+        )  # fmt: skip
         if fits:
             load._Model._set_up_fits(model, fem)
             continue
@@ -1620,12 +1650,13 @@ def test_a_set_up_that_won_t_fit_is_the_whole_unread_for_memory(
         assert met.value.evidence.startswith(
             "the mesh of the joined parts at a mesh of at most 3 mm"
         )
-    monkeypatch.setattr(cae, "room", lambda: None)
-    unasked: Any = types.SimpleNamespace(two_pass=True, solids=[1, 2])
+        assert ("may not fit" in met.value.evidence) is falls
+    monkeypatch.setattr(cae, "room", lambda files=True: None)
+    unasked: Any = types.SimpleNamespace(two_pass=True, solids=[1, 2], _falls_back=lambda: True)
     load._Model._set_up_fits(unasked, fem)
     model = types.SimpleNamespace(size=3.0, straight=False)
     mesh = types.SimpleNamespace(FemMesh=types.SimpleNamespace(VolumeCount=0))
-    tools = types.SimpleNamespace(memory=(3 * 2**30, 2**30))
+    tools = types.SimpleNamespace(memory=(3 * 2**30, 2**30, False))
     with pytest.raises(load._Unread) as refused:
         load._Model._mesh_met(model, mesh, None, tools)
     assert refused.value.memory and "takes about 3.00 GiB read back" in refused.value.evidence
@@ -1643,3 +1674,46 @@ def test_a_step_that_meets_python_s_memory_is_the_whole_unread_for_it() -> None:
     with pytest.raises(NoAnswer) as other, load.step("reading"):
         raise RuntimeError("something else")
     assert not isinstance(other.value, load._Unread)
+
+
+def test_where_a_lower_bound_can_follow_a_mesh_s_need_is_held_high(tmp_path: Path) -> None:
+    """The operator's ruling on the design run's assembly: a step let through that doesn't fit
+    costs the container, and a step refused that would just have fitted costs only a lower
+    bound, said. So where a part names its band and this isn't the band's own read, each step's
+    need is held a half above the most measured; anywhere else, a tenth under the least."""
+    import types
+
+    def model(banded: bool) -> Any:
+        return types.SimpleNamespace(assembly=types.SimpleNamespace(parts=[
+            types.SimpleNamespace(band="band.step" if banded else None),
+            types.SimpleNamespace(band=None),
+        ]))  # fmt: skip
+
+    load._bands.clear()
+    assert load._Model._falls_back(model(True)) is True
+    assert load._Model._falls_back(model(False)) is False
+    load._bands["frame"] = load.Band([], 1.0, 2.0, np.zeros(3))
+    try:
+        assert load._Model._falls_back(model(True)) is False, "the band's read has nothing after"
+    finally:
+        load._bands.clear()
+    assert load.SET_UP_NODE_HIGH >= 1.5 * 430 and load.SET_UP_FACES_HIGH >= 1.5 * 735
+    assert load.SET_UP_NODE <= 0.9 * 374 and load.SET_UP_FACES <= 0.9 * 735
+
+
+def test_the_bands_probe_gives_each_mesh_s_counts_as_it_was_set_up() -> None:
+    """So a set-up that's killed can be held against its need: the probe gives each mesh's
+    elements and nodes as `load` set it up, and the container's memory at its start, from the
+    step `load` says, and no other figure."""
+    probe = _bands_probe()
+    trace = [
+        "bench: step 940.0 meshing and solving the joined parts, at a mesh of at most 7.25 mm",
+        "bench: memory 941.0 current=3000000000 peak=3500000000",
+        "bench: step 948.1 setting the mesh up in load's own process: 812345 elements, "
+        "1234567 nodes",
+        "bench: memory 948.1 current=3736000000 peak=3900000000",
+    ]
+    assert probe.set_ups(trace) == [
+        "the mesh set up at 948.1 s: 812345 elements, 1234567 nodes; the container held 3.48 GiB "
+        "at its start"
+    ]

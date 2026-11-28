@@ -161,11 +161,15 @@ NOTHING = 1e-3
 #: A push's point is on the faces that meet within this, in mm.
 ON_FACE = 0.01
 #: What setting a mesh up takes in `load`'s own process, in bytes (`_Model._set_up_fits`): each
-#: node's place, 371 to 430 measured on three meshes in the image, and in two passes each
-#: element's faces, 636 on a mesh of 646,197 elements (a design run's assembly on
-#: mqucifer/print-shop#376). Each held about a tenth under the least.
-SET_UP_NODE = 340
-SET_UP_FACES = 560
+#: node's place, 374 to 430 measured on three meshes in the image, at its peak 421, and in two
+#: passes the rest of it, each element's faces and its neighbours, 735 at its peak on a mesh of
+#: 646,197 elements (a design run's assembly on mqucifer/print-shop#376). Each held about a
+#: tenth under the least; and, where a lower bound can follow, a half above the most (the
+#: operator's ruling), as a step let through that doesn't fit costs the container.
+SET_UP_NODE = 335
+SET_UP_FACES = 660
+SET_UP_NODE_HIGH = 650
+SET_UP_FACES_HIGH = 1110
 #: How a mesh whose elements' sides are straight is said where a step names it.
 STRAIGHT = ", its elements straight-sided"
 #: A face of a part read without its glass band is where the band met it where a point inside it
@@ -978,18 +982,24 @@ class _Model:
                 f"the parts' faces or straight: {words[:900]}"
             )
         self._set_up_fits(fem)
-        self.nodes = {n: np.array([p.x, p.y, p.z]) for n, p in fem.Nodes.items()}
-        if self.two_pass and len(self.solids) > 1:
-            # Each part has elements of its own, before anything is solved: a mesh that doesn't
-            # part them is refused at once in two passes (mqucifer/print-shop#301), which then
-            # leave time for a glass band's lower bound.
-            order = sorted(self.nodes)
-            row = {n: i for i, n in enumerate(order)}
-            corners = np.array([[row[n] for n in fem.getElementNodes(e)[:4]] for e in fem.Volumes])
-            try:
-                self._owned(corners, row, np.array([self.nodes[n] for n in order]))
-            except _Unparted as unparted:
-                raise self._unparted_read(unparted) from unparted
+        with step(
+            f"setting the mesh up in load's own process: {fem.VolumeCount} elements, "
+            f"{fem.NodeCount} nodes"
+        ):
+            self.nodes = {n: np.array([p.x, p.y, p.z]) for n, p in fem.Nodes.items()}
+            if self.two_pass and len(self.solids) > 1:
+                # Each part has elements of its own, before anything is solved: a mesh that
+                # doesn't part them is refused at once in two passes (mqucifer/print-shop#301),
+                # which then leave time for a glass band's lower bound.
+                order = sorted(self.nodes)
+                row = {n: i for i, n in enumerate(order)}
+                corners = np.array(
+                    [[row[n] for n in fem.getElementNodes(e)[:4]] for e in fem.Volumes]
+                )
+                try:
+                    self._owned(corners, row, np.array([self.nodes[n] for n in order]))
+                except _Unparted as unparted:
+                    raise self._unparted_read(unparted) from unparted
         fea = ccxtools.FemToolsCcx(analysis, solver)
         fea.update_objects()
         # On disk, where /tmp is the container's memory (`cae.scratch`, mqucifer/print-shop#376).
@@ -1077,9 +1087,13 @@ class _Model:
         allocated, where the kernel would have stopped `load`; off the container, nothing's
         asked."""
         faces = self.two_pass and len(self.solids) > 1
-        need = fem.NodeCount * SET_UP_NODE + (fem.VolumeCount * SET_UP_FACES if faces else 0)
+        high = self._falls_back()
+        node, face = (
+            (SET_UP_NODE_HIGH, SET_UP_FACES_HIGH) if high else (SET_UP_NODE, SET_UP_FACES)
+        )
+        need = fem.NodeCount * node + (fem.VolumeCount * face if faces else 0)
         give_back()
-        left = cae.room()
+        left = cae.room(files=not high)
         if left is None or left >= need:
             return
         _memory_unread(
@@ -1088,7 +1102,14 @@ class _Model:
             f"{fem.NodeCount:,} nodes, takes about {need / 2**30:.2f} GiB to set up in load's "
             f"own process, and the container's memory has {max(left, 0) / 2**30:.2f} GiB left, "
             "by its own count: so it isn't set up"
+            + (", as held high, where a lower bound can follow, it may not fit" if high else "")
         )
+
+    def _falls_back(self) -> bool:
+        """Whether a lower bound can follow where the whole is unread: a part names its glass
+        band, and this isn't the band's own read (`_bands`). A mesh's needs are held high then,
+        and low anywhere else, where the try is all there is (the operator's ruling)."""
+        return any(p.band is not None for p in self.assembly.parts) and not _bands
 
     def _mesh_met(self, mesh: Any, kills: int | None, tools: Any = None) -> None:
         """Where gmsh made no mesh and the kernel stopped a process in the container for memory
@@ -1101,12 +1122,13 @@ class _Model:
             return
         refused = getattr(tools, "memory", None)
         if refused is not None:
-            need, left = refused
+            need, left, high = refused
             _memory_unread(
                 f"gmsh meshed the joined parts at a mesh of at most {self.size:g} mm"
                 f"{STRAIGHT if self.straight else ''}, and its mesh takes about "
                 f"{need / 2**30:.2f} GiB read back, where the container's memory has "
                 f"{max(left, 0) / 2**30:.2f} GiB left, by its own count: so it isn't read back"
+                + (", as held high, where a lower bound can follow, it may not fit" if high else "")
             )
         full = memory_met(kills)
         if full is None:
@@ -1143,7 +1165,7 @@ class _Model:
             tools.write_geo = write_geo
         # First to go, so a mesh that meets the container's memory stops gmsh, and this read
         # goes on to say so (mqucifer/print-shop#375).
-        gmsh(tools, first=True)
+        gmsh(tools, first=True, high=self._falls_back())
         tidy_mesh(tools)
         return tools
 

@@ -76,12 +76,17 @@ ROOM_MARGIN = 64 * 2**20
 #: straight-sided (a design run's assembly on mqucifer/print-shop#376). Held a tenth under the
 #: least, so a mesh is refused only where even this doesn't fit.
 READ_BACK = 2.3
+#: And held high, where a lower bound can follow (the operator's ruling): the most measured and
+#: a half again. A step refused that would just have fitted costs a lower bound, said; one let
+#: through that doesn't fit costs the container.
+READ_BACK_HIGH = 3.6
 
 
-def room(cgroup: Path | None = None) -> int | None:
+def room(cgroup: Path | None = None, files: bool = True) -> int | None:
     """What the container's memory has left, in bytes, by its own counts: its limit less what
     it holds, plus the file pages it holds that the kernel drops before it stops a process, less
-    `ROOM_MARGIN`. None off the container, or with no limit. A failed allocation in FreeCAD's
+    `ROOM_MARGIN`; without `files`, held high, the file pages aren't counted on. None off the
+    container, or with no limit. A failed allocation in FreeCAD's
     own code aborts the process, never a Python error (tried in the image: the mesh reader, the
     nodes on a face, the elements' nodes), so a big step's need is held against this before
     it's begun, not caught after."""
@@ -95,7 +100,8 @@ def room(cgroup: Path | None = None) -> int | None:
     if not most.isdigit():
         return None
     found = re.search(r"^inactive_file (\d+)$", stat, re.M)
-    return int(most) - now + (int(found.group(1)) if found else 0) - ROOM_MARGIN
+    spare = int(found.group(1)) if found and files else 0
+    return int(most) - now + spare - ROOM_MARGIN
 
 
 def scratch(prefix: str) -> str:
@@ -142,12 +148,15 @@ def _drop_empty(root: Path) -> None:
         root.rmdir()
 
 
-def gmsh(tools: Any, first: bool = False) -> Any:
+def gmsh(tools: Any, first: bool = False, high: bool = False) -> Any:
     """gmsh's mesh, as FreeCAD's `GmshTools.create_mesh` makes it, with what this process has
     freed given back first (`give_back`). With `first`, gmsh is started as CalculiX is, the
     first the kernel stops where the container runs out of memory (`first_to_go`,
     mqucifer/print-shop#375): FreeCAD starts it by Qt, which can't be told so, so it's run here
     as FreeCAD's own run does, the same program, the same input and the same mesh read back.
+    Before its mesh is read back, its need is held against the container's room (`room`),
+    `high` where a lower bound can follow (`READ_BACK_HIGH`), and where it may not fit it isn't
+    read, `tools.memory` saying need, room and whether it was held high.
     Where it ends with an error, or is stopped, no mesh is read and what it said is kept as
     `tools.said`, with its exit code as `tools.returncode`. Its files, the parts' shape it's
     given and the mesh it makes, are written on disk (`scratch`), and each part of it is a step
@@ -185,13 +194,16 @@ def gmsh(tools: Any, first: bool = False) -> Any:
         size = os.path.getsize(tools.temp_file_mesh)
     except (OSError, AttributeError):
         size = 0  # no mesh file: FreeCAD's reader says so, as before
-    need, left = READ_BACK * size, room()
+    share = READ_BACK_HIGH if high else READ_BACK
+    need, left = share * size, room(files=not high)
     if size and left is not None and left < need:
-        tools.memory = (need, left)
+        tools.memory = (need, left, high)
         tools.said += (
             f"\nError   : the mesh gmsh made takes about {need / 2**30:.2f} GiB read back, "
-            f"{READ_BACK:g} times its {size / 2**20:.0f} MB file, and the container has "
-            f"{max(left, 0) / 2**30:.2f} GiB left\n"
+            f"{share:g} times its {size / 2**20:.0f} MB file, and the container has "
+            f"{max(left, 0) / 2**30:.2f} GiB left"
+            + ("; held high, as a lower bound can follow, so it may not fit" if high else "")
+            + "\n"
         )
         return False
     try:

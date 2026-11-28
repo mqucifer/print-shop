@@ -36,8 +36,8 @@ held: list[subprocess.Popen[str]] = []
 state = {"first": False}
 
 
-def room(cgroup: Any = None) -> Any:
-    left = ROOM(cgroup)
+def room(cgroup: Any = None, files: bool = True) -> Any:
+    left = ROOM(cgroup, files)
     if state["first"] and not held and left is not None:
         take = max(left - LEAVES, 0)
         holder = subprocess.Popen(
@@ -48,7 +48,7 @@ def room(cgroup: Any = None) -> Any:
         assert holder.stdout is not None
         assert holder.stdout.readline().strip() == "held"
         held.append(holder)
-        left = ROOM(cgroup)
+        left = ROOM(cgroup, files)
     return left
 
 

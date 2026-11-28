@@ -12,7 +12,8 @@ never its reasons; whether the container was killed; whether the whole was read,
 two, or each band left out, under a weight or lifted with its weight kept; what stopped the
 whole, as a kind (`time`, `memory meshing`, `memory reading the mesh back`, `memory setting
 the mesh up`, `memory in load's own process`, `memory solving`, `no mesh`, `unparted`, `other`),
-never its words; how many parts were read without their band and how many of those had their
+never its words; each mesh's elements and nodes as `load` set it up, counts, and the container's
+memory then; how many parts were read without their band and how many of those had their
 band's weight hung from where it met them; the try's and the band's seconds; and each step as
 `load_trace.py` says it. No figure of a part, joint, load or mesh size is printed, and the reply
 `load` saves stays where `load` saves it.
@@ -51,6 +52,34 @@ def kinds(why: str) -> list[str]:
     found = []
     for part in why.split("; and in two passes, "):
         found.append(next((k for k, words in KINDS if words.search(part)), "other"))
+    return found
+
+
+#: The step `load` says as it sets a mesh up, with its counts (`load._Model.solve`).
+SET_UP = re.compile(
+    r"^setting the mesh up in load's own process: (\d+) elements, (\d+) nodes$"
+)
+
+
+def set_ups(trace: list[str]) -> list[str]:
+    """Each mesh `load` set up, as it began: its elements and nodes, counts, and the container's
+    memory then, so a set-up the kernel stopped can be held against its need. No other figure."""
+    found = []
+    began: tuple[str, str, str] | None = None
+    for line in trace:
+        if line.startswith(host.STEP_LINE + " "):
+            seconds, _, what = line[len(host.STEP_LINE) + 1 :].partition(" ")
+            matched = SET_UP.match(what)
+            began = (seconds, matched.group(1), matched.group(2)) if matched else None
+        elif line.startswith(host.MEMORY_LINE + " ") and began is not None:
+            fields = dict(f.split("=", 1) for f in line.split()[3:] if "=" in f)
+            now = fields.get("current", "")
+            held = f"{int(now) / 2**30:.2f} GiB" if now.isdigit() else "unknown"
+            found.append(
+                f"the mesh set up at {began[0]} s: {began[1]} elements, {began[2]} nodes; the "
+                f"container held {held} at its start"
+            )
+            began = None
     return found
 
 
@@ -97,6 +126,8 @@ def main(argv: list[str]) -> int:
             print(line)
     else:
         print("nothing saved")
+    for line in set_ups(trace):
+        print(line)
     for line in report(trace, names(Path(argv[1]))):
         print(line)
     return 0
