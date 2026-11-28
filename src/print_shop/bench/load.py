@@ -734,7 +734,9 @@ class _Model:
         near = max(HELD_CELLS * cell, HELD_FINEST)
         if near >= self.size:
             return None
-        return near, max(HELD_DEPTH * cell, HELD_ZONE)
+        # Past the zone the part isn't judged within (`held_zone_mm`) by its own depth again,
+        # so where it's judged from, the zone's edge, its two meshes read it alike.
+        return near, 2 * max(HELD_DEPTH * cell, HELD_ZONE)
 
     def _held_fine(self, sizes: str) -> str:
         """gmsh's local sizes, `sizes`, and the held faces of an assembly with a printed part
@@ -2629,7 +2631,8 @@ class _Model:
         is more; none where nothing's held."""
         if not [*self.fixed, *sum(self.standing.values(), [])]:
             return 0.0
-        return max((self.held_mesh() or (0.0, 0.0))[1], HELD_ZONE)
+        cell = self.finest_cell()
+        return max(HELD_DEPTH * cell, HELD_ZONE) if cell else HELD_ZONE
 
     def _in_held_zone(self, places: np.ndarray) -> np.ndarray:
         """Which of `places` lie within a held face's zone (`held_zone_mm`): each held face's
