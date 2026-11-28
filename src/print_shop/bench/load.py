@@ -1127,7 +1127,9 @@ class _Model:
             f"{fem.NodeCount:,} nodes, takes about {need / 2**30:.2f} GiB to set up in load's "
             f"own process, and the container's memory has {max(left, 0) / 2**30:.2f} GiB left, "
             "by its own count: so it isn't set up"
-            + (", as held high, where a lower bound can follow, it may not fit" if high else "")
+            + (", as held high, where a lower bound can follow, it may not fit" if high else ""),
+            need,
+            max(left, 0),
         )
 
     def _write_need(self, fem: Any) -> float:
@@ -1159,7 +1161,9 @@ class _Model:
             f"{fem.NodeCount:,} nodes, takes about {need / 2**30:.2f} GiB {what} in load's own "
             f"process, and the container's memory has {max(left, 0) / 2**30:.2f} GiB left, by "
             "its own count: so it isn't done"
-            + (", as held high, where a lower bound can follow, it may not fit" if high else "")
+            + (", as held high, where a lower bound can follow, it may not fit" if high else ""),
+            need,
+            max(left, 0),
         )
 
     def _results_back(self, fea: Any) -> None:
@@ -1201,7 +1205,10 @@ class _Model:
                 f"{STRAIGHT if self.straight else ''}, and its mesh takes about "
                 f"{need / 2**30:.2f} GiB read back, where the container's memory has "
                 f"{max(left, 0) / 2**30:.2f} GiB left, by its own count: so it isn't read back"
-                + (", as held high, where a lower bound can follow, it may not fit" if high else "")
+                + (", as held high, where a lower bound can follow, it may not fit"
+                   if high else ""),
+                need,
+                max(left, 0),
             )
         full = memory_met(kills)
         if full is None:
@@ -2596,12 +2603,23 @@ class _Unread(NoAnswer):
     solves. A part that names its glass band is read again without it (mqucifer/print-shop#295).
     `evidence` is what it met, without what to do."""
 
-    def __init__(self, said: str, evidence: str | None = None, memory: bool = False) -> None:
+    def __init__(
+        self,
+        said: str,
+        evidence: str | None = None,
+        memory: bool = False,
+        need: float | None = None,
+        room: float | None = None,
+    ) -> None:
         super().__init__(said)
         self.evidence = said if evidence is None else evidence
         #: Whether it met the container's memory, which two passes read within
         #: (mqucifer/print-shop#301).
         self.memory = memory
+        if memory:
+            # Kept, with the need and room in bytes where a check said them, so that where the
+            # answer isn't the whole read the host can offer it more (mqucifer/print-shop#380).
+            progress.met(need, room)
 
 
 class _Unparted(NoAnswer):
@@ -2639,13 +2657,17 @@ def _banded_to_do() -> str:
     )
 
 
-def _model_unread(model: Any, evidence: str) -> NoReturn:
+def _model_unread(
+    model: Any, evidence: str, need: float | None = None, room: float | None = None
+) -> NoReturn:
     """`_memory_unread`, for a model: banded where any of its parts names its glass band."""
     parts = getattr(getattr(model, "assembly", None), "parts", [])
-    _memory_unread(evidence, any(getattr(p, "band", None) is not None for p in parts))
+    _memory_unread(evidence, any(getattr(p, "band", None) is not None for p in parts), need, room)
 
 
-def _memory_unread(evidence: str, banded: bool = False) -> NoReturn:
+def _memory_unread(
+    evidence: str, banded: bool = False, need: float | None = None, room: float | None = None
+) -> NoReturn:
     """The whole unread for the container's memory, `evidence` what it met
     (mqucifer/print-shop#375, mqucifer/print-shop#376), with what to do: `banded` where its
     glass bands are named."""
@@ -2661,6 +2683,10 @@ def _memory_unread(evidence: str, banded: bool = False) -> NoReturn:
         f"holds: {to_do}. {evidence}. Every part, joint and bolt of it is left unread",
         evidence,
         memory=True,
+        # The need and the room a check held it to, in bytes, for the host to say where it's
+        # offered more (mqucifer/print-shop#380).
+        need=need,
+        room=room,
     )
 
 
@@ -3084,10 +3110,20 @@ def run(args: Any, report: Report) -> None:
     # The container's memory said as it goes, for the host to say where it was killed
     # (mqucifer/print-shop#336).
     progress.watch()
+    progress.forget_met()
     # A killed command's mesh and solve files, left on disk, go (mqucifer/print-shop#376).
     cae.clear_stale()
     try:
         _read(args, report)
+    except NoAnswer:
+        # Where its read met the container's memory on the way, the host may read it again on
+        # a host with more (mqucifer/print-shop#380).
+        progress.say_met()
+        raise
+    else:
+        if "lower_bound" in report.numbers:
+            # Read as a bound, where the whole met the memory: the whole may read with more.
+            progress.say_met()
     finally:
         cae.clear_own()
         _clock["now"] = None

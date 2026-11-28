@@ -13,6 +13,22 @@ is refused as Docker refuses it; `ROOT/silent` makes a bench command say nothing
 `ROOT/slow_in` slows the files going in, by that many seconds; and `ROOT/others` lists other
 processes' bench containers, a name and a memory label to a line, as `docker ps` gives them.
 
+A `load` of an assembly file that plants `need_mb` meets its container's memory where its
+`--memory` is less (mqucifer/print-shop#380): it says so as `load` does (`bench: met ...` on its
+stderr) and saves a NO ANSWER; under more, it reads as any other. Its record says the memory it
+ran in and what its container was told it met where it ran first (`BENCH_OFFERED`). Where it
+also plants `bound_up_to_mb`, a read that meets the memory reads a glass band's lower bound
+instead, in a container of at most that much: past it, as where a larger host's whole takes
+longer to meet its memory and leaves the band too little time, it's NO ANSWER. `ROOT/kill`
+makes the next bench command exit 137, and `ROOT/oom` makes Docker's events say the kernel
+stopped it for memory, at its own clock's time; `events` answers for the containers in
+`ROOT/oom` whose name starts with the one asked about, as a name filter can match, and whose
+time is in the window asked, by its clock: `CLOCK_BEHIND` s behind this host's, as another host's
+may be, and said by `info`.
+`ROOT/in_fails` makes the helper's `tar -x` say what it holds on its stderr and exit 2. An
+assembly that plants `stalls` as well says it met its memory on the way and then runs until
+it's killed, as a read that goes on to a slower way and runs past its time limit.
+
 Standard library only, and nothing of the tests' own: it runs as a program of its own.
 """
 
@@ -32,10 +48,38 @@ from typing import Any
 VALUED = {"--name", "--label", "--pull", "--network", "--cpus", "--cpuset-cpus", "--memory",
           "--memory-swap", "--pids-limit", "--tmpfs", "--cap-drop", "--cap-add", "--security-opt",
           "--log-driver", "--ulimit", "--user", "-e", "-v", "-w"}
+#: How far its clock is behind this host's, in s.
+CLOCK_BEHIND = 3600
+
+
+def _clock() -> float:
+    return time.time() - CLOCK_BEHIND
+
+
 PLENTY = "MemTotal: 127000000 kB\nMemFree: 40000000 kB\nMemAvailable: 90000000 kB\n"
 
 
-def bench(args: list[str], work: Path, env: dict[str, str]) -> tuple[int, str]:
+def _mib(size: str) -> int:
+    units = {"m": 1, "g": 1024}
+    return int(float(size[:-1]) * units[size[-1].lower()]) if size[-1:].isalpha() else int(
+        size) // 2**20
+
+
+def met(args: list[str], work: Path, memory: str | None, final: bool = True) -> str | None:
+    """The `bench: met` line a planted `load` says where its `need_mb` is past its container's
+    `memory`, or None: as it ends, or, not `final`, as it meets it on the way."""
+    raw = json.loads((work / args[1]).read_text())
+    need = raw.get("need_mb")
+    if need is None or memory is None or _mib(memory) >= int(need):
+        return None
+    limit = _mib(memory) * 2**20
+    return (f"bench: met 12.0 limit={limit} peak={limit - 2**20} need={int(need) * 2**20} "
+            f"room={limit - 300 * 2**20} final={int(final)} at meshing pass 1's whole, at a mesh "
+            "of at most 5 mm")
+
+
+def bench(args: list[str], work: Path, env: dict[str, str],
+          memory: str | None = None) -> tuple[int, str]:
     """`load`, made up from what was sent: the skin pulled across its layers at 1.6% over its
     walls and its core, as `tests/test_settings_study.fake_loading` reads it, from the part's
     `print` in the assembly file; 2 where a file it names wasn't sent."""
@@ -71,15 +115,25 @@ def bench(args: list[str], work: Path, env: dict[str, str]) -> tuple[int, str]:
             "moves_mm": 3.0 / walls,
         },
         "notes": ["the infill's figures are published tests"],
-        "ran": {"host": env.get("BENCH_HOST"), "image_id": env.get("BENCH_IMAGE_ID")},
+        "ran": {"host": env.get("BENCH_HOST"), "image_id": env.get("BENCH_IMAGE_ID"),
+                "memory_max": None if memory is None else str(_mib(memory) * 2**20),
+                "offered": env.get("BENCH_OFFERED")},
     }
+    if met(args, work, memory) is not None:
+        bound = raw.get("bound_up_to_mb")
+        if bound is not None and memory is not None and _mib(memory) <= int(bound):
+            record["numbers"]["lower_bound"] = {"parts": ["bar"], "why": "made up"}
+        else:
+            record.update(verdict="NO ANSWER", why="nothing of the assembly is read: it met "
+                          "the container's memory", numbers={})
+            over = False
     out = work / "bench-out"
     out.mkdir(exist_ok=True)
     stem = f"load-{time.time_ns()}"
     (out / f"{stem}.json").write_text(json.dumps(record))
     (out / f"{stem}.txt").write_text(f"verdict: {record['verdict']}\n")
     said = f"verdict: {record['verdict']}\nsaved: bench-out/{stem}.txt and .json\n"
-    return (1 if over else 0), said
+    return (2 if record["verdict"] == "NO ANSWER" else 1 if over else 0), said
 
 
 def _log(root: Path, entry: dict[str, Any]) -> None:
@@ -157,6 +211,10 @@ def _run(argv: list[str], root: Path) -> int:
         print("Filesystem 1B-blocks Used Available Use% Mounted\noverlay 1 1 900000000000 1% /")
         return 0
     if command[:2] == ["tar", "-x"]:
+        if (root / "in_fails").exists():
+            # As tar in the helper refuses a file sent: its own words, and its exit 2.
+            print((root / "in_fails").read_text(), file=sys.stderr, end="")
+            return 2
         if (root / "slow_in").exists():
             time.sleep(float((root / "slow_in").read_text()))
         base = command[command.index("-C") + 1]
@@ -207,9 +265,29 @@ def _run(argv: list[str], root: Path) -> int:
                 if (root / "killed" / name).exists():
                     return 137
                 time.sleep(0.05)
-        code, said = bench(args, mounts["/work"], env)
+        memory = options.get("--memory", [None])[0]
+        if (root / "kill").exists():
+            (root / "kill").unlink()
+            if (root / "oom").exists():
+                stopped = (root / "oom_name").read_text() if (root / "oom_name").exists() else name
+                with (root / "oom").open("a") as events:
+                    events.write(f"{stopped.replace('NAME', name)} {_clock()}\n")
+            return 137
+        raw = json.loads((mounts["/work"] / args[1]).read_text())
+        on_the_way = met(args, mounts["/work"], memory, final=False)
+        if raw.get("stalls") and on_the_way is not None:
+            # Met on the way, then a slower way that doesn't end: stopped at its time limit.
+            print(on_the_way, file=sys.stderr, flush=True)
+            until = time.monotonic() + 60
+            while time.monotonic() < until and not (root / "killed" / name).exists():
+                time.sleep(0.05)
+            return 137
+        code, said = bench(args, mounts["/work"], env, memory)
         if not (root / "silent").exists():
             print(said, end="")
+            line = met(args, mounts["/work"], memory)
+            if line is not None:
+                print(line, file=sys.stderr)
         return code
     finally:
         (running / name).unlink(missing_ok=True)
@@ -297,6 +375,21 @@ def main(argv: list[str]) -> int:
             for name in names:
                 if (root / "running" / name).exists():
                     print(f"{name} 1GiB / 3GiB")
+            return 0
+        case ["info", "--format", "{{.SystemTime}}"]:
+            import datetime
+
+            print(datetime.datetime.fromtimestamp(_clock(), datetime.UTC).strftime(
+                "%Y-%m-%dT%H:%M:%S.%f123Z"))
+            return 0
+        case ["events", "--since", since, "--until", until, "--filter", watched, "--filter",
+              "event=oom", "--format", _]:
+            lines = (root / "oom").read_text().splitlines() if (root / "oom").exists() else []
+            for line in lines:
+                stopped, at = line.split()
+                if (stopped.startswith(watched.removeprefix("container="))
+                        and float(since) <= float(at) <= float(until)):
+                    print(f"oom {stopped}")
             return 0
         case ["save", image]:
             sys.stdout.buffer.write(f"image:{image}".encode())

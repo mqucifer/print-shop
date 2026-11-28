@@ -73,7 +73,52 @@ def how_it_ran() -> dict[str, Any]:
         # passes takes up a longer one as it runs (mqucifer/print-shop#325). None where no host
         # said.
         "limit_s": _seconds(os.environ.get("BENCH_TIMEOUT")),
+        # Where the read met the memory of the container it ran in first, and was offered this
+        # host's larger memory (mqucifer/print-shop#380): what it met there, in bytes.
+        "offered": offered(os.environ.get("BENCH_OFFERED")),
     }
+
+
+def offered(text: str | None) -> dict[str, Any] | None:
+    """What a command offered a host with more memory met where it ran first, as the host told
+    it (`job.Met.told`): `host`, and its `limit`, `peak`, `need` and `room` in bytes, each None
+    where unsaid, whether the kernel `killed` it, and the step it was `at`."""
+    if not text:
+        return None
+    fields, _, at = text.partition(" at ")
+    found = dict(f.split("=", 1) for f in fields.split() if "=" in f)
+    numbers = {k: int(found[k]) if found.get(k, "-").isdigit() else None
+               for k in ("limit", "peak", "need", "room")}
+    return {"host": found.get("host"), **numbers, "killed": found.get("killed") == "1",
+            "stopped": found.get("stopped") == "1", "at": at.strip()}
+
+
+def _gib(count: Any) -> str:
+    return f"{int(count) / 2**30:.1f} GiB" if str(count).isdigit() else "unknown"
+
+
+def offered_said(ran: dict[str, Any]) -> str:
+    """The line a reply read on a host with more memory says, naming the host, its limit, and the
+    need and room on both (mqucifer/print-shop#380); or nothing."""
+    met = ran.get("offered")
+    if not met:
+        return ""
+    how = (
+        "the kernel killed it, most likely at the memory"
+        if met["killed"]
+        else f"it needed {_gib(met['need'])} with {_gib(met['room'])} room"
+        if met["need"] is not None or met["room"] is not None
+        else "the kernel stopped a process of it for memory, by the container's own count"
+    )
+    return (
+        f"\noffered: read on {ran.get('host')} in its {_gib(ran.get('memory_max'))}, the same "
+        f"command with the same checks, as on {met['host']} its read met its container's "
+        f"{_gib(met['limit'])} at {met['at']}: {how}, at most {_gib(met['peak'])} held"
+        + (", and it was stopped at its time limit after" if met.get("stopped") else "")
+        + ". On "
+        f"{ran.get('host')} it held at most {_gib(ran.get('memory_peak'))} of its "
+        f"{_gib(ran.get('memory_max'))}"
+    )
 
 
 def _seconds(text: str | None) -> int | None:
@@ -179,6 +224,7 @@ class Report:
             + (f"memory.peak {ran['memory_peak']}, " if ran.get("memory_peak") else "")
             + f"network up: {','.join(ran['network_up']) or 'none'}, "
             + f"routes {ran['network_routes']}"
+            + offered_said(ran)
             + f"\nsaved: {out / stem}.txt and .json\n"
         )
         (out / f"{stem}.txt").write_text(text)

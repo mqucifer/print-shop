@@ -221,6 +221,12 @@ class Slots:
     def said(self, memory: str = host.MEMORY) -> str:
         return self.budget.said(memory)
 
+    @property
+    def running(self) -> int:
+        """How many jobs hold their slots now."""
+        with self._lock:
+            return self._running
+
     def refuse_past(self, memory_mb: int) -> None:
         """Raises ValueError, saying what the budget holds, where it can't hold a job of
         `memory_mb` at all."""

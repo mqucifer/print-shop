@@ -20,6 +20,12 @@ so a study reads each candidate's cases on one host (`bench.pool`), and this che
 rests on. Each host reads a case the same every time, to the last digit; across hosts the
 verdict, its why and its notes are the same, and every figure but in its last digits
 (`LAST_DIGITS`), each such one printed.
+
+And a `load` that meets a small local limit (mqucifer/print-shop#380): `load/one.json` read here
+in a container of `SMALL`, which it meets, by a check of a step's need or the kernel, is
+offered the host's `LOAD_MEMORY` through a pool, as a study's would be. Read there, it's the
+same reading as a plain read there in a load's own 3g, every digit, and as here's in 3g but in
+its last digits; its record names the host, its limit and what it met here.
 """
 
 from __future__ import annotations
@@ -39,10 +45,15 @@ from print_shop.bench.job import BenchJob, JobResult, run_here
 from print_shop.bench.pool import Pool
 from print_shop.bench.remote import Remote, RemoteHost, cores_of, cpuset
 from print_shop.study.reading import _files
+from tests.test_bench_remote_docker import _provenance
 
 OPT_IN = "PRINT_SHOP_TEST_REMOTE"
 #: What its jobs may hold there at once: two `load`s of 3g.
 MEMORY = 6 * 1024
+#: The larger memory a `load` that met its container's is offered there: more than a load's own
+#: 4g, within `MEMORY` (mqucifer/print-shop#380). And the small local limit it's planted to meet.
+LOAD_MEMORY = 6 * 1024
+SMALL = "96m"
 CASES = Path(__file__).parent / "cae_cases"
 LOAD = ["--weight", "5", "--at", "115,10,10"]
 #: How far apart two hosts' figures may be, relative to them: their last few binary digits of
@@ -66,7 +77,7 @@ def opted_in_host() -> RemoteHost | None:
     from print_shop.bench.budget import megabytes
 
     return RemoteHost("remote", target, cores_of(said["CORES"]), MEMORY,
-                      megabytes(said["FLOOR"]))
+                      megabytes(said["FLOOR"]), LOAD_MEMORY)
 
 
 pytestmark = [
@@ -218,3 +229,88 @@ def _apart(mine: Any, theirs: Any, where: str = "") -> list[tuple[str, Any, Any]
         return [found for k, (a, b) in enumerate(zip(mine, theirs, strict=True))
                 for found in _apart(a, b, f"{where}[{k}]")]
     return [] if mine == theirs else [(where, mine, theirs)]
+
+
+def test_a_load_that_meets_a_small_local_limit_reads_there_with_more_as_the_same_read(
+    tmp_path: Path, fixtures: Path, there: Remote,
+) -> None:
+    print(f"\n{there.host.said()}: MemFree {there.memory_free_mb() / 1024:.1f} GiB before")
+    alone = _job(fixtures, tmp_path / "here")
+    here = _record(alone, run_here(alone))
+    assert here["verdict"] == "OK", here.get("why")
+    plain = _job(fixtures, tmp_path / "there")
+    name = there.reserve(3 * 1024)
+    plain_there = _record(plain, there.run(plain, there.host.cores[:2], name))
+    assert plain_there["ran"]["host"] == there.name
+
+    small = _job(fixtures, tmp_path / "small")
+    small = BenchJob(small.args, small.folder, small.files, SMALL, small.timeout)
+    pool = Pool(Slots(Budget(3 * 1024, 2)), [there])
+    with pool.take(96, 2, kind="load one.json small"):
+        assert pool.where() == "here"
+        done = pool.run(small)
+    print(pool.said())
+    print(f"MemFree {there.memory_free_mb() / 1024:.1f} GiB after")
+    assert done.host == there.name, pool.said()
+    offered = _record(small, done)
+    met = offered["ran"]["offered"]
+    print(f"met here: {met}; read on {there.name} in {offered['ran']['memory_max']} bytes, at "
+          f"most {offered['ran']['memory_peak']} held, in {offered['seconds']} s")
+    assert met["host"] == "here" and met["limit"] == 96 * 2**20
+    assert met["killed"] or met["need"] > met["room"], met
+    assert offered["ran"]["memory_max"] == str(LOAD_MEMORY * 2**20)
+    assert offered["ran"]["image_id"] == here["ran"]["image_id"]
+    assert offered["ran"]["code"] == here["ran"]["code"]
+    assert "offered: read on remote in its 6.0 GiB" in done.stdout
+    assert _figures(offered["numbers"]) == _figures(plain_there["numbers"]), "one host, every digit"
+    assert (offered["verdict"], offered["why"], offered["notes"]) == (
+        here["verdict"], here["why"], here["notes"])
+    apart = _apart(_figures(here["numbers"]), _figures(offered["numbers"]))
+    for where, mine, theirs in apart:
+        print(f"  {where}: {mine!r} here, {theirs!r} there")
+    assert all(_close(mine, theirs) for _, mine, theirs in apart), apart
+    assert there.ours_left() == [] and there.left == [] and not there.held()
+
+
+#: A large job's files, made up: tens of parts' STEP files, about 100 MB in all
+#: (mqucifer/print-shop#380).
+BULK_FILES, BULK_MB = 40, 100
+
+
+@pytest.mark.parametrize("largest_mb", [0, 60])
+def test_a_job_with_a_large_folder_of_files_goes_over_and_reads(
+    tmp_path: Path, fixtures: Path, there: Remote, largest_mb: int,
+) -> None:
+    """`load/one.json` with about `BULK_MB` MB of made-up files beside it, sent with it as a
+    large assembly sends its parts, evenly or with one of `largest_mb`: they go over, it reads
+    there, and its figures are a plain read's there."""
+    print(f"\nMemFree {there.memory_free_mb() / 1024:.1f} GiB before")
+    job = _job(fixtures, tmp_path / "bulk")
+    extra = []
+    sizes = [BULK_MB * 10**6 // BULK_FILES] * BULK_FILES
+    if largest_mb:
+        sizes = [largest_mb * 10**6] + [(BULK_MB - largest_mb) * 10**6 // (BULK_FILES - 1)] * (
+            BULK_FILES - 1)
+    for k, size in enumerate(sizes):
+        # In a folder of their own, named in between files above it, each with an extended
+        # attribute, as an assembly names its parts' references and their bands in turn.
+        for name in (f"references/part-{k:02d}.step", f"band-{k:02d}.step"):
+            (job.folder / name).parent.mkdir(exist_ok=True)
+            (job.folder / name).write_bytes(os.urandom(size if "/" in name else 1000))
+            _provenance(job.folder / name)
+            extra.append(name)
+    job = BenchJob(job.args, job.folder, (*job.files, *extra), job.memory, job.timeout)
+    plain = _job(fixtures, tmp_path / "plain")
+    name = there.reserve(3 * 1024)
+    alone = _record(plain, there.run(plain, there.host.cores[:2], name))
+    name = there.reserve(3 * 1024)
+    try:
+        done = there.run(job, there.host.cores[:2], name)
+    except Exception as exc:
+        print(f"failed: {type(exc).__name__}, kind {getattr(exc, 'kind', '')!r}: {exc}")
+        raise
+    print(f"MemFree {there.memory_free_mb() / 1024:.1f} GiB after")
+    record = _record(job, done)
+    assert record["verdict"] == alone["verdict"] == "OK"
+    assert _figures(record["numbers"]) == _figures(alone["numbers"])
+    assert there.ours_left() == [] and there.left == [] and not there.held()

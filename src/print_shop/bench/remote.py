@@ -6,12 +6,29 @@ command over a folder of its files, within its own limits, so any host with the 
 run it. This runs one on a host named in the Mac's settings:
 
     BENCH_HOSTS=spark
-    BENCH_HOST_SPARK_SSH=spark           # the SSH target, as ~/.ssh/config names it
-    BENCH_HOST_SPARK_CORES=5-9,15-19     # the cores its jobs are pinned to (--cpuset-cpus)
-    BENCH_HOST_SPARK_MEMORY=15g          # the memory its jobs may hold at once
-    BENCH_HOST_SPARK_FLOOR=10g           # the MemFree never to go under
+    # the SSH target, as ~/.ssh/config names it
+    BENCH_HOST_SPARK_SSH=spark
+    # the cores its jobs are pinned to (--cpuset-cpus)
+    BENCH_HOST_SPARK_CORES=5-9,15-19
+    # the memory its jobs may hold at once
+    BENCH_HOST_SPARK_MEMORY=15g
+    # the MemFree never to go under
+    BENCH_HOST_SPARK_FLOOR=10g
 
-Every one of them is stated: nothing is guessed, and a host with one missing is refused.
+Each comment is a line of its own: the settings' reader takes all of a line after `=` as its
+value. Every one of them is stated: nothing is guessed, and a host with one missing is refused. One
+more may be (mqucifer/print-shop#380):
+
+    # the larger memory a `load` is offered there
+    BENCH_HOST_SPARK_LOAD_MEMORY=12g
+
+A `load` whose read met its container's memory, here or on a remote, is offered a host that
+states one larger than that container's: the same command, read there in this memory, held within
+the host's budget and over its floor as any job is (`pool.Pool.offer`). A host that states none is
+offered nothing; one that states it as anything but a size over 4g is refused. The budget,
+`_MEMORY`, is this process's own, not shared with another process's jobs there; what keeps the
+host safe across them is the MemFree floor, which counts every bench container there by its
+label.
 
 **What a job does there** is what it does here (`host.run`), by that host's own Docker
 (`docker -H ssh://TARGET`): the same `docker run`, with the same limits, user and no network, its
@@ -42,9 +59,11 @@ Standard library only: this runs outside the image.
 from __future__ import annotations
 
 import contextlib
+import errno
 import io
 import os
 import re
+import stat
 import subprocess
 import tarfile
 import threading
@@ -55,16 +74,19 @@ from pathlib import Path, PurePosixPath
 
 from . import host
 from .budget import megabytes
-from .job import HERE, BenchJob, HostLost, JobResult, Stopped, saved_files
+from .job import HERE, BenchJob, HostLost, JobResult, Met, Stopped, saved_files
 
-__all__ = ["HOSTS", "NoRoom", "RanPastThere", "Remote", "RemoteHost", "Stopped", "cores_of",
-           "cpuset", "send", "stated"]
+__all__ = ["HOSTS", "NoRoom", "NotPlain", "RanPastThere", "Remote", "RemoteHost", "Stopped",
+           "cores_of", "cpuset", "open_plain", "send", "stated"]
 # `Stopped` is the job's own (`job.Stopped`), said here too, where a remote raises it.
 
 #: The setting that names the remote hosts, and each one's own keys after
 #: `BENCH_HOST_<NAME>_`.
 HOSTS = "BENCH_HOSTS"
 KEYS = ("SSH", "CORES", "MEMORY", "FLOOR")
+#: The key that may be stated as well: the larger memory a `load` that met its container's is
+#: offered there (mqucifer/print-shop#380).
+LOAD_MEMORY = "LOAD_MEMORY"
 #: What every container and volume this makes is named from: the bench's own prefix
 #: (`budget.CONTAINERS`), and a new id.
 PREFIX = "print-bench-"
@@ -97,7 +119,7 @@ WORK_GB = int(host.MAX_FILE) / host.GB
 #: it can't outlive the study that started it, whatever became of this host.
 DEADLINE_MARGIN = 300
 #: How a command stopped at its limit replies (`host.past`).
-RAN_PAST = "verdict: NO ANSWER: it ran past the"
+RAN_PAST = host.RAN_PAST
 #: The label each holds its disk bound by, in GB; one with none counts at `WORK_GB`.
 DISK_LABEL = "print-shop.bench.disk"
 #: The labels each of its volumes carries: whose, the job's container's name, and when it was
@@ -156,6 +178,9 @@ class RemoteHost:
     #: The memory its jobs may hold at once, and the MemFree never to go under, in MiB.
     memory_mb: int
     floor_mb: int
+    #: The larger memory a `load` that met its container's is offered there, in MiB, or 0 where
+    #: none is stated (mqucifer/print-shop#380).
+    load_mb: int = 0
 
     def docker(self) -> tuple[str, ...]:
         """Its Docker, over SSH."""
@@ -164,7 +189,9 @@ class RemoteHost:
     def said(self) -> str:
         return (f"{self.name} ({self.ssh}): cores {cpuset(self.cores)}, "
                 f"{self.memory_mb / 1024:.1f} GiB for jobs, MemFree kept over "
-                f"{self.floor_mb / 1024:.1f} GiB")
+                f"{self.floor_mb / 1024:.1f} GiB"
+                + (f", a load that met its memory offered {self.load_mb / 1024:.1f} GiB"
+                   if self.load_mb else ""))
 
 
 def stated(env: dict[str, str]) -> list[RemoteHost]:
@@ -193,7 +220,21 @@ def stated(env: dict[str, str]) -> list[RemoteHost]:
         if len(cores) < int(host.CPUS) or memory < megabytes(host.MEMORY):
             raise ValueError(f"{name} holds no bench command: one takes {host.CPUS} cores and "
                              f"{host.MEMORY}")
-        found.append(RemoteHost(name, target, cores, memory, floor))
+        load_key = f"BENCH_HOST_{name.upper()}_{LOAD_MEMORY}"
+        given = env.get(load_key, "").strip()
+        load = 0
+        if given:
+            # Stated, it's a size over a load's own, never read as none (`12` is 12 bytes).
+            try:
+                load = megabytes(given) if given[-1:].lower() in ("m", "g", "t") else 0
+            except ValueError:
+                load = 0
+        if given and not megabytes(host.TWO_PASSES_MEMORY) < load <= memory:
+            raise ValueError(f"{load_key} is {given!r}: the larger memory a load is offered "
+                             f"there is a size, as 12g, more than a load's own "
+                             f"{host.TWO_PASSES_MEMORY}, and within its jobs' "
+                             f"{env[keys['MEMORY']].strip()}; to offer none, leave it out")
+        found.append(RemoteHost(name, target, cores, memory, floor, load))
     if len({h.name for h in found}) != len(found):
         raise ValueError(f"{HOSTS} names a host twice")
     return found
@@ -212,6 +253,39 @@ class RanPastThere(HostLost):
 
 
 
+def _exit_said(code: int) -> str:
+    """Docker's or SSH's exit code, said with whose it is."""
+    return f"ssh's exit {code}" if code == 255 else f"docker's exit {code}"
+
+
+def words_only(text: str) -> str:
+    """What Docker or a helper said, its words alone: every token with a path, a name, a number
+    or a quote in it left out as `…`, so it can be said where the job's names and figures can't
+    (mqucifer/print-shop#380). `tar: work/leg.step: Cannot open: No space left on device` is
+    `tar: … Cannot open: No space left on device`."""
+    kept: list[str] = []
+    for token in text.split():
+        bare = token.strip(",;()[]")
+        word = bare if re.fullmatch(r"[A-Za-z]{1,24}:?", bare) else "…"
+        if not (word == "…" and kept and kept[-1] == "…"):
+            kept.append(word)
+    return " ".join(kept)[:300]
+
+
+def _failed_said(message: str) -> str:
+    """How a call there failed, as a kind with no name or figure: SSH or Docker not answering,
+    an image Docker hasn't, a file not sent back, or Docker's refusal."""
+    if "didn't answer" in message:
+        return "ssh or docker didn't answer"
+    if re.search(r"No such image|Unable to find image|pull access denied", message):
+        return "an image it hasn't"
+    if "didn't send back" in message:
+        return "a file it saved wasn't sent back"
+    if re.search(r"ssh:|Connection (refused|reset)|connection reset", message):
+        return "ssh failed"
+    return "docker refused it"
+
+
 def _user() -> tuple[int, int]:
     return os.getuid(), os.getgid()
 
@@ -219,6 +293,57 @@ def _user() -> tuple[int, int]:
 def _meminfo(text: str) -> dict[str, int]:
     """`/proc/meminfo`'s figures, in MiB."""
     return {k: int(v) // 1024 for k, v in re.findall(r"^(\w+):\s+(\d+) kB", text, re.MULTILINE)}
+
+
+class NotPlain(ValueError):
+    """A job's file that isn't a plain file inside its folder: a link, at any step of its path,
+    or not a regular file. Never sent, never written through (mqucifer/print-shop#380): a link
+    would send a file from outside the folder to the host, which a container here, with only
+    the folder mounted, could never read."""
+
+
+def open_plain(folder: Path, name: str, flags: int = os.O_RDONLY,
+               make_dirs: bool = False) -> int:
+    """A file descriptor for `name` in `folder`, opened one step at a time, never through a link
+    and only to a regular file, as `rounds.paths.open_inside` opens one; its folders made where
+    `make_dirs`.
+
+    Raises:
+        NotPlain: If a step of it is a link, or it isn't a regular file, or it leads out.
+        FileNotFoundError: If it isn't there.
+    """
+    parts = PurePosixPath(name).parts
+    if not parts or PurePosixPath(name).is_absolute() or ".." in parts:
+        raise NotPlain(f"the job's file {name!r} isn't inside its folder")
+    here = os.open(folder, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        for part in parts[:-1]:
+            try:
+                nested = os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=here)
+            except FileNotFoundError:
+                if not make_dirs:
+                    raise
+                os.mkdir(part, 0o755, dir_fd=here)
+                nested = os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=here)
+            except OSError as exc:
+                if exc.errno in (errno.ELOOP, errno.ENOTDIR):
+                    raise NotPlain(f"the job's file {name!r} is under a link, or under what "
+                                   "isn't a folder") from exc
+                raise
+            os.close(here)
+            here = nested
+        try:
+            found = os.open(parts[-1], flags | os.O_NOFOLLOW | os.O_NONBLOCK, 0o644, dir_fd=here)
+        except OSError as exc:
+            if exc.errno == errno.ELOOP:
+                raise NotPlain(f"the job's file {name!r} is a link") from exc
+            raise
+        if not stat.S_ISREG(os.fstat(found).st_mode):
+            os.close(found)
+            raise NotPlain(f"the job's file {name!r} isn't a regular file")
+        return found
+    finally:
+        os.close(here)
 
 
 def bundle(job: BenchJob) -> bytes:
@@ -241,9 +366,21 @@ def bundle(job: BenchJob) -> bytes:
             with path.open("rb") as stream:
                 tar.addfile(info, stream)
 
+        def put_plain(given: str, name: str, owner: tuple[int, int]) -> None:
+            # Read through no link, from what was opened: never a file outside the folder.
+            with os.fdopen(open_plain(job.folder, given), "rb") as stream:
+                found = os.fstat(stream.fileno())
+                info = tarfile.TarInfo(name)
+                info.size, info.mode = found.st_size, (found.st_mode & 0o777) | 0o444
+                info.uid, info.gid = owner
+                tar.addfile(info, stream)
+
         folder("work", (uid, gid))
         made = {"work"}
-        for name in job.files:
+        # In order, so each folder's files are together: the helper's tar, as root with no
+        # power over another's files, restores a folder's owner, the job's user, as it moves
+        # past it, and couldn't write into it again (mqucifer/print-shop#380).
+        for name in sorted(set(job.files), key=lambda n: PurePosixPath(n).as_posix()):
             relative = PurePosixPath(name)
             if relative.is_absolute() or ".." in relative.parts:
                 raise ValueError(f"the job's file {name!r} isn't inside its folder")
@@ -251,7 +388,7 @@ def bundle(job: BenchJob) -> bytes:
                 if f"work/{parent}" not in made:
                     folder(f"work/{parent}", (uid, gid))
                     made.add(f"work/{parent}")
-            put(job.folder / name, f"work/{relative}", (uid, gid))
+            put_plain(name, f"work/{relative}", (uid, gid))
         folder("code", (0, 0))
         for path in sorted(host.HERE.rglob("*")):
             inside = path.relative_to(host.HERE)
@@ -284,9 +421,11 @@ def unpack(data: bytes, folder: Path, saved: tuple[str, ...]) -> None:
             stream = tar.extractfile(member)
             if stream is None:
                 continue
-            target = folder / relative
-            target.parent.mkdir(parents=True, exist_ok=True)
-            target.write_bytes(stream.read())
+            # Written through no link, as a folder of its own or one the job's files left
+            # there could be (mqucifer/print-shop#380): never to a file outside the folder.
+            with os.fdopen(open_plain(folder, name, os.O_WRONLY | os.O_CREAT | os.O_TRUNC,
+                                      make_dirs=True), "wb") as written:
+                written.write(stream.read())
             got.add(name)
     lost = sorted(set(wanted) - got)
     if lost:
@@ -330,8 +469,11 @@ class Remote:
             raise HostLost(f"{self.name}: docker {args[0]} didn't answer: {exc}") from exc
         if check and done.returncode != 0:
             said = done.stderr.decode(errors="replace").strip()[-300:]
-            raise HostLost(f"{self.name}: docker {' '.join(args[:2])} failed: "
-                           f"{said or 'no reply'}")
+            lost = HostLost(f"{self.name}: docker {' '.join(args[:2])} failed: "
+                            f"{said or 'no reply'}")
+            # How, with no name or figure: its exit code, and its words alone.
+            lost.how = f"exit {done.returncode}: {words_only(said) or 'no reply'}"
+            raise lost
         return done
 
     def answers(self) -> bool:
@@ -541,13 +683,20 @@ class Remote:
 
         Raises:
             FileNotFoundError: If its files aren't in its folder.
+            NotPlain: If one is a link, or under one, or isn't a regular file.
             HostLost: If the host failed it, Docker's own or SSH's failure, or gave no reply:
                 never the part's answer. `RanPastThere` where it stopped at its limit.
             Stopped: If the study was stopped before it started.
         """
         if self._stopped.is_set():
             raise Stopped(f"the study was stopped before `{' '.join(job.args)}` started")
-        missing = [f for f in job.files if not (job.folder / f).exists()]
+        missing = []
+        for given in job.files:
+            # Each a plain file in its folder, through no link, before anything goes over.
+            try:
+                os.close(open_plain(job.folder, given))
+            except FileNotFoundError:
+                missing.append(given)
         if missing:
             raise FileNotFoundError(f"the job's files aren't in {job.folder}: "
                                     f"{', '.join(missing)}")
@@ -558,41 +707,60 @@ class Remote:
         with self._lock:
             reserved = name in self._held
             self._held.setdefault(name, memory_mb)
+        #: The step it's at, which a failure is said by (`HostLost.kind`).
+        stage = ["holding its memory"]
         try:
             if not reserved:
                 self._hold(name, memory_mb)
+            stage[0] = "making its volumes"
             for volume in volumes:
                 self._call("volume", "create", "--label", f"{OWNER_LABEL}=print-shop",
                            "--label", f"{JOB_LABEL}={name}",
                            "--label", f"{CREATED_LABEL}={int(time.time())}", volume)
+            stage[0] = "sending its files"
             self._run("--rm", "-i", "--name", f"{name}-in", *self._helper(0), "--user",
                        "0:0", "--cap-add", "CHOWN", "--cap-add", "FOWNER",
                        "-v", f"{volumes[0]}:/mnt/work", "-v", f"{volumes[1]}:/mnt/code",
-                       self._bench_image(), "tar", "-x", "--numeric-owner", "-C", "/mnt",
+                       self._bench_image(), "tar", "-x", "--numeric-owner",
+                       # Each folder's owner and mode only once all of it is in: the helper
+                       # can't write into one owned by the job's user (mqucifer/print-shop#380).
+                       "--delay-directory-restore", "-C", "/mnt",
                        "-f", "-", data=bundle(job), timeout=HELPER_TIMEOUT)
             if self._stopped.is_set():
                 # Stopped while its files went over: it never starts.
                 raise Stopped(f"the study was stopped before {said} started")
             self._watch(name)
+            stage[0] = "running it"
+            said_as_it_went: list[str] = []
             try:
                 done = host.run(list(job.args), job.folder, timeout=job.timeout or None,
                                 name=name, docker=self.docker, mounts=volumes,
-                                cpuset=cpuset(cores), more_env={"BENCH_HOST": self.name},
+                                cpuset=cpuset(cores),
+                                more_env={"BENCH_HOST": self.name, **job.told()},
                                 labels={MEMORY_LABEL: "0", DISK_LABEL: "0"}, by_id=True,
-                                margin=DEADLINE_MARGIN, pull=False)
+                                margin=DEADLINE_MARGIN, pull=False, memory=job.memory or None,
+                                trace=said_as_it_went, longer=job.longer or None)
             finally:
                 with self._lock:
                     self._running.discard(name)
                     killed = self._killed.pop(name, None)
             if killed is not None:
-                raise HostLost(f"{self.name} killed {said}: {killed}")
+                lost = HostLost(f"{self.name} killed {said}: {killed}")
+                lost.kind = "running it: killed as its Docker disk fell under its floor"
+                raise lost
             if done.returncode in DOCKER_CODES or not done.stdout.strip():
                 why = (done.stderr or "").strip().splitlines()[-1:] or ["no reply"]
-                raise HostLost(f"{self.name} failed {said} (exit {done.returncode}): "
-                               f"{why[0][:300]}")
+                lost = HostLost(f"{self.name} failed {said} (exit {done.returncode}): "
+                                f"{why[0][:300]}")
+                lost.kind = ("running it: no reply" if done.returncode not in DOCKER_CODES
+                             else f"running it: {_exit_said(done.returncode)}")
+                raise lost
             if done.stdout.startswith(RAN_PAST):
-                raise RanPastThere(f"{self.name} stopped {said} at its {job.timeout} s limit")
+                late = RanPastThere(f"{self.name} stopped {said} at its {job.timeout} s limit")
+                late.kind = "running it: past its time limit"
+                raise late
             saved = saved_files(done.stdout)
+            stage[0] = "bringing back what it saved"
             if not saved and not self.answers():
                 raise HostLost(f"{self.name} stopped answering while it ran {said}")
             if saved:
@@ -603,8 +771,15 @@ class Remote:
                                  'du -sk /work >&2 && exec tar -c -C /work -f - -- "$@"', "sh",
                                  *saved, timeout=HELPER_TIMEOUT)
                 self._sized(out.stderr, said)
+                stage[0] = "unpacking what it saved"
                 unpack(out.stdout, job.folder, saved)
-            return JobResult(done.returncode, done.stdout, done.stderr, saved, self.name)
+            return JobResult(done.returncode, done.stdout, done.stderr, saved, self.name,
+                             Met.of(said_as_it_went, self.name))
+        except HostLost as exc:
+            if not exc.kind:
+                how = getattr(exc, "how", "")
+                exc.kind = f"{stage[0]}: {_failed_said(str(exc))}" + (f" ({how})" if how else "")
+            raise
         finally:
             self._clear(name, volumes)
 
