@@ -1826,3 +1826,74 @@ def test_a_solve_past_the_memory_says_how_long_each_of_calculix_s_tries_ran() ->
     assert said.memory
     ran = "CalculiX's direct solver ran 412 s and its iterative one 1291 s, each stopped there"
     assert ran in said.evidence, said.evidence
+
+
+def _too_big_model(banded: bool) -> Any:
+    import types
+
+    return types.SimpleNamespace(
+        fem=types.SimpleNamespace(VolumeCount=470_000, NodeCount=827_000),
+        shape=types.SimpleNamespace(Volume=1e6), size=5.0, tries=[("direct", 26.5)],
+        assembly=types.SimpleNamespace(parts=[
+            types.SimpleNamespace(band="band.step" if banded else None),
+            types.SimpleNamespace(band=None),
+        ]),
+    )  # fmt: skip
+
+
+def test_a_read_past_the_memory_never_says_to_name_bands_that_are_named() -> None:
+    """The design run's assembly on mqucifer/print-shop#376: its bands named and left out, the
+    band's own read met the memory, and the reply said to name each glass frame's band. Where
+    they're named, it says so, and, left out already, that the bound is past the memory too."""
+    plain = load._Model._too_big(_too_big_model(False), 4 * 2**30)
+    assert "name each glass frame's `band`" in str(plain)
+    load._bands.clear()
+    named = load._Model._too_big(_too_big_model(True), 4 * 2**30)
+    assert "name each glass frame's `band`" not in str(named)
+    assert "each glass frame's band is named, and it's read next with its band left out" in (
+        str(named)
+    )
+    load._bands["frame"] = load.Band([], 1.0, 2.0, np.zeros(3))
+    try:
+        left_out = load._Model._too_big(_too_big_model(True), 4 * 2**30)
+    finally:
+        load._bands.clear()
+    assert "name each glass frame's `band`" not in str(left_out)
+    assert "with each glass band left out already, it's past the container's memory still" in (
+        str(left_out)
+    )
+    assert "name each glass frame's `band`" not in str(_memory_said("x", True))
+    assert "name each glass frame's `band`" in str(_memory_said("x", False))
+
+
+def _memory_said(evidence: str, banded: bool) -> Any:
+    with pytest.raises(load._Unread) as said:
+        load._memory_unread(evidence, banded)
+    return said.value
+
+
+def test_a_band_s_read_that_can_t_be_read_says_the_bound_itself_wasn_t(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Where the band's own read can't be read, the reply says the lower bound couldn't be read
+    either, why the whole couldn't, and what the band's read met: never as if the whole had."""
+    monkeypatch.setenv(load_parts.TIMEOUT, str(host.TWO_PASSES))
+    calls: list[dict[str, Any]] = []
+    met = load._Unread("met", "the whole met the container's memory", memory=True)
+    _two_passes_then(monkeypatch, calls, met)
+    read = load._run
+
+    def band_too_big(args: Any, report: Report, without_bands: bool = False, **given: Any) -> None:
+        read(args, report, without_bands, **given)
+        if without_bands:
+            raise load._Unread("nothing of the assembly is read: CalculiX met it", "it met it")
+
+    monkeypatch.setattr(load, "_run", band_too_big)
+    with pytest.raises(NoAnswer) as said:
+        load.run(_parts_args(_banded(tmp_path)), Report("load", ["glass.json"]))
+    text = str(said.value)
+    assert text.startswith(
+        "the glass band's lower bound couldn't be read either: the whole couldn't be read "
+        "(read in two passes, as --parts asks: the whole met the container's memory), and with "
+        "frame's glass band left out, nothing of the assembly is read: CalculiX met it"
+    ), text

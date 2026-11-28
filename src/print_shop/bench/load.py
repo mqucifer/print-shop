@@ -1117,7 +1117,8 @@ class _Model:
         left = cae.room(files=not high)
         if left is None or left >= need:
             return
-        _memory_unread(
+        _model_unread(
+            self,
             f"the mesh of the joined parts at a mesh of at most {self.size:g} mm"
             f"{STRAIGHT if self.straight else ''}, {fem.VolumeCount:,} elements and "
             f"{fem.NodeCount:,} nodes, takes about {need / 2**30:.2f} GiB to set up in load's "
@@ -1148,7 +1149,8 @@ class _Model:
         left = cae.room(files=not high)
         if left is None or left >= need:
             return
-        _memory_unread(
+        _model_unread(
+            self,
             f"the mesh of the joined parts at a mesh of at most {self.size:g} mm"
             f"{STRAIGHT if self.straight else ''}, {fem.VolumeCount:,} elements and "
             f"{fem.NodeCount:,} nodes, takes about {need / 2**30:.2f} GiB {what} in load's own "
@@ -1190,7 +1192,8 @@ class _Model:
         refused = getattr(tools, "memory", None)
         if refused is not None:
             need, left, high = refused
-            _memory_unread(
+            _model_unread(
+                self,
                 f"gmsh meshed the joined parts at a mesh of at most {self.size:g} mm"
                 f"{STRAIGHT if self.straight else ''}, and its mesh takes about "
                 f"{need / 2**30:.2f} GiB read back, where the container's memory has "
@@ -1200,7 +1203,8 @@ class _Model:
         full = memory_met(kills)
         if full is None:
             return
-        _memory_unread(
+        _model_unread(
+            self,
             f"gmsh made no mesh of the joined parts at a mesh of at most {self.size:g} mm"
             f"{STRAIGHT if self.straight else ''}: it met the container's memory, "
             f"{full / 2**30:g} GiB, meshing them, and the kernel stopped it there, as the "
@@ -1679,8 +1683,12 @@ class _Model:
                 else ""
             )
         )
+        parts = getattr(getattr(self, "assembly", None), "parts", [])
+        banded = any(getattr(p, "band", None) is not None for p in parts)
         to_do = (
-            "name each glass frame's `band` in the assembly file, and it's read as a lower "
+            _banded_to_do()
+            if banded
+            else "name each glass frame's `band` in the assembly file, and it's read as a lower "
             "bound with its band left out, or read fewer of the parts at once"
             if finer > alone
             else "give a coarser --mesh, or read fewer of the parts at once"
@@ -2587,14 +2595,40 @@ def _solve_need(
     return 0.9 * min(nodes * low[0], elements * low[1])
 
 
-def _memory_unread(evidence: str) -> NoReturn:
+def _banded_to_do() -> str:
+    """What to do where the whole is past the memory and its glass bands are named
+    (mqucifer/print-shop#376): never to name them."""
+    if _bands:
+        return (
+            "with each glass band left out already, it's past the container's memory still: "
+            "read fewer of the parts at once"
+        )
+    return (
+        "each glass frame's band is named, and it's read next with its band left out, as a "
+        "lower bound"
+    )
+
+
+def _model_unread(model: Any, evidence: str) -> NoReturn:
+    """`_memory_unread`, for a model: banded where any of its parts names its glass band."""
+    parts = getattr(getattr(model, "assembly", None), "parts", [])
+    _memory_unread(evidence, any(getattr(p, "band", None) is not None for p in parts))
+
+
+def _memory_unread(evidence: str, banded: bool = False) -> NoReturn:
     """The whole unread for the container's memory, `evidence` what it met
-    (mqucifer/print-shop#375, mqucifer/print-shop#376)."""
+    (mqucifer/print-shop#375, mqucifer/print-shop#376), with what to do: `banded` where its
+    glass bands are named."""
+    to_do = (
+        _banded_to_do()
+        if banded
+        else "name each glass frame's `band` in the assembly file, and it's read as a lower "
+        "bound with its band left out, or give a coarser --mesh, or read fewer of the parts at "
+        "once"
+    )
     raise _Unread(
-        "nothing of the assembly is read, as its mesh is past what the container's memory "
-        "holds: name each glass frame's `band` in the assembly file, and it's read as a "
-        "lower bound with its band left out, or give a coarser --mesh, or read fewer of "
-        f"the parts at once. {evidence}. Every part, joint and bolt of it is left unread",
+        f"nothing of the assembly is read, as its mesh is past what the container's memory "
+        f"holds: {to_do}. {evidence}. Every part, joint and bolt of it is left unread",
         evidence,
         memory=True,
     )
@@ -3188,8 +3222,18 @@ def _band_read(
     clock.check("band", what)
     _clock["now"] = clock
     band_began = time.time()
-    _run(args, report, without_bands=True)
     names = ", ".join(banded)
+    try:
+        _run(args, report, without_bands=True)
+    except load_parts.OutOfTime:
+        raise  # it says it's the band's lower bound's own clock
+    except NoAnswer as stopped:
+        # The bound itself unread, said as it is, never as if it were the whole
+        # (mqucifer/print-shop#376).
+        raise NoAnswer(
+            f"the glass band's lower bound couldn't be read either: the whole couldn't be read "
+            f"({why}), and with {names}'s glass band left out, {stopped}"
+        ) from stopped
     lifted = args.lift is not None
     joints = report.numbers.get("joints", {})
     fixed = sorted(n for n, j in joints.items() if "statics_force_n" in j)
