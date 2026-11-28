@@ -248,20 +248,30 @@ def inner_nodes(points: np.ndarray, rows: np.ndarray, normals: np.ndarray, depth
 
 def layer(points: np.ndarray, rows: np.ndarray, normals: np.ndarray, depth: np.ndarray,
           cells: np.ndarray, over_core: np.ndarray,
-          inside: Callable[[np.ndarray], np.ndarray]) -> Layer:
+          inside: Callable[[np.ndarray], np.ndarray],
+          planes: np.ndarray | None = None) -> Layer:
     """The part's skin as wedges on its boundary triangles `rows` (`faces_of`), each as deep
     as `depth`, none where its skin isn't `over_core`. Where a wedge would be turned over, as a
     face narrower than its neighbour's skin is by the mitre, or an inner node would leave the
     part (`inside`, of points in the assembly's axes) or lie too far off (`SHARPEST`), its
     nodes' inner offsets are halved, `ROUNDS` times at most (`Layer.thinned`), the rest of its
     skin left to the solid's layers; and where that doesn't stand it, it's dropped and the rest
-    found again."""
+    found again. `planes`, triangles with no wedge, a held face's, still mitre their neighbours'
+    inner nodes at no depth, so a wall leaning onto a held face keeps its nodes on that face's
+    plane, not past it, out of the part."""
     keep = over_core.copy()
+    fixed = np.zeros(len(rows), dtype=bool) if planes is None else planes & ~over_core
     outside = inverted = 0
     built: Layer | None = None
     for _ in range(ROUNDS):
         mine = np.flatnonzero(keep)
-        offset_of, sharp = inner_nodes(points, rows[mine], normals[mine], depth[mine])
+        held_rows = np.flatnonzero(fixed)
+        both = np.concatenate([mine, held_rows])
+        offset_of, sharp = inner_nodes(points, rows[both], normals[both],
+                                       np.concatenate([depth[mine], np.zeros(len(held_rows))]))
+        used = {n for row in rows[mine].tolist() for n in row}
+        offset_of = {n: v for n, v in offset_of.items() if n in used}
+        sharp &= used
         order = sorted(offset_of)
         where = {n: k for k, n in enumerate(order)}
         offsets = np.array([offset_of[n] - points[n] for n in order]).reshape(-1, 3)

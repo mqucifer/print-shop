@@ -1027,7 +1027,8 @@ class _Model:
                       for n in self.fem.getNodesByFace(f) if n in row}  # fmt: skip
         held = np.array([all(int(n) in held_nodes for n in r[:3]) for r in rows], dtype=bool)
 
-        built = wedges.layer(points, rows, normals, depth, cells, over_core & ~held, inside)
+        built = wedges.layer(points, rows, normals, depth, cells, over_core & ~held, inside,
+                             planes=held)
         built.thin = int((~over_core & ~held).sum())
         built.held = int(held.sum())
         return built

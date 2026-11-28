@@ -290,7 +290,7 @@ class Layered:
         first, second = (a for a in range(3) if a != self.layers)
         along = points[:, self.layers]
         layer = self.layer_of(along)
-        within = (along >= self.low) & (along <= self.high)
+        within = (along >= self.low - HOLDS_MM) & (along <= self.high + HOLDS_MM)
         found = np.zeros(len(points), dtype=bool)
         for k in np.unique(layer[within]):
             mine = within & (layer == k)
@@ -402,8 +402,10 @@ class Layered:
 #: whose section moves with its height, as a bowed leg's, has no two layers alike, and each
 #: layer's OCCT offsets and booleans were most of its reading.
 STRIDE_MM = 1.0
-#: How far outside a layer's section a point is still in it (`Layered.holds`), in mm.
-HOLDS_MM = 1e-4
+#: How far outside a layer's section, or past the part's lowest or highest layer, a point is
+#: still in it (`Layered.holds`), in mm: the sections are the mesh's, within its 0.003 mm chord
+#: of the B-rep, and a node mitred onto a held face lands within a micrometre or so of it.
+HOLDS_MM = 0.005
 #: How far a face leans from upright to the layers before its shells are read layer by layer.
 SHELL_DEGREES = 30.0
 
@@ -673,10 +675,13 @@ def band_normals(read: Read, mixed: np.ndarray, centres: np.ndarray, faces: np.n
     ways = np.zeros((len(read.share), 3))
     kinds = np.full(len(read.share), SERIES, dtype=int)
     clean = np.zeros(len(read.share), dtype=bool)
+    uniform = np.zeros(len(read.share), dtype=bool)
     for e in np.flatnonzero(mixed):
         points, core = read.points[e], read.core[e]
         if core.all() or not core.any():
-            # Mixed by its exact share but not at its points: its nearest face's way, below.
+            # Mixed by its exact share but not at its points: a sliver of skin along a face,
+            # that face's laminate, below.
+            uniform[e] = True
             continue
         mean_core, mean_skin = points[core].mean(axis=0), points[~core].mean(axis=0)
         spread = np.cov(np.vstack([points[core] - mean_core, points[~core] - mean_skin]).T)
@@ -699,7 +704,12 @@ def band_normals(read: Read, mixed: np.ndarray, centres: np.ndarray, faces: np.n
         nearby = normals[near]
         dots = np.abs(np.einsum("nk,nmk->nm", ways[chunk], nearby))
         first = nearby[np.arange(len(chunk)), dots.argmax(axis=1)]
+        closest = nearby[np.arange(len(chunk)),
+                         np.take_along_axis(apart, near, axis=1).argmin(axis=1)]  # fmt: skip
         for row, e in enumerate(chunk):
+            if uniform[e]:
+                ways[e], kinds[e] = closest[row], LAMINATE
+                continue
             if clean[e]:
                 ways[e], kinds[e] = first[row], LAMINATE
                 continue
