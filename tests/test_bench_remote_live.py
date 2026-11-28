@@ -22,10 +22,10 @@ verdict, its why and its notes are the same, and every figure but in its last di
 (`LAST_DIGITS`), each such one printed.
 
 And a `load` that meets a small local limit (mqucifer/print-shop#380): `load/one.json` read here
-in a container of `SMALL`, which the kernel stops it at, is offered the host's `LOAD_MEMORY`
-through a pool, as a study's would be. Read there, it's the same reading as a plain read there in
-a load's own 3g, every digit, and as here's in 3g but in its last digits; its record names the
-host, its limit and what it met here.
+in a container of `SMALL`, which it meets, by a check of a step's need or the kernel, is
+offered the host's `LOAD_MEMORY` through a pool, as a study's would be. Read there, it's the
+same reading as a plain read there in a load's own 3g, every digit, and as here's in 3g but in
+its last digits; its record names the host, its limit and what it met here.
 """
 
 from __future__ import annotations
@@ -45,6 +45,7 @@ from print_shop.bench.job import BenchJob, JobResult, run_here
 from print_shop.bench.pool import Pool
 from print_shop.bench.remote import Remote, RemoteHost, cores_of, cpuset
 from print_shop.study.reading import _files
+from tests.test_bench_remote_docker import _provenance
 
 OPT_IN = "PRINT_SHOP_TEST_REMOTE"
 #: What its jobs may hold there at once: two `load`s of 3g.
@@ -255,7 +256,8 @@ def test_a_load_that_meets_a_small_local_limit_reads_there_with_more_as_the_same
     met = offered["ran"]["offered"]
     print(f"met here: {met}; read on {there.name} in {offered['ran']['memory_max']} bytes, at "
           f"most {offered['ran']['memory_peak']} held, in {offered['seconds']} s")
-    assert met["host"] == "here" and met["killed"] and met["limit"] == 96 * 2**20
+    assert met["host"] == "here" and met["limit"] == 96 * 2**20
+    assert met["killed"] or met["need"] > met["room"], met
     assert offered["ran"]["memory_max"] == str(LOAD_MEMORY * 2**20)
     assert offered["ran"]["image_id"] == here["ran"]["image_id"]
     assert offered["ran"]["code"] == here["ran"]["code"]
@@ -290,10 +292,13 @@ def test_a_job_with_a_large_folder_of_files_goes_over_and_reads(
         sizes = [largest_mb * 10**6] + [(BULK_MB - largest_mb) * 10**6 // (BULK_FILES - 1)] * (
             BULK_FILES - 1)
     for k, size in enumerate(sizes):
-        name = f"refs/part-{k:02d}.step"
-        (job.folder / name).parent.mkdir(exist_ok=True)
-        (job.folder / name).write_bytes(os.urandom(size))
-        extra.append(name)
+        # In a folder of their own, named in between files above it, each with an extended
+        # attribute, as an assembly names its parts' references and their bands in turn.
+        for name in (f"references/part-{k:02d}.step", f"band-{k:02d}.step"):
+            (job.folder / name).parent.mkdir(exist_ok=True)
+            (job.folder / name).write_bytes(os.urandom(size if "/" in name else 1000))
+            _provenance(job.folder / name)
+            extra.append(name)
     job = BenchJob(job.args, job.folder, (*job.files, *extra), job.memory, job.timeout)
     plain = _job(fixtures, tmp_path / "plain")
     name = there.reserve(3 * 1024)

@@ -5,7 +5,8 @@ the same read here (mqucifer/print-shop#380).
 `tests/test_bench_remote_docker.py`): its files and the bench's code sent into volumes of their
 own, the same `docker run`, what it saved brought back. Here it stands for a host whose settings
 state a larger memory for a load. The CAE suite's `load/one.json` is read in a container of
-`SMALL`, which it meets: the kernel stops it, and the host says so (`host.killed_met`). Offered
+`SMALL`, which it meets: a check of a step's need against its room refuses it, or the kernel
+stops it, and the host says so (`host.killed_met`). Offered
 the stand-in's 3g, it reads, and every figure is the same read's in 3g here, but for the seconds
 each step took.
 
@@ -91,11 +92,14 @@ def test_a_load_that_meets_a_small_limit_reads_with_more_as_the_same_read(
         mine["verdict"], mine["why"], mine["notes"])
     assert _figures(theirs["numbers"]) == _figures(mine["numbers"])
     met = theirs["ran"]["offered"]
-    assert met is not None and met["host"] == "here" and met["killed"]
-    assert met["limit"] == 96 * 2**20
+    # Met by a check of a step's need against its room (mqucifer/print-shop#376), or where the
+    # kernel stopped it first, by Docker's own `oom` event.
+    assert met is not None and met["host"] == "here" and met["limit"] == 96 * 2**20
+    assert met["killed"] or met["need"] > met["room"], met
     assert theirs["ran"]["memory_max"] == str(3 * 2**30) and theirs["ran"]["host"] == "docker"
     assert "offered: read on docker in its 3.0 GiB" in done.stdout
     assert "as on here its read met its container's 0.1 GiB" in done.stdout
     said = pool.said()
-    assert "was read on docker in its 3.0 GiB" in said and "the kernel killed it" in said
+    assert "was read on docker in its 3.0 GiB" in said
+    assert "met its container's memory (on here" in said
     assert there.ours_left() == [] and there.left == [] and not there.held()

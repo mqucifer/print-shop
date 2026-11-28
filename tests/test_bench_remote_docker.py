@@ -9,7 +9,10 @@ job included, with no remote host at all. `tests/test_bench_remote_live.py` runs
 
 from __future__ import annotations
 
+import contextlib
 import json
+import os
+import subprocess
 from pathlib import Path
 from typing import Any
 
@@ -68,3 +71,49 @@ def test_a_job_run_the_remotes_way_reads_as_it_does_here(tmp_path: Path) -> None
     # Its hold went with it, and nothing of its own is left for a later study to clear.
     assert not there.held() and not there._holds
     assert there.clear_stale() == ([], [])
+
+
+def _provenance(path: Path) -> None:
+    """An extended attribute on a file, as macOS gives every file a copy makes
+    (`com.apple.provenance`), or a user one where that's what the system allows; none where it
+    allows none."""
+    # Linux's call; off it, as on macOS, the `xattr` command below.
+    set_attribute: Any = getattr(os, "setxattr", None)
+    for name in ("com.apple.provenance", "user.provenance") if set_attribute else ():
+        try:
+            set_attribute(path, name, b"\x01\x02")
+            return
+        except OSError:
+            continue
+    with contextlib.suppress(OSError):
+        subprocess.run(["xattr", "-w", "com.apple.provenance", "x", str(path)], check=False,
+                       capture_output=True)
+
+
+def test_a_folder_whose_files_are_named_between_others_goes_over_whole(tmp_path: Path) -> None:
+    """A job's files in a folder of their own, named in between files above it, as an assembly
+    names its parts' references and their bands in turn, each with an extended attribute
+    (mqucifer/print-shop#380). The helper's tar, as root with only CHOWN and FOWNER, restored the
+    folder's owner, the job's user, as it moved past it, and then couldn't write the next file
+    into it: "Cannot open: Permission denied". All of them go over and the job reads."""
+    work = tmp_path / "made"
+    work.mkdir()
+    (work / "block.py").write_text(BLOCK)
+    made = host.run(["block.py"], work, python=True)
+    assert made.returncode == 0, made.stdout + made.stderr
+    folder = tmp_path / "job"
+    (folder / "references").mkdir(parents=True)
+    (folder / "block.step").write_bytes((work / "block.step").read_bytes())
+    files = ["block.step"]
+    for k in range(12):
+        for name in (f"references/part-{k:02d}.step", f"band-{k:02d}.step"):
+            (folder / name).write_bytes(os.urandom(2000))
+            _provenance(folder / name)
+            files.append(name)
+    _provenance(folder / "references")
+    job = BenchJob.of(["info", "block.step"], folder, files)
+    there = Remote(RemoteHost("docker", "localhost", (0, 1), 3 * 1024, 0), ("docker",))
+    done = there.run(job, (0, 1))
+    assert done.returncode == 0, done.stdout + done.stderr
+    assert _record(job, done)["ran"]["host"] == "docker"
+    assert there.ours_left() == [] and there.left == [] and not there.held()

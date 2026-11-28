@@ -671,3 +671,25 @@ def test_a_pre_check_that_refuses_a_step_says_its_need_and_room(
     (line,) = [x for x in capsys.readouterr().err.splitlines() if x.startswith(host.MET_LINE)]
     met = Met.of([line])
     assert met is not None and (met.need, met.room, met.limit) == (5 * GIB, GIB, 4 * GIB)
+
+
+def test_a_bundle_sends_each_folders_files_together(tmp_path: Path) -> None:
+    """Named in between files above it, a folder's files still go over together, after the
+    folder itself: the helper's tar restores a folder's owner as it moves past it, and can't
+    write into it again (mqucifer/print-shop#380)."""
+    import io
+    import tarfile
+
+    (tmp_path / "references").mkdir()
+    names = []
+    for k in range(3):
+        for name in (f"references/part-{k}.step", f"band-{k}.step"):
+            (tmp_path / name).write_bytes(b"x")
+            names.append(name)
+    given = BenchJob(("load", "band-0.step"), tmp_path, tuple(names))
+    with tarfile.open(fileobj=io.BytesIO(remote.bundle(given))) as tar:
+        work = [m.name for m in tar if m.name.startswith("work/")]
+    inside = [k for k, name in enumerate(work) if name.startswith("work/references/")]
+    assert inside == list(range(inside[0], inside[0] + 3)), work
+    assert work[inside[0] - 1] == "work/references"
+    assert sorted(work) == sorted(["work/references", *(f"work/{n}" for n in names)])

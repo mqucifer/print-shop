@@ -315,7 +315,10 @@ def bundle(job: BenchJob) -> bytes:
 
         folder("work", (uid, gid))
         made = {"work"}
-        for name in job.files:
+        # In order, so each folder's files are together: the helper's tar, as root with no
+        # power over another's files, restores a folder's owner, the job's user, as it moves
+        # past it, and couldn't write into it again (mqucifer/print-shop#380).
+        for name in sorted(set(job.files), key=lambda n: PurePosixPath(n).as_posix()):
             relative = PurePosixPath(name)
             if relative.is_absolute() or ".." in relative.parts:
                 raise ValueError(f"the job's file {name!r} isn't inside its folder")
@@ -647,7 +650,10 @@ class Remote:
             self._run("--rm", "-i", "--name", f"{name}-in", *self._helper(0), "--user",
                        "0:0", "--cap-add", "CHOWN", "--cap-add", "FOWNER",
                        "-v", f"{volumes[0]}:/mnt/work", "-v", f"{volumes[1]}:/mnt/code",
-                       self._bench_image(), "tar", "-x", "--numeric-owner", "-C", "/mnt",
+                       self._bench_image(), "tar", "-x", "--numeric-owner",
+                       # Each folder's owner and mode only once all of it is in: the helper
+                       # can't write into one owned by the job's user (mqucifer/print-shop#380).
+                       "--delay-directory-restore", "-C", "/mnt",
                        "-f", "-", data=bundle(job), timeout=HELPER_TIMEOUT)
             if self._stopped.is_set():
                 # Stopped while its files went over: it never starts.
