@@ -45,6 +45,8 @@ class HostLost(RuntimeError):
     as `run: docker's exit 125` (mqucifer/print-shop#380)."""
 
     kind: str = ""
+    #: Where a call there failed, its exit code and its words alone (`remote.words_only`).
+    how: str = ""
 
 #: This host's Docker, which its jobs run by.
 DOCKER = ("docker",)

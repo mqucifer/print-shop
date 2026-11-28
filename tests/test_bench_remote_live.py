@@ -268,3 +268,44 @@ def test_a_load_that_meets_a_small_local_limit_reads_there_with_more_as_the_same
         print(f"  {where}: {mine!r} here, {theirs!r} there")
     assert all(_close(mine, theirs) for _, mine, theirs in apart), apart
     assert there.ours_left() == [] and there.left == [] and not there.held()
+
+
+#: A large job's files, made up: tens of parts' STEP files, about 100 MB in all
+#: (mqucifer/print-shop#380).
+BULK_FILES, BULK_MB = 40, 100
+
+
+@pytest.mark.parametrize("largest_mb", [0, 60])
+def test_a_job_with_a_large_folder_of_files_goes_over_and_reads(
+    tmp_path: Path, fixtures: Path, there: Remote, largest_mb: int,
+) -> None:
+    """`load/one.json` with about `BULK_MB` MB of made-up files beside it, sent with it as a
+    large assembly sends its parts, evenly or with one of `largest_mb`: they go over, it reads
+    there, and its figures are a plain read's there."""
+    print(f"\nMemFree {there.memory_free_mb() / 1024:.1f} GiB before")
+    job = _job(fixtures, tmp_path / "bulk")
+    extra = []
+    sizes = [BULK_MB * 10**6 // BULK_FILES] * BULK_FILES
+    if largest_mb:
+        sizes = [largest_mb * 10**6] + [(BULK_MB - largest_mb) * 10**6 // (BULK_FILES - 1)] * (
+            BULK_FILES - 1)
+    for k, size in enumerate(sizes):
+        name = f"refs/part-{k:02d}.step"
+        (job.folder / name).parent.mkdir(exist_ok=True)
+        (job.folder / name).write_bytes(os.urandom(size))
+        extra.append(name)
+    job = BenchJob(job.args, job.folder, (*job.files, *extra), job.memory, job.timeout)
+    plain = _job(fixtures, tmp_path / "plain")
+    name = there.reserve(3 * 1024)
+    alone = _record(plain, there.run(plain, there.host.cores[:2], name))
+    name = there.reserve(3 * 1024)
+    try:
+        done = there.run(job, there.host.cores[:2], name)
+    except Exception as exc:
+        print(f"failed: {type(exc).__name__}, kind {getattr(exc, 'kind', '')!r}: {exc}")
+        raise
+    print(f"MemFree {there.memory_free_mb() / 1024:.1f} GiB after")
+    record = _record(job, done)
+    assert record["verdict"] == alone["verdict"] == "OK"
+    assert _figures(record["numbers"]) == _figures(alone["numbers"])
+    assert there.ours_left() == [] and there.left == [] and not there.held()

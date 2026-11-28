@@ -256,6 +256,20 @@ def _exit_said(code: int) -> str:
     return f"ssh's exit {code}" if code == 255 else f"docker's exit {code}"
 
 
+def words_only(text: str) -> str:
+    """What Docker or a helper said, its words alone: every token with a path, a name, a number
+    or a quote in it left out as `…`, so it can be said where the job's names and figures can't
+    (mqucifer/print-shop#380). `tar: work/leg.step: Cannot open: No space left on device` is
+    `tar: … Cannot open: No space left on device`."""
+    kept: list[str] = []
+    for token in text.split():
+        bare = token.strip(",;()[]")
+        word = bare if re.fullmatch(r"[A-Za-z]{1,24}:?", bare) else "…"
+        if not (word == "…" and kept and kept[-1] == "…"):
+            kept.append(word)
+    return " ".join(kept)[:300]
+
+
 def _failed_said(message: str) -> str:
     """How a call there failed, as a kind with no name or figure: SSH or Docker not answering,
     an image Docker hasn't, a file not sent back, or Docker's refusal."""
@@ -388,8 +402,11 @@ class Remote:
             raise HostLost(f"{self.name}: docker {args[0]} didn't answer: {exc}") from exc
         if check and done.returncode != 0:
             said = done.stderr.decode(errors="replace").strip()[-300:]
-            raise HostLost(f"{self.name}: docker {' '.join(args[:2])} failed: "
-                           f"{said or 'no reply'}")
+            lost = HostLost(f"{self.name}: docker {' '.join(args[:2])} failed: "
+                            f"{said or 'no reply'}")
+            # How, with no name or figure: its exit code, and its words alone.
+            lost.how = f"exit {done.returncode}: {words_only(said) or 'no reply'}"
+            raise lost
         return done
 
     def answers(self) -> bool:
@@ -683,7 +700,8 @@ class Remote:
                              Met.of(said_as_it_went, self.name))
         except HostLost as exc:
             if not exc.kind:
-                exc.kind = f"{stage[0]}: {_failed_said(str(exc))}"
+                how = getattr(exc, "how", "")
+                exc.kind = f"{stage[0]}: {_failed_said(str(exc))}" + (f" ({how})" if how else "")
             raise
         finally:
             self._clear(name, volumes)

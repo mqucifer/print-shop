@@ -22,6 +22,7 @@ instead, in a container of at most that much: past it, as where a larger host's 
 longer to meet its memory and leaves the band too little time, it's NO ANSWER. `ROOT/kill`
 makes the next bench command exit 137, and `ROOT/oom` makes Docker's events say the kernel
 stopped it for memory; `events` answers for the containers named in `ROOT/oom` alone.
+`ROOT/in_fails` makes the helper's `tar -x` say what it holds on its stderr and exit 2.
 
 Standard library only, and nothing of the tests' own: it runs as a program of its own.
 """
@@ -196,6 +197,10 @@ def _run(argv: list[str], root: Path) -> int:
         print("Filesystem 1B-blocks Used Available Use% Mounted\noverlay 1 1 900000000000 1% /")
         return 0
     if command[:2] == ["tar", "-x"]:
+        if (root / "in_fails").exists():
+            # As tar in the helper refuses a file sent: its own words, and its exit 2.
+            print((root / "in_fails").read_text(), file=sys.stderr, end="")
+            return 2
         if (root / "slow_in").exists():
             time.sleep(float((root / "slow_in").read_text()))
         base = command[command.index("-C") + 1]

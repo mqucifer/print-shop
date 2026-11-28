@@ -630,3 +630,24 @@ def test_the_settings_example_reads_as_the_settings_reader_reads_it(tmp_path: Pa
     found = stated(load_env(tmp_path / ".env"))[0]
     assert (found.ssh, found.memory_mb, found.floor_mb, found.load_mb) == (
         "spark", 15 * 1024, 10 * 1024, 12 * 1024)
+
+
+def test_a_refusal_as_the_files_go_over_is_said_by_its_exit_and_words_alone(
+    tmp_path: Path,
+) -> None:
+    """A helper's `tar -x` that refuses a file: its kind is the step, its exit code and its words,
+    with the file's name and every figure left out (`remote.words_only`)."""
+    root = tmp_path / "spark"
+    pool = Pool(Slots(Budget(4 * 1024, 4)), [_remote(root)], here_runner=_here())
+    (root / "in_fails").write_text("tar: work/bar.step: Cannot open: No space left on device\n"
+                                   "tar: Exiting with failure status due to previous errors\n")
+    planted = _planted(tmp_path / "job")
+    with pool.take(3072, 2, kind="load standing"):
+        done = pool.run(planted)
+    assert done.host == HERE
+    assert pool.last_offer is not None
+    (kind,) = pool.last_offer.failures
+    assert kind == ("sending its files: docker refused it (exit 2: tar: … Cannot open: No space "
+                    "left on device tar: Exiting with failure status due to previous errors)")
+    assert "bar" not in kind and not list((root / "volumes").iterdir())
+    assert remote.words_only('Error "/print-bench-1a-in" 12 MiB, Conflict.') == "Error … MiB …"
