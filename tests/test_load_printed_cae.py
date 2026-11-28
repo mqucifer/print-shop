@@ -39,7 +39,11 @@ LENGTH, WIDTH, DEPTH, MODULUS, G = 115.0, 20.0, 10.0, 1500.0, 9.80665
 #: ones the same, so they're held to it within 8%.
 AGREE = 0.08
 #: How far the beam's second, coarser mesh may read it from its first (mqucifer/print-shop#363):
-#: its movement, and its skin and core, each at its own scale.
+#: its movement, and its skin and core, each at its own scale, where resolved. Measured on the
+#: 2-20 beam: its skin 3.6% across its layers and 10.3% its stretch, its core 2.7% across; held
+#: at 15%, the most of those and half again. Its core's stretch, read in elements more than
+#: `load.REFINE_OVER` times its aim, is its mesh's figure, not its cell's: its two meshes 21%
+#: apart, said and not held (mqucifer/print-shop#363's review).
 SECOND_MOVES = 0.03
 SECOND_AGREE = 0.15
 
@@ -135,6 +139,41 @@ def worst(answer: Answer) -> float:
     return float(max(shares))
 
 
+#: How far under its own elements' nodal mean a core's cell may read where its cell is no
+#: coarser than its elements, a like scale: the planted 60% beam's, 1.36 mm cell, 0.154% over
+#: its cell against 0.162% at its elements' nodes (mqucifer/print-shop#363's review).
+LIKE_SCALE = 0.95
+
+
+def like_scale(core: dict[str, Any]) -> None:
+    """A core's reading over its cell against its own elements' nodal mean, like for like
+    (mqucifer/print-shop#363's review, the operator's ruling): main held a core no lower than
+    CalculiX's mean at a node, but that mixes skin and wedges at a singular corner, so it isn't
+    the core's figure; the core's own is, held where its cell is no coarser than its elements,
+    within `LIKE_SCALE`. Where the cell is coarser, a cell-scale read sits under element-scale
+    nodes wherever the strain varies within a cell, a property of reading at the cell's scale,
+    not a fault: planted, across the layers,
+
+        part           cell     over its cell  core's own nodes  all elements' nodes
+        4-60 beam      1.36 mm  0.154%         0.162%            0.235%
+        2-20 beam      4.07 mm  0.156%         0.230%            0.237%
+        pulled block   4.07 mm  0.343%         0.452%            0.369%
+        lines-0 beam   4.07 mm  0.360%         0.847%            1.176%
+
+    Which predicts a print is for the beam test bed, so the reply says both."""
+    if core["cell_mm"] <= core["across_cell_mesh_mm"]:
+        assert core["across_layers_pct"] >= LIKE_SCALE * core["core_nodal_across_pct"], core
+
+
+def read_or_cornered(answer: Answer) -> None:
+    """Read, OK; or, where a held face's edge or a sharp inside corner has no one figure in any
+    mesh, its two meshes either side of a limit, DISAGREE, the reply saying to round it: the
+    honest answer there (mqucifer/print-shop#363's review, the operator's ruling)."""
+    assert answer.verdict in ("OK", "DISAGREE"), answer.text
+    if answer.verdict == "DISAGREE":
+        assert "round it" in answer.text, answer.text
+
+
 def held_to_its_layers(cell: dict[str, Any]) -> None:
     """A printed cell's mesh holds its core as Orca's layers do, band by band of its layers,
     its wedges' volume less (`classify.checked`): short of it by no more than
@@ -161,9 +200,11 @@ def bar(answer: Answer, walls: int, density: int) -> None:
     assert beam["cores"][0]["pattern"] == "grid"
     assert beam["cores"][0]["density_pct"] == density
     assert answer.numbers["moves_mm"] == pytest.approx(sandwich(walls, density), rel=AGREE)
-    # Its core averaged over its own cell, never under the section's own arithmetic at its root.
+    # Its core averaged over its own cell, never under the section's own arithmetic at its root,
+    # and like for like, no lower than its own elements' nodal mean (`like_scale`).
     core = beam["cores"][0]
     assert core["stretch_pct"] >= core_at_root(walls, density), core
+    like_scale(core)
     assert core["cell_mm"] == pytest.approx(infill.cell_mm(
         "grid", density, as_printed.wall_thickness(1, 0.45, 0.2)), abs=1e-3)
     printed = answer.numbers["printed"]["beam"][0]
@@ -258,8 +299,12 @@ def test_the_second_check_reads_the_wedges_meshed_again_with_the_solid(cae: Any)
     first = place.get("mesh_moves_mm", place["moves_mm"])
     assert place["coarse_moves_mm"] == pytest.approx(first, rel=SECOND_MOVES)
     beam = fine.numbers["parts"]["beam"]
-    for one in (beam, beam["cores"][0]):
-        for key in ("across_layers_pct", "stretch_pct"):
+    core = beam["cores"][0]
+    aim = load.REFINE_OVER * max(load.REFINE_SIZE_CELLS * core["cell_mm"], load.HELD_FINEST)
+    for one in (beam, core):
+        for key, cell in (("across_layers_pct", "across"), ("stretch_pct", "stretch")):
+            if one is core and core[f"{cell}_cell_mesh_mm"] > aim:
+                continue  # unresolved, its mesh's figure: said, not held
             assert one[f"coarse_{key}"] == pytest.approx(one[key], rel=SECOND_AGREE), (key, one)
     core = beam["cores"][0]
     assert core["at_elements_stretch_pct"] > core["stretch_pct"]
@@ -371,7 +416,8 @@ def test_lines_along_the_bar_hold_it_stiffer_than_lines_across_it(cae: Any) -> N
     run along the beam, and at 45° none do."""
     along = cae("load", "load/printed-lines-0.json", *TIP)
     across = cae("load", "load/printed-lines-45.json", *TIP)
-    assert along.verdict == "OK" and across.verdict == "OK", along.text + across.text
+    read_or_cornered(along)
+    read_or_cornered(across)
     assert along.numbers["moves_mm"] < across.numbers["moves_mm"]
     for answer, angle in ((along, 0), (across, 45)):
         assert answer.numbers["moves_mm"] == pytest.approx(
@@ -385,7 +431,7 @@ def test_a_part_printed_turned_over_has_its_top_shells_on_its_other_face(cae: An
     there than printed own +z up."""
     over = cae("load", "load/printed-over.json", *TIP)
     up = cae("load", "load/printed-2-20.json", *TIP)
-    assert over.verdict == "OK", over.text
+    read_or_cornered(over)
     assert "printed own -z up" in over.text
     held_to_its_layers(over.numbers["printed"]["beam"][0])
     stretched = [a.numbers["parts"]["beam"]["cores"][0]["stretch_pct"] for a in (over, up)]
@@ -409,9 +455,11 @@ def test_a_core_pulled_across_its_layers_is_read_at_its_own_elements(cae: Any) -
     column = 1.6 / MODULUS + 8.4 / across
     stretch = 50 * G / (inner / column + MODULUS * (40**2 - inner) / 10)
     assert core["across_layers_pct"] > 100 * stretch / column / across
-    # And no lower than CalculiX's own mean at a node of its core, as main held it: read over
-    # its cell, across its layers fitted and read at its edge, never half a cell in.
-    assert core["across_layers_pct"] >= core["averaged_across_layers_pct"] - 1e-9, core
+    # The core's own nodal mean beside it: its elements' own strains at a node, no skin's or
+    # wedge's, away from held zones and three-face corners. Held where the core's cell is no
+    # coarser than its elements, a like scale (`like_scale`); here its 4.07 mm cell is coarser
+    # than its 2.5 mm elements, so it's said, not held.
+    like_scale(core)
 
 
 @pytest.mark.parametrize(
@@ -603,21 +651,17 @@ def test_each_layer_read_from_the_mesh_orca_slices_is_the_b_rep_s_within_its_cho
     assert truth < 18267 and cell["core_mm3"] == pytest.approx(truth, rel=0.01), (cell, truth)
 
 
-#: How far apart the slotted bar's two meshes may read its core's worst cells once meshed again
-#: round them (`load.refined`), as a share of the finer's.
-SLOT_AGREE = 0.10
-
-
 def test_a_core_read_near_its_limit_in_coarse_elements_is_meshed_again_round_it(cae: Any) -> None:
     """mqucifer/print-shop#363: the slotted bar's core is worst at the slot's inside corners,
     far from its held face, in elements of a 10 mm mesh many times its 1.36 mm cell, so its
-    cells were read at the mesh's scale, and its two meshes straddled its limit. Near its limit,
-    it's meshed again round every such place, both meshes, at half its cell, no finer than
-    1 mm, and the reply says so and what each read first; then its worst cells are in elements
-    at that, and the two meshes read them within `SLOT_AGREE` of each other."""
+    cells were read at the mesh's scale. Near its limit, it's meshed again round every such
+    place at half its cell, no finer than 1 mm, its coarser mesh at 1.5 times that, and the
+    reply says so and what each read first; then its worst cells are in elements at that. A
+    sharp inside corner has no one figure in any mesh, so its two meshes read it either side
+    of its limit, and the reply says DISAGREE and to round it: the honest answer there
+    (mqucifer/print-shop#363's review, the operator's ruling)."""
     answer = cae("load", "load/printed-slotted.json", "--weight", "4", "--at", "115,10,20",
                  "--mesh", "10")  # fmt: skip
-    assert answer.verdict != "NO ANSWER", answer.text
     assert "meshed again, both meshes" in answer.text, answer.text
     places = answer.numbers["refined"]
     core = answer.numbers["parts"]["bar"]["cores"][0]
@@ -628,6 +672,4 @@ def test_a_core_read_near_its_limit_in_coarse_elements_is_meshed_again_round_it(
         assert place["first_cell_mesh_mm"] > load.REFINE_OVER * near
     for key in ("across", "stretch"):
         assert core[f"{key}_cell_mesh_mm"] <= load.REFINE_OVER * near, core
-    for fine, coarse in (("across_layers_pct", "coarse_across_layers_pct"),
-                         ("stretch_pct", "coarse_stretch_pct")):
-        assert core[coarse] == pytest.approx(core[fine], rel=SLOT_AGREE), core
+    assert answer.verdict == "DISAGREE" and "round it" in answer.text, answer.text

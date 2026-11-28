@@ -4437,6 +4437,10 @@ def _core(
            f"of it core there, its peak at its elements "
            f"{core['at_elements_across_layers_pct']:.3f}% and "
            f"{core['at_elements_stretch_pct']:.3f}%, finer than its stiffness means"
+           + (f"; its own elements' mean at a node, the element's scale, no skin's or wedge's, "
+              f"away from held faces and three-face corners: {core['core_nodal_across_pct']:.3f}"
+              "% across its layers, beside its cell's, for the beam test bed to tell which "
+              "predicts a print" if core.get("core_nodal_across_pct") is not None else "")
            if "cell_mm" in core else "")
         + ("; the core thinner than its cell there, under half of it core, read over what "
            "core there is"
