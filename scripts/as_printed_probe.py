@@ -171,7 +171,11 @@ def main(argv: list[str]) -> int:
                   f"the part's {cell.get('part_wedges')} on {cell.get('faces')} faces, none on "
                   f"{cell.get('faces_held')} held, {cell.get('faces_thin')} thin, "
                   f"{cell.get('faces_outside')} leaving the part, {cell.get('faces_inverted')} "
-                  f"turned over; {cell.get('wedges_thinned')} made shallower", flush=True)
+                  f"turned over; {cell.get('wedges_thinned')} made shallower; its held faces "
+                  f"meshed at {cell.get('held_mesh_mm') or 'the mesh own'} mm, "
+                  f"{cell.get('held_zone_mm') or 0} mm deep, its finest cell met "
+                  f"{cell.get('held_finest_met')}; its straight elements "
+                  f"{cell.get('straight_short_pct')}% under the curved mesh", flush=True)
     return 0
 
 
