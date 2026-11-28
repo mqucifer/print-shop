@@ -267,7 +267,6 @@ class Box:
         name = f"print-rounds-{uuid.uuid4().hex[:12]}"
         self.ran += 1
         began = time.monotonic()
-        began_at = time.time()
         told = {**(env or {}), "BENCH_TIMEOUT": str(limit)}
         if longer is not None:
             told[host.OFFER] = str(longer)
@@ -359,7 +358,7 @@ class Box:
             text += "\n" + host.killed(said, memory)
             code = 2 if command[1:2] == ["-I"] else host.KILLED
             # Met only where Docker says the kernel stopped a process of its own for memory.
-            if host.oom_killed(("docker",), name, began_at):
+            if host.oom_killed(("docker",), name, time.monotonic() - began):
                 met = Met.of([host.killed_met(said, memory or host.MEMORY)])
         elif not timed_out:
             met = Met.of(said)

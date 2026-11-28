@@ -7,7 +7,8 @@ own, the same `docker run`, what it saved brought back. Here it stands for a hos
 state a larger memory for a load. The CAE suite's `load/one.json` is read in a container of
 `SMALL`, which it meets: a check of a step's need against its room refuses it, or the kernel
 stops it, and the host says so (`host.killed_met`). Offered
-the stand-in's 3g, it reads, and every figure is the same read's in 3g here, but for the seconds
+the stand-in's `OFFERED` (it holds about 120 MiB at most, so a busy Docker's MemFree holds it
+too), it reads, and every figure is the same read's in 3g here, but for the seconds
 each step took.
 
 Docker here is shared with other sessions' benches, which the stand-in's reservation would count
@@ -37,6 +38,8 @@ CASES = Path(__file__).parent / "cae_cases"
 LOAD = ("--weight", "5", "--at", "115,10,10")
 #: A container this read meets: it holds about 120 MiB at its most in this image.
 SMALL = "96m"
+#: The memory the stand-in offers it, in MiB: more than `SMALL`.
+OFFERED_MB = 1024
 
 
 def _figures(value: Any) -> Any:
@@ -78,7 +81,7 @@ def test_a_load_that_meets_a_small_limit_reads_with_more_as_the_same_read(
     mine = _record(enough, alone)
     assert mine["verdict"] == "OK", alone.stdout
 
-    there = Remote(RemoteHost("docker", "localhost", (0, 1), 3 * 1024, 0, 3 * 1024),
+    there = Remote(RemoteHost("docker", "localhost", (0, 1), 3 * 1024, 0, OFFERED_MB),
                    ("docker",))
     monkeypatch.setattr(there, "others", lambda held: (0, 0.0))
     pool = Pool(Slots(Budget(4 * 1024, 2)), [there])
@@ -96,10 +99,11 @@ def test_a_load_that_meets_a_small_limit_reads_with_more_as_the_same_read(
     # kernel stopped it first, by Docker's own `oom` event.
     assert met is not None and met["host"] == "here" and met["limit"] == 96 * 2**20
     assert met["killed"] or met["need"] > met["room"], met
-    assert theirs["ran"]["memory_max"] == str(3 * 2**30) and theirs["ran"]["host"] == "docker"
-    assert "offered: read on docker in its 3.0 GiB" in done.stdout
+    assert theirs["ran"]["memory_max"] == str(OFFERED_MB * 2**20)
+    assert theirs["ran"]["host"] == "docker"
+    assert "offered: read on docker in its 1.0 GiB" in done.stdout
     assert "as on here its read met its container's 0.1 GiB" in done.stdout
     said = pool.said()
-    assert "was read on docker in its 3.0 GiB" in said
+    assert "was read on docker in its 1.0 GiB" in said
     assert "met its container's memory (on here" in said
     assert there.ours_left() == [] and there.left == [] and not there.held()

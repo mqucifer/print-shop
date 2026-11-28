@@ -382,7 +382,7 @@ def run(
         deadline=None if margin is None else max(timeout, longer or 0) + margin,
         pull=pull,
     )
-    began = time.time()
+    began = time.monotonic()
     done, limit, could = _waited(argv, timeout, longer)
     if done is None:
         # Bounded: a host that stopped answering mustn't hold the study here for ever.
@@ -398,7 +398,7 @@ def run(
         trace.extend(said)
     if done.returncode == KILLED:
         # A process that's killed takes its buffered output with it, so this may be all there is.
-        if trace is not None and oom_killed(docker, name, began):
+        if trace is not None and oom_killed(docker, name, time.monotonic() - began):
             # Met only where Docker says the kernel stopped a process of its own for memory:
             # any other kill, as a stopped study's, is no memory met (mqucifer/print-shop#380).
             trace.append(killed_met(said, memory))
@@ -418,21 +418,59 @@ def progress_lines(stderr: str) -> tuple[str, list[str]]:
     return "".join(kept), said
 
 
-def oom_killed(docker: tuple[str, ...], name: str, since: float) -> bool:
+#: How far before a command began, and after it ended, Docker's events are asked for its `oom`,
+#: by the daemon's own clock, in s: a late event is still read, and another host's clock is
+#: never compared with this one's (mqucifer/print-shop#380).
+OOM_BEFORE, OOM_AFTER = 60, 5
+
+
+def daemon_time(docker: tuple[str, ...]) -> float | None:
+    """The time by Docker's daemon, in s since the epoch (`docker info`'s `SystemTime`), or
+    None where it doesn't say."""
+    import datetime
+
+    try:
+        done = subprocess.run([*docker, "info", "--format", "{{.SystemTime}}"],
+                              capture_output=True, text=True, timeout=60, check=False)
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    text = done.stdout.strip()
+    if done.returncode or not text:
+        return None
+    # RFC 3339 with up to nine figures of a second: Python reads six.
+    head, dot, rest = text.partition(".")
+    if dot:
+        figures = "".join(c for c in rest if c.isdigit())
+        zone = rest[len(figures):]
+        text = f"{head}.{figures[:6]}{zone}"
+    try:
+        return datetime.datetime.fromisoformat(text.replace("Z", "+00:00")).timestamp()
+    except ValueError:
+        return None
+
+
+def oom_killed(docker: tuple[str, ...], name: str, ran_s: float) -> bool:
     """Whether Docker said the kernel stopped a process in the container `name`, this process's
-    own, for memory since `since`: its `oom` event, asked of that container alone, so a kill of
-    any other kind, as `docker kill`'s, isn't taken for its memory (mqucifer/print-shop#380).
-    False where Docker doesn't say."""
+    own, for memory while it ran, `ran_s` s up to now: its `oom` event, asked of that container
+    alone and matched by its whole name, so neither a kill of any other kind, as `docker
+    kill`'s, nor a helper's of the same prefix is taken for its memory. The window is the
+    daemon's own clock's, from `OOM_BEFORE` s before it began to `OOM_AFTER` s past now, so a
+    late event is read and no two hosts' clocks are compared (mqucifer/print-shop#380). It
+    can't be inspected instead: it's removed as it ends (`--rm`). False where Docker doesn't
+    say."""
+    now = daemon_time(docker)
+    if now is None:
+        return False
     try:
         done = subprocess.run(
-            [*docker, "events", "--since", str(int(since) - 1), "--until",
-             str(int(time.time()) + 1), "--filter", f"container={name}", "--filter",
-             "event=oom", "--format", "{{.Action}}"],
-            capture_output=True, text=True, timeout=60, check=False,
+            [*docker, "events", "--since", str(int(now - ran_s - OOM_BEFORE)), "--until",
+             str(int(now + OOM_AFTER)), "--filter", f"container={name}", "--filter",
+             "event=oom", "--format", "{{.Action}} {{.Actor.Attributes.name}}"],
+            capture_output=True, text=True, timeout=60 + OOM_AFTER, check=False,
         )
     except (OSError, subprocess.TimeoutExpired):
         return False
-    return done.returncode == 0 and "oom" in done.stdout.split()
+    return done.returncode == 0 and f"oom {name}" in done.stdout.splitlines()
 
 
 def killed_met(said: list[str], memory: str) -> str:

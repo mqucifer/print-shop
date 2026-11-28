@@ -200,6 +200,13 @@ class Pool:
             with self._lock:
                 place.down = str(exc)
             return None
+        except BaseException:
+            # Anything else, as this host's own Docker not saying its image's ID: the slot is let
+            # go before it's raised, never held for ever (mqucifer/print-shop#380).
+            place.slots.let_go(memory_mb, cpus, cores)
+            with self._lock:
+                self._lock.notify_all()
+            raise
         return _Held(place, cores, reserved, kind)
 
     @contextmanager
@@ -431,6 +438,17 @@ class Pool:
                     tried[place.name] = (f"it failed it ({exc.kind or 'reserving its memory'}) "
                                          "and takes no more jobs this run")
                     failures.append(exc.kind or "reserving its memory")
+                    continue
+                except Exception as exc:  # noqa: BLE001 - the first answer stands, said
+                    # As this host's own Docker not saying its image's ID: the slot is let go,
+                    # never held for ever, and the first answer stands (mqucifer/print-shop#380).
+                    place.slots.let_go(memory_mb, int(host.CPUS), cores)
+                    with self._lock:
+                        self._lock.notify_all()
+                    tried[place.name] = f"reserving its memory raised {type(exc).__name__}"
+                    failures.append(f"reserving its memory: it raised {type(exc).__name__}")
+                    self._said(f"{said} was offered {place.name}'s {memory_mb / 1024:.1f} GiB, "
+                               f"whose reservation raised {type(exc).__name__}: {exc}"[:600])
                     continue
                 offered = dataclasses.replace(job, memory=f"{memory_mb}m", offered=met)
                 there = f"{place.name}'s {memory_mb / 1024:.1f} GiB"

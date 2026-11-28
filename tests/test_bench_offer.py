@@ -12,6 +12,7 @@ from __future__ import annotations
 import dataclasses
 import json
 import sys
+import time
 from pathlib import Path
 from typing import Any
 
@@ -693,3 +694,140 @@ def test_a_bundle_sends_each_folders_files_together(tmp_path: Path) -> None:
     assert inside == list(range(inside[0], inside[0] + 3)), work
     assert work[inside[0] - 1] == "work/references"
     assert sorted(work) == sorted(["work/references", *(f"work/{n}" for n in names)])
+
+
+# --------------------------------------------------------------------------
+# The re-review's fixes
+# --------------------------------------------------------------------------
+
+
+def test_a_reservation_that_raises_lets_its_slot_go_and_keeps_the_first_answer(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """As where this host's own Docker doesn't say its image's ID (`Remote._bench_image`): the
+    slot there is let go, the first answer stands, and the next offer reads there."""
+    root = tmp_path / "spark"
+    there = _remote(root)
+    pool = Pool(Slots(Budget(4 * 1024, 4)), [there], here_runner=_here())
+    reserve = there.reserve
+
+    def broken(memory_mb: int) -> str:
+        raise RuntimeError("no image print-shop/bench: run `scripts/bench.py build`")
+
+    monkeypatch.setattr(there, "reserve", broken)
+    planted = _planted(tmp_path / "first")
+    with pool.take(3072, 2, kind="load standing"):
+        done = pool.run(planted)
+    assert done.host == HERE and _record(planted.folder, done)["verdict"] == "NO ANSWER"
+    spark = pool.places[1]
+    assert spark.slots.running == 0 and spark.slots.budget.free_memory_mb == 15 * 1024
+    assert "whose reservation raised RuntimeError" in pool.said()
+    monkeypatch.setattr(there, "reserve", reserve)
+    again = _planted(tmp_path / "again")
+    with pool.take(3072, 2, kind="load standing"):
+        assert pool.run(again).host == "spark", "its slot was free for the next"
+    assert spark.slots.running == 0
+
+
+def test_a_placement_whose_reservation_raises_lets_its_slot_go(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    there = _remote(tmp_path / "spark")
+    pool = Pool(Slots(Budget(0, 4)), [there], here_runner=_here())
+
+    def broken(memory_mb: int) -> str:
+        raise RuntimeError("no image")
+
+    monkeypatch.setattr(there, "reserve", broken)
+    with pytest.raises(RuntimeError, match="no image"), pool.take(3072, 2, kind="load a"):
+        pass
+    assert pool.places[1].slots.running == 0
+
+
+def _outside(tmp_path: Path) -> Path:
+    secret = tmp_path / "outside" / "secret.step"
+    secret.parent.mkdir(parents=True)
+    secret.write_bytes(b"what isn't the job's")
+    return secret
+
+
+@pytest.mark.parametrize("how", ["file", "folder", "mesh"])
+def test_a_job_never_sends_a_file_through_a_link(tmp_path: Path, how: str) -> None:
+    """A named file that's a link, one under a linked folder, or a region's mesh that's a link,
+    is never read: a container here, with only the folder mounted, could never follow it. The
+    offer is refused before anything goes over, and the first answer stands."""
+    secret = _outside(tmp_path)
+    root = tmp_path / "spark"
+    pool = Pool(Slots(Budget(4 * 1024, 4)), [_remote(root)], here_runner=_here())
+    planted = _planted(tmp_path / "job")
+    if how == "file":
+        (planted.folder / "bar.step").unlink()
+        (planted.folder / "bar.step").symlink_to(secret)
+    elif how == "folder":
+        mesh = planted.folder / "meshes"
+        for found in mesh.iterdir():
+            found.unlink()
+        mesh.rmdir()
+        mesh.symlink_to(secret.parent, target_is_directory=True)
+        (secret.parent / "ring.stl").write_text("solid outside")
+    else:
+        (planted.folder / "meshes" / "ring.stl").unlink()
+        (planted.folder / "meshes" / "ring.stl").symlink_to(secret)
+    files = load_files(planted.folder, planted.args)
+    planted = dataclasses.replace(planted, files=tuple(files))
+    with pytest.raises(remote.NotPlain):
+        remote.bundle(planted)
+    with pool.take(3072, 2, kind="load standing"):
+        done = pool.run(planted)
+    assert done.host == HERE, "here, a link is the read's own, as it always was"
+    assert "whose read raised NotPlain" in pool.said()
+    assert _runs(root) == [] and not [e for e in _log(root) if "extracted" in e]
+    sent = list((root / "volumes").rglob("*"))
+    assert not any(p.is_file() and p.read_bytes() == secret.read_bytes() for p in sent)
+
+
+def test_what_a_job_saved_is_never_written_through_a_link(tmp_path: Path) -> None:
+    """A job's folder whose `bench-out` is a link: what it saved there isn't written through it,
+    and the files outside are as they were."""
+    secret = _outside(tmp_path)
+    folder = tmp_path / "job"
+    folder.mkdir()
+    (folder / "bench-out").symlink_to(secret.parent, target_is_directory=True)
+    import io
+    import tarfile
+
+    out = io.BytesIO()
+    with tarfile.open(fileobj=out, mode="w") as tar:
+        data = b"verdict: OK"
+        info = tarfile.TarInfo("bench-out/secret.step")
+        info.size = len(data)
+        tar.addfile(info, io.BytesIO(data))
+    with pytest.raises(remote.NotPlain):
+        remote.unpack(out.getvalue(), folder, ("bench-out/secret.step",))
+    assert secret.read_bytes() == b"what isn't the job's"
+    (folder / "bench-out").unlink()
+    remote.unpack(out.getvalue(), folder, ("bench-out/secret.step",))
+    assert (folder / "bench-out" / "secret.step").read_bytes() == b"verdict: OK"
+
+
+def test_an_oom_is_its_containers_own_by_its_whole_name_and_the_daemons_clock(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The fake's clock is an hour behind this host's, as another host's may be: its `oom` is
+    read in its own clock's window. A helper's of the same name's prefix isn't the job's."""
+    here = tmp_path / "here-docker"
+    here.mkdir()
+    (here / "images.json").write_text(json.dumps({"tag": host.CAE_IMAGE}))
+    docker = (sys.executable, str(FAKE), str(here))
+    monkeypatch.setattr(job, "DOCKER", docker)
+    planted = _planted(tmp_path / "job")
+    (here / "kill").write_text("")
+    (here / "oom").write_text("")
+    (here / "oom_name").write_text("NAME-in")
+    assert job.run_here(planted).met is None, "a helper's oom, not the job's"
+    (here / "oom").write_text("")
+    (here / "oom_name").unlink()
+    (here / "kill").write_text("")
+    assert job.run_here(planted).met is not None, "its own, an hour behind this host's clock"
+    now = host.daemon_time(docker)
+    assert now is not None and abs(now - (time.time() - fake_docker.CLOCK_BEHIND)) < 60

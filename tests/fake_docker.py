@@ -21,7 +21,10 @@ also plants `bound_up_to_mb`, a read that meets the memory reads a glass band's 
 instead, in a container of at most that much: past it, as where a larger host's whole takes
 longer to meet its memory and leaves the band too little time, it's NO ANSWER. `ROOT/kill`
 makes the next bench command exit 137, and `ROOT/oom` makes Docker's events say the kernel
-stopped it for memory; `events` answers for the containers named in `ROOT/oom` alone.
+stopped it for memory, at its own clock's time; `events` answers for the containers in
+`ROOT/oom` whose name starts with the one asked about, as a name filter can match, and whose
+time is in the window asked, by its clock: `CLOCK_BEHIND` s behind this host's, as another host's
+may be, and said by `info`.
 `ROOT/in_fails` makes the helper's `tar -x` say what it holds on its stderr and exit 2.
 
 Standard library only, and nothing of the tests' own: it runs as a program of its own.
@@ -43,6 +46,14 @@ from typing import Any
 VALUED = {"--name", "--label", "--pull", "--network", "--cpus", "--cpuset-cpus", "--memory",
           "--memory-swap", "--pids-limit", "--tmpfs", "--cap-drop", "--cap-add", "--security-opt",
           "--log-driver", "--ulimit", "--user", "-e", "-v", "-w"}
+#: How far its clock is behind this host's, in s.
+CLOCK_BEHIND = 3600
+
+
+def _clock() -> float:
+    return time.time() - CLOCK_BEHIND
+
+
 PLENTY = "MemTotal: 127000000 kB\nMemFree: 40000000 kB\nMemAvailable: 90000000 kB\n"
 
 
@@ -255,7 +266,9 @@ def _run(argv: list[str], root: Path) -> int:
         if (root / "kill").exists():
             (root / "kill").unlink()
             if (root / "oom").exists():
-                (root / "oom").write_text(name)
+                stopped = (root / "oom_name").read_text() if (root / "oom_name").exists() else name
+                with (root / "oom").open("a") as events:
+                    events.write(f"{stopped.replace('NAME', name)} {_clock()}\n")
             return 137
         code, said = bench(args, mounts["/work"], env, memory)
         if not (root / "silent").exists():
@@ -351,11 +364,20 @@ def main(argv: list[str]) -> int:
                 if (root / "running" / name).exists():
                     print(f"{name} 1GiB / 3GiB")
             return 0
-        case ["events", "--since", _, "--until", _, "--filter", watched, "--filter",
+        case ["info", "--format", "{{.SystemTime}}"]:
+            import datetime
+
+            print(datetime.datetime.fromtimestamp(_clock(), datetime.UTC).strftime(
+                "%Y-%m-%dT%H:%M:%S.%f123Z"))
+            return 0
+        case ["events", "--since", since, "--until", until, "--filter", watched, "--filter",
               "event=oom", "--format", _]:
-            stopped = (root / "oom").read_text().split() if (root / "oom").exists() else []
-            if watched.removeprefix("container=") in stopped:
-                print("oom")
+            lines = (root / "oom").read_text().splitlines() if (root / "oom").exists() else []
+            for line in lines:
+                stopped, at = line.split()
+                if (stopped.startswith(watched.removeprefix("container="))
+                        and float(since) <= float(at) <= float(until)):
+                    print(f"oom {stopped}")
             return 0
         case ["save", image]:
             sys.stdout.buffer.write(f"image:{image}".encode())

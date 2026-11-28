@@ -59,9 +59,11 @@ Standard library only: this runs outside the image.
 from __future__ import annotations
 
 import contextlib
+import errno
 import io
 import os
 import re
+import stat
 import subprocess
 import tarfile
 import threading
@@ -74,8 +76,8 @@ from . import host
 from .budget import megabytes
 from .job import HERE, BenchJob, HostLost, JobResult, Met, Stopped, saved_files
 
-__all__ = ["HOSTS", "NoRoom", "RanPastThere", "Remote", "RemoteHost", "Stopped", "cores_of",
-           "cpuset", "send", "stated"]
+__all__ = ["HOSTS", "NoRoom", "NotPlain", "RanPastThere", "Remote", "RemoteHost", "Stopped",
+           "cores_of", "cpuset", "open_plain", "send", "stated"]
 # `Stopped` is the job's own (`job.Stopped`), said here too, where a remote raises it.
 
 #: The setting that names the remote hosts, and each one's own keys after
@@ -293,6 +295,57 @@ def _meminfo(text: str) -> dict[str, int]:
     return {k: int(v) // 1024 for k, v in re.findall(r"^(\w+):\s+(\d+) kB", text, re.MULTILINE)}
 
 
+class NotPlain(ValueError):
+    """A job's file that isn't a plain file inside its folder: a link, at any step of its path,
+    or not a regular file. Never sent, never written through (mqucifer/print-shop#380): a link
+    would send a file from outside the folder to the host, which a container here, with only
+    the folder mounted, could never read."""
+
+
+def open_plain(folder: Path, name: str, flags: int = os.O_RDONLY,
+               make_dirs: bool = False) -> int:
+    """A file descriptor for `name` in `folder`, opened one step at a time, never through a link
+    and only to a regular file, as `rounds.paths.open_inside` opens one; its folders made where
+    `make_dirs`.
+
+    Raises:
+        NotPlain: If a step of it is a link, or it isn't a regular file, or it leads out.
+        FileNotFoundError: If it isn't there.
+    """
+    parts = PurePosixPath(name).parts
+    if not parts or PurePosixPath(name).is_absolute() or ".." in parts:
+        raise NotPlain(f"the job's file {name!r} isn't inside its folder")
+    here = os.open(folder, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        for part in parts[:-1]:
+            try:
+                nested = os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=here)
+            except FileNotFoundError:
+                if not make_dirs:
+                    raise
+                os.mkdir(part, 0o755, dir_fd=here)
+                nested = os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=here)
+            except OSError as exc:
+                if exc.errno in (errno.ELOOP, errno.ENOTDIR):
+                    raise NotPlain(f"the job's file {name!r} is under a link, or under what "
+                                   "isn't a folder") from exc
+                raise
+            os.close(here)
+            here = nested
+        try:
+            found = os.open(parts[-1], flags | os.O_NOFOLLOW | os.O_NONBLOCK, 0o644, dir_fd=here)
+        except OSError as exc:
+            if exc.errno == errno.ELOOP:
+                raise NotPlain(f"the job's file {name!r} is a link") from exc
+            raise
+        if not stat.S_ISREG(os.fstat(found).st_mode):
+            os.close(found)
+            raise NotPlain(f"the job's file {name!r} isn't a regular file")
+        return found
+    finally:
+        os.close(here)
+
+
 def bundle(job: BenchJob) -> bytes:
     """A job's files under `work/`, its owner the user its container runs as, and the bench's
     code as this checkout has it (what `host.container` mounts here) under `code/`: one tar."""
@@ -313,6 +366,15 @@ def bundle(job: BenchJob) -> bytes:
             with path.open("rb") as stream:
                 tar.addfile(info, stream)
 
+        def put_plain(given: str, name: str, owner: tuple[int, int]) -> None:
+            # Read through no link, from what was opened: never a file outside the folder.
+            with os.fdopen(open_plain(job.folder, given), "rb") as stream:
+                found = os.fstat(stream.fileno())
+                info = tarfile.TarInfo(name)
+                info.size, info.mode = found.st_size, (found.st_mode & 0o777) | 0o444
+                info.uid, info.gid = owner
+                tar.addfile(info, stream)
+
         folder("work", (uid, gid))
         made = {"work"}
         # In order, so each folder's files are together: the helper's tar, as root with no
@@ -326,7 +388,7 @@ def bundle(job: BenchJob) -> bytes:
                 if f"work/{parent}" not in made:
                     folder(f"work/{parent}", (uid, gid))
                     made.add(f"work/{parent}")
-            put(job.folder / name, f"work/{relative}", (uid, gid))
+            put_plain(name, f"work/{relative}", (uid, gid))
         folder("code", (0, 0))
         for path in sorted(host.HERE.rglob("*")):
             inside = path.relative_to(host.HERE)
@@ -359,9 +421,11 @@ def unpack(data: bytes, folder: Path, saved: tuple[str, ...]) -> None:
             stream = tar.extractfile(member)
             if stream is None:
                 continue
-            target = folder / relative
-            target.parent.mkdir(parents=True, exist_ok=True)
-            target.write_bytes(stream.read())
+            # Written through no link, as a folder of its own or one the job's files left
+            # there could be (mqucifer/print-shop#380): never to a file outside the folder.
+            with os.fdopen(open_plain(folder, name, os.O_WRONLY | os.O_CREAT | os.O_TRUNC,
+                                      make_dirs=True), "wb") as written:
+                written.write(stream.read())
             got.add(name)
     lost = sorted(set(wanted) - got)
     if lost:
@@ -619,13 +683,20 @@ class Remote:
 
         Raises:
             FileNotFoundError: If its files aren't in its folder.
+            NotPlain: If one is a link, or under one, or isn't a regular file.
             HostLost: If the host failed it, Docker's own or SSH's failure, or gave no reply:
                 never the part's answer. `RanPastThere` where it stopped at its limit.
             Stopped: If the study was stopped before it started.
         """
         if self._stopped.is_set():
             raise Stopped(f"the study was stopped before `{' '.join(job.args)}` started")
-        missing = [f for f in job.files if not (job.folder / f).exists()]
+        missing = []
+        for given in job.files:
+            # Each a plain file in its folder, through no link, before anything goes over.
+            try:
+                os.close(open_plain(job.folder, given))
+            except FileNotFoundError:
+                missing.append(given)
         if missing:
             raise FileNotFoundError(f"the job's files aren't in {job.folder}: "
                                     f"{', '.join(missing)}")
