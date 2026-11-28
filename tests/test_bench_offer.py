@@ -17,7 +17,7 @@ from typing import Any
 
 import pytest
 
-from print_shop.bench import host, job, load, progress, remote, report
+from print_shop.bench import cae, host, job, load, progress, remote, report
 from print_shop.bench.budget import Budget, Slots
 from print_shop.bench.job import HERE, BenchJob, JobResult, Met, load_files, saved_files
 from print_shop.bench.pool import Offers, Pool
@@ -130,6 +130,8 @@ def test_load_says_once_as_it_ends_that_its_read_met_the_memory(
     (group / "memory.peak").write_text(f"{4 * GIB - 5}\n")
     monkeypatch.setattr(progress, "CGROUP", group)
     monkeypatch.setattr(progress, "watch", lambda every=progress.EVERY: None)
+    # Its scratch folder is the test's own, never /work.
+    monkeypatch.setattr(cae, "DISK", tmp_path / "disk")
 
     def met_then(after: str) -> Any:
         def read(args: Any, given: Report) -> None:
@@ -651,3 +653,21 @@ def test_a_refusal_as_the_files_go_over_is_said_by_its_exit_and_words_alone(
                     "left on device tar: Exiting with failure status due to previous errors)")
     assert "bar" not in kind and not list((root / "volumes").iterdir())
     assert remote.words_only('Error "/print-bench-1a-in" 12 MiB, Conflict.') == "Error … MiB …"
+
+
+def test_a_pre_check_that_refuses_a_step_says_its_need_and_room(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str],
+) -> None:
+    """mqucifer/print-shop#376's checks of a step's need against the room pass both on, so the
+    met line says them: here a mesh too big to set up in load's own process."""
+    group = tmp_path / "cgroup"
+    group.mkdir()
+    (group / "memory.max").write_text(f"{4 * GIB}\n")
+    monkeypatch.setattr(progress, "CGROUP", group)
+    progress.forget_met()
+    with pytest.raises(load._Unread):
+        load._memory_unread("a made-up mesh's set-up", need=5 * GIB, room=GIB)
+    progress.say_met()
+    (line,) = [x for x in capsys.readouterr().err.splitlines() if x.startswith(host.MET_LINE)]
+    met = Met.of([line])
+    assert met is not None and (met.need, met.room, met.limit) == (5 * GIB, GIB, 4 * GIB)

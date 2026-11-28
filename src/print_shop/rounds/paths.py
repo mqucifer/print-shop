@@ -25,6 +25,10 @@ from pathlib import Path, PurePosixPath
 MAX_PATH = 200
 #: Made by the bench or by a run, never part of what a clean run starts from.
 MADE = ("bench-out", "renders", "panes", "pieces", ".pictures", "record", "__pycache__")
+#: The bench's own folder for its mesh and solve files (`bench.cae.SCRATCH`,
+#: mqucifer/print-shop#376), at the top of the working directory: never the run's. A killed
+#: `load` leaves it, so no walk of the folder finds it, made or not, and its size isn't the run's.
+BENCH_SCRATCH = ".bench-scratch"
 #: A run's own folder for what isn't its part (mqucifer/print-shop#315): a placed or exploded
 #: compound to draw, a turned copy to cut, a gauge. Only at the top of the working directory. Its
 #: files are never read as the part, never described, and never part of a clean run, and they count
@@ -126,7 +130,8 @@ def in_scratch(name: str | PurePosixPath | Path) -> bool:
 
 def walk_plain(source: Path, skip_made: bool = False) -> list[Path]:
     """The directory's regular files, as paths under it: never a link, to a file or a folder.
-    `skip_made` leaves out what runs make and the run's `scratch/`: what a clean run starts from."""
+    `skip_made` leaves out what runs make and the run's `scratch/`: what a clean run starts from.
+    The bench's own `.bench-scratch` is never a file of the run's, and is always left out."""
     found: list[Path] = []
     for root, folders, files in os.walk(source, followlinks=False):
         here = Path(root)
@@ -135,6 +140,7 @@ def walk_plain(source: Path, skip_made: bool = False) -> list[Path]:
             f
             for f in folders
             if not (here / f).is_symlink()
+            and not (top and f == BENCH_SCRATCH)
             and not (skip_made and (f.lower() in MADE or (top and f.lower() == SCRATCH)))
         )
         for name in sorted(files):
@@ -185,9 +191,11 @@ def geometry_hashes(directory: Path) -> dict[str, str]:
 
 
 def size_of(directory: Path) -> int:
-    """The bytes under the directory, links not followed."""
+    """The bytes under the directory, links not followed, less the bench's own scratch."""
     total = 0
-    for root, _, files in os.walk(directory, followlinks=False):
+    for root, folders, files in os.walk(directory, followlinks=False):
+        if Path(root) == directory:
+            folders[:] = [f for f in folders if f != BENCH_SCRATCH]
         for name in files:
             try:
                 total += os.lstat(Path(root) / name).st_size

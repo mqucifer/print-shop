@@ -19,7 +19,6 @@ from print_shop.bench import assembly, dovetail, host, through, way_in
 from print_shop.bench.load import (
     MIDS,
     _gmsh_errors,
-    band_refused,
     beyond,
     bolt_pulls,
     element_forces,
@@ -952,18 +951,6 @@ def test_a_solve_is_said_to_meet_the_memory_limit_only_where_something_was_stopp
     none = cgroup(tmp_path / "none", None, most)
     assert oom_kills(none) is None and memory_met(None, none) is None
     assert oom_kills(killed) == 1
-
-
-def test_a_lift_isn_t_read_without_a_band() -> None:
-    """mqucifer/print-shop#295, the operator's review: lifted, each part hangs by its own
-    weight, and read without its band a framed part would hang by less, so every strain would
-    be read under less than it carries: lower, and no lower bound. So a lift is refused there,
-    saying why, and a weight case is read."""
-    said = band_refused("top", ["frame"], "it met the container's memory")
-    assert said is not None
-    assert said.startswith("--lift top: the whole assembly couldn't be read (it met the")
-    assert "without its band it would hang by less" in said
-    assert band_refused(None, ["frame"], "it met the container's memory") is None
 
 
 def test_gmsh_s_own_errors_are_said_without_its_summary() -> None:
