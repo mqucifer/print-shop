@@ -48,12 +48,14 @@ import hashlib
 import json
 import math
 import shlex
+import signal
 import sqlite3
 import sys
 import tempfile
 from collections.abc import Callable
 from datetime import UTC, datetime
 from pathlib import Path
+from types import FrameType
 
 import trimesh
 
@@ -90,6 +92,19 @@ from print_shop.study.reading import (
     defaults,
 )
 from print_shop.study.table import as_plain, table
+
+
+def _interrupted(_signal: int, _frame: FrameType | None) -> None:
+    raise KeyboardInterrupt
+
+
+def _say_left(slots: Slots | Pool) -> None:
+    """Say each remote host's volumes this study couldn't remove, however it ended."""
+    if isinstance(slots, Pool):
+        for left in slots.left():
+            host_name, _, volume = left.partition(": ")
+            print(f"left on {host_name}: {volume}: remove it there with `docker volume rm`",
+                  file=sys.stderr, flush=True)
 
 
 def _with_remotes(here: Slots | Pool, env: dict[str, str]) -> Slots | Pool:
@@ -266,7 +281,10 @@ def study(args: argparse.Namespace) -> int:
         # The table as it fills in, each reading as it lands.
         (out / "study.md").write_text(table(so_far, part_name, names, where=out))
 
-    result = run(loop, part, progress=landed)
+    try:
+        result = run(loop, part, progress=landed)
+    finally:
+        _say_left(slots)
     (out / "study.md").write_text(table(result, part_name, names, where=out))
     (out / "study.json").write_text(json.dumps(as_plain(result, part_name), indent=1))
     with Ledger(where) as ledger:
@@ -477,6 +495,9 @@ def main(argv: list[str] | None = None) -> int:
     work.add_argument("--ledger", type=Path, help="the shop's ledger: the Mac's unless given")
     args = parser.parse_args(argv)
     if args.command == "run":
+        # A stop by signal ends it as an interrupt does: what it's reading is stopped, here and
+        # on each remote host, and the table so far is written (`study.loop.run`).
+        signal.signal(signal.SIGTERM, _interrupted)
         return study(args)
     if args.command == "orders-format":
         # What a worker started from this checkout can run (`orders.start_worker`).

@@ -48,6 +48,12 @@ def test_a_job_run_the_remotes_way_reads_as_it_does_here(tmp_path: Path) -> None
                                 ["parts/block.step"]))
     here = run_here(jobs[0])
     there = Remote(RemoteHost("docker", "localhost", (0, 1), 3 * 1024, 0), ("docker",))
+    # Its free memory and disk, read in a container of its own, and every bench container on it,
+    # counted by its name and label: what `reserve` reads before each start. Docker here is
+    # shared with other sessions' benches, so what they come to isn't asserted.
+    free_mb, disk_gb = there.probe()
+    assert free_mb > 0 and disk_gb > 0
+    assert there.others_mb({}) >= 0
     done = there.run(jobs[1], (0, 1))
     assert done.returncode == here.returncode == 0, done.stdout + done.stderr
     assert done.host == "docker" and len(done.saved) == 2
@@ -58,4 +64,4 @@ def test_a_job_run_the_remotes_way_reads_as_it_does_here(tmp_path: Path) -> None
     assert theirs["ran"]["network_up"] == ["lo"]
     assert theirs["ran"]["cpus_pinned"] == "0-1"
     assert theirs["ran"]["code"] == mine["ran"]["code"]
-    assert there.ours_left() == [] and there.left == []
+    assert there.ours_left() == [] and there.left == [] and there.over == []

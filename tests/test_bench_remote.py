@@ -220,7 +220,7 @@ def test_a_host_that_stops_answering_mid_job_is_lost_and_its_volumes_said(
     root = tmp_path / "spark"
     there = _remote(root)
     (root / "drop").write_text("")
-    with pytest.raises(HostLost, match="stopped answering"):
+    with pytest.raises(HostLost, match=r"failed `load .*` \(exit 255\): ssh: connect"):
         there.run(_job(tmp_path / "job"), (0, 1))
     assert len(there.left) == 2 and all(v.startswith("print-bench-") for v in there.left)
 
@@ -245,7 +245,9 @@ def test_it_touches_nothing_on_the_host_but_its_own(tmp_path: Path) -> None:
             assert argv[argv.index("--name") + 1].startswith("print-bench-")
             assert argv[argv.index("--network") + 1] == "none"
     asked = [e["argv"] for e in _log(root) if "argv" in e]
-    assert {a[0] for a in asked} <= {"version", "image", "volume", "run", "rm", "kill", "stats"}
+    assert {a[0] for a in asked} <= {"version", "image", "volume", "run", "rm", "kill", "stats",
+                                     "ps"}
+    assert all(a[1:3] == ["--filter", "name=print-bench-"] for a in asked if a[0] == "ps")
     assert all(a[:2] == ["image", "inspect"] for a in asked if a[0] == "image"), "its images"
 
 
@@ -499,6 +501,7 @@ def test_an_image_isnt_sent_where_the_hosts_disk_couldnt_hold_it(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str],
 ) -> None:
     there = _remote(tmp_path / "spark", images={})
+    monkeypatch.setattr(host, "image_gb", lambda image=host.IMAGE: 3.5)
     assert remote.send(there, (host.CAE_IMAGE,)) == 1
     assert "unknown, with no bench image there to read it" in capsys.readouterr().out
 
@@ -571,3 +574,192 @@ def test_a_study_reads_on_each_host_the_settings_name_that_has_these_images(
     (tmp_path / "spark" / "images.json").write_text(json.dumps({host.IMAGE: IDS[host.IMAGE]}))
     assert script._with_remotes(here, SETTINGS) is here
     assert f"not reading on spark: spark's {host.CAE_IMAGE} is none" in capsys.readouterr().err
+
+
+# --------------------------------------------------------------------------
+# The cold review's fixes
+# --------------------------------------------------------------------------
+
+
+def test_dockers_own_failure_is_the_hosts_never_the_parts(tmp_path: Path) -> None:
+    """Docker's own exit codes (125: cores the host hasn't) are a host failure, though its
+    Docker still answers: the job may run elsewhere, never read as the part's NO ANSWER."""
+    root = tmp_path / "spark"
+    there = _remote(root)
+    (root / "ncpu").write_text("4")
+    with pytest.raises(HostLost, match="Requested CPUs are not available"):
+        there.run(_job(tmp_path / "job"), (5, 6))
+    assert there.answers()
+    assert not list((root / "volumes").iterdir())
+
+
+def test_no_reply_at_all_is_the_hosts_failure(tmp_path: Path) -> None:
+    root = tmp_path / "spark"
+    there = _remote(root)
+    (root / "silent").write_text("")
+    with pytest.raises(HostLost, match="no reply"):
+        there.run(_job(tmp_path / "job"), (0, 1))
+
+
+def test_a_case_docker_refused_there_is_read_here_and_the_host_takes_no_more(
+    part: StudyPart, tmp_path: Path,  # noqa: F811
+) -> None:
+    root = tmp_path / "spark"
+    alone, _ = _study(part, tmp_path, 0, Slots(Budget(4 * 1024, 4)), _here)
+    pool = Pool(Slots(Budget(4 * 1024, 4)), [_remote(root, cores="4-7")],
+                here_runner=_slow_here(0.05))
+    (root / "ncpu").write_text("4")
+    across, hosts = _study(part, tmp_path, 1, pool, pool.run)
+    assert set(hosts) == {"here"}
+    assert _without_budget(alone) == _without_budget(across)
+    assert "spark took no more jobs" in across and "Requested CPUs" in across
+
+
+def test_a_job_that_runs_past_its_limit_there_is_read_again_elsewhere(
+    part: StudyPart, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,  # noqa: F811
+) -> None:
+    """A slower host mustn't turn a part's answer into NO ANSWER: a job stopped there on time
+    alone is read again on another host, and that host stays in use."""
+    root = tmp_path / "spark"
+    alone, _ = _study(part, tmp_path, 0, Slots(Budget(4 * 1024, 4)), _here)
+    monkeypatch.setattr(host, "timeout_for", lambda args: 1)
+    (root / "volumes").mkdir(parents=True)
+    (root / "delay").write_text("3")
+    pool = Pool(Slots(Budget(4 * 1024, 4)), [_remote(root)], here_runner=_here)
+    across, hosts = _study(part, tmp_path, 1, pool, pool.run)
+    assert set(hosts) == {"here"}
+    assert _without_budget(alone) == _without_budget(across)
+    assert not pool.places[1].down, "slower, not lost"
+
+
+def test_every_bench_container_on_the_host_counts_at_its_limit(tmp_path: Path) -> None:
+    """Another study's, or a run by hand: its name and its memory label only, never inspected;
+    one with no label counts at the most a bench command takes."""
+    root = tmp_path / "spark"
+    there = _remote(root)
+    _meminfo(root, free_gib=19.5)
+    (root / "others").write_text("print-bench-aaaaaaaaaaaa 3072\nprint-bench-bbbbbbbbbbbb\n"
+                                 "llm-server 99999\n")
+    with pytest.raises(NoRoom, match="7.0 GiB other bench containers there hold"):
+        there.reserve(3072)
+    (root / "others").write_text("print-bench-aaaaaaaaaaaa 3072\n")
+    assert there.reserve(3072)
+    asked = [e["argv"] for e in _log(root) if "argv" in e and e["argv"][0] == "ps"]
+    assert asked and all("name=print-bench-" in a for a in asked)
+
+
+def test_a_stop_during_the_upload_starts_no_job(tmp_path: Path) -> None:
+    root = tmp_path / "spark"
+    there = _remote(root)
+    (root / "slow_in").write_text("1.0")
+    threading.Timer(0.3, there.stop).start()
+    with pytest.raises(RuntimeError, match="stopped"):
+        there.run(_job(tmp_path / "job"), (0, 1))
+    assert not [e for e in _log(root) if e.get("command", [""])[0] == host.CAE_PYTHON]
+    assert not list((root / "volumes").iterdir())
+
+
+def test_a_job_there_has_a_deadline_of_its_own_and_runs_by_image_id(tmp_path: Path) -> None:
+    """It can't outlive its study: `timeout` past its longest limit kills it in its container,
+    whatever became of the Mac. And it runs the image by the ID that was checked, not by a tag
+    that could since have moved."""
+    root = tmp_path / "spark"
+    there = _remote(root)
+    job = _job(tmp_path / "job")
+    there.run(job, (0, 1))
+    (ran,) = [e["run"] for e in _log(root) if host.CAE_PYTHON in e.get("run", [])]
+    at = ran.index(IDS[host.CAE_IMAGE])
+    assert ran[at + 1:at + 4] == ["timeout", "-s", "KILL"]
+    assert int(ran[at + 4]) == job.timeout + remote.DEADLINE_MARGIN, "past its own limit"
+    assert ran[at + 5] == host.CAE_PYTHON
+    helpers = [e["run"] for e in _log(root) if "run" in e and e["image"] != IDS[host.CAE_IMAGE]]
+    assert helpers and all(e[-1] != host.IMAGE for e in helpers)
+    assert {e["image"] for e in _log(root) if "run" in e} <= set(IDS.values())
+
+
+def test_a_tag_moved_there_since_its_check_is_a_host_failure(tmp_path: Path) -> None:
+    root = tmp_path / "spark"
+    there = _remote(root)
+    assert there.refused() is None
+    (root / "images.json").write_text(json.dumps({**IDS, host.CAE_IMAGE: "sha256:" + "f" * 64}))
+    with pytest.raises(HostLost, match="No such image"):
+        there.run(_job(tmp_path / "job"), (0, 1))
+
+
+def test_a_job_isnt_started_where_the_hosts_disk_is_under_its_floor(tmp_path: Path) -> None:
+    root = tmp_path / "spark"
+    there = _remote(root)
+    (root / "df_free").write_text(str(int((host.FLOOR_GB + remote.WORK_GB - 0.5) * host.GB)))
+    with pytest.raises(NoRoom, match="Docker disk"):
+        there.reserve(3072)
+    (root / "df_free").write_text(str(int((host.FLOOR_GB + remote.WORK_GB + 0.5) * host.GB)))
+    assert there.reserve(3072)
+
+
+def test_a_work_folder_past_its_bound_is_said(tmp_path: Path) -> None:
+    root = tmp_path / "spark"
+    there = _remote(root)
+    (root / "du_k").write_text(str(int(remote.WORK_GB * host.GB / 1024) + 10))
+    there.run(_job(tmp_path / "job"), (0, 1))
+    assert there.over and "past its" in there.over[0]
+
+
+def test_a_study_says_the_volumes_it_left_as_it_ends(capsys: pytest.CaptureFixture[str],
+                                                     tmp_path: Path) -> None:
+    script = _settings_study()
+    there = _remote(tmp_path / "spark")
+    there.left.append("print-bench-aaaaaaaaaaaa-work")
+    script._say_left(Pool(Slots(Budget(4 * 1024, 4)), [there]))
+    assert "left on spark: print-bench-aaaaaaaaaaaa-work" in capsys.readouterr().err
+    import signal
+
+    assert script._interrupted is not None
+    with pytest.raises(KeyboardInterrupt):
+        script._interrupted(signal.SIGTERM, None)
+
+
+def test_a_kill_at_the_limit_doesnt_wait_for_ever(monkeypatch: pytest.MonkeyPatch,
+                                                  tmp_path: Path) -> None:
+    calls: list[dict[str, Any]] = []
+    real = subprocess.run
+
+    def run(argv: list[str], **kw: Any) -> Any:
+        if argv[-2:-1] == ["kill"]:
+            calls.append(kw)
+            return subprocess.CompletedProcess(argv, 0, "", "")
+        return real(argv, **kw)
+
+    monkeypatch.setattr(subprocess, "run", run)
+    monkeypatch.setattr(host, "_waited", lambda argv, timeout, longer: (None, timeout, False))
+    host.run(["load", "a.json"], tmp_path, timeout=1, docker=("true",))
+    assert calls and calls[0].get("timeout")
+
+
+def test_a_candidates_cases_are_all_read_on_one_host(
+    part: StudyPart, tmp_path: Path,  # noqa: F811
+) -> None:
+    """The Spark's processors can round a figure's last binary digit otherwise than the Mac's
+    (a bolt's sheared area, read on both): so the cases a candidate is compared by are read on
+    one host, whichever it is, while candidates spread across hosts."""
+    root = tmp_path / "spark"
+    (root / "volumes").mkdir(parents=True)
+    (root / "delay").write_text("0.2")
+    pool = Pool(Slots(Budget(4 * 1024, 4)), [_remote(root)], here_runner=_slow_here(0.2))
+    part.slots = pool
+    part.loading = BenchLoad(tmp_path / "assembly.json", "bar", pool.run)
+    result = run(StudyLoop(chat=_script()), part)
+    by_candidate = {r.candidate.name: {c.host for c in r.cases} for r in result.readings}
+    assert all(len(hosts) == 1 for hosts in by_candidate.values()), by_candidate
+    assert set().union(*by_candidate.values()) == {"here", "spark"}
+    assert "each candidate's cases on one host" in result.budget
+
+
+def test_a_group_whose_host_went_down_moves_and_says_so(tmp_path: Path) -> None:
+    root = tmp_path / "spark"
+    pool = Pool(Slots(Budget(4 * 1024, 4)), [_remote(root)], here_runner=_here)
+    with pool.take(3072, 2, kind="load a"), pool.take(3072, 2, kind="load a", group="c1"):
+        assert pool.where() == "spark"
+    pool.places[1].down = "it stopped answering"
+    with pool.take(3072, 2, kind="load b", group="c1"):
+        assert pool.where() == "here"
+    assert "c1's cases were read on more than one host: here, spark" in pool.said()

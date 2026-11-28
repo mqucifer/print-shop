@@ -96,8 +96,10 @@ __all__ = [
 #: The model's calls, the seconds and the candidates of its own the loop takes at most. A
 #: candidate is two slices and a `load` for each case, minutes each, so the time is hours.
 MAX_CALLS = 40
-#: How many hosts a case's `load` is tried on, where the one it ran on stopped answering.
-HOST_TRIES = 3
+#: How many hosts a case's `load` is tried on, where the one it ran on failed it or ran past
+#: its limit (`job.HostLost`): each such host is passed over after, and this host never fails
+#: so, so the last try is here.
+HOST_TRIES = 6
 MAX_SECONDS = 6 * 3600.0
 MAX_CANDIDATES = 10
 #: The candidates of its own the model reads before it may recommend.
@@ -327,14 +329,17 @@ def read_candidate(part: StudyPart, candidate: Candidate,
         kind = shlex.join(["load", *case.args])
         for tries_left in range(HOST_TRIES - 1, -1, -1):
             try:
-                with part.slots.take(_load_memory(case), LOAD_CORES, kind=kind):
+                # Every case of a candidate on one host: the last digits of a figure may
+                # differ between hosts' processors, never within one (`bench.pool`).
+                with part.slots.take(_load_memory(case), LOAD_CORES, kind=kind,
+                                     group=candidate.name):
                     if cancel is not None and cancel.is_set():
                         return None
                     record = part.loading(candidate, sliced, case, out / case.name)
                 break
             except HostLost as exc:
-                # The host stopped answering: no answer of the job's own, so it runs again on
-                # another, which the pool now gives it.
+                # The host failed it, or was too slow for its limit: no answer of the part's
+                # own, so it runs again on another, which the pool now gives it.
                 record = {"verdict": "NO ANSWER", "why": f"{type(exc).__name__}: {exc}"[:400]}
                 if not tries_left:
                     break

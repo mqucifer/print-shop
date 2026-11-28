@@ -13,10 +13,15 @@ seconds for each kind of job (its command's words, the same for every candidate 
 are kept as its jobs end, and a host not yet measured for a kind is tried first, so it is. Never
 assumed from a host's cores or clock.
 
-**Every figure is a local run's:** a remote runs the same image, by ID (`Remote.refused`), and
-the same code, each solve single-threaded inside, so where a job runs changes only how long it
-takes. A host that stops answering mid-job (`job.HostLost`) takes no more jobs, and the study
-runs that one again elsewhere.
+**Every verdict and every rounded figure is a local run's, but not every last digit:** a remote
+runs the same image, by ID (`Remote.refused`), and the same code, each solve single-threaded
+inside. Read on the Spark and on the Mac, a plate pulled off its bolts gave the same reply but
+for its bolt's sheared area, which its processor rounded otherwise in its last binary digit
+(mqucifer/print-shop#373). So the cases a candidate is compared by are read on one host, its
+`group`'s: the first of them that takes a slot sets it, and only where that host fails them do
+they move, said (`said`). A host that fails a job (`job.HostLost`) takes no more, and the
+study runs that one again elsewhere; one that ran past its limit there (`RanPastThere`) is
+passed over for that job alone.
 
 The pool is the study's slots (`take`) and its runner (`run`): a job runs on the host whose slot
 its thread holds.
@@ -35,7 +40,7 @@ from dataclasses import dataclass, field
 from . import host
 from .budget import LOOK_AGAIN, Budget, Slots, megabytes
 from .job import HERE, BenchJob, HostLost, JobResult, Runner, run_here, stop_here
-from .remote import NoRoom, Remote
+from .remote import NoRoom, RanPastThere, Remote
 
 __all__ = ["Place", "Pool"]
 
@@ -56,6 +61,8 @@ class Place:
     no_room_until: float = 0.0
     no_room: str = ""
     refusals: int = 0
+    #: Jobs that ran past their limit there, each read again on another host.
+    ran_past: int = 0
 
     def mean(self, kind: str) -> float | None:
         found = self.seconds.get(kind)
@@ -68,6 +75,7 @@ class _Held:
     cores: tuple[int, ...]
     reserved: str | None
     kind: str | None
+    group: str | None = None
 
 
 class Pool:
@@ -87,6 +95,11 @@ class Pool:
         self._running = 0
         #: The most jobs that ran at once, on every host.
         self.most = 0
+        #: The host each group's jobs are placed on (a candidate's cases), the hosts each one's
+        #: jobs ran on, and a lock for each, held while one of its jobs is placed.
+        self._groups: dict[str, str] = {}
+        self._ran_on: dict[str, set[str]] = {}
+        self._group_locks: dict[str, threading.Lock] = {}
 
     @property
     def budget(self) -> Budget:
@@ -130,33 +143,28 @@ class Pool:
         return _Held(place, cores, reserved, kind)
 
     @contextmanager
-    def take(self, memory_mb: int = 0, cpus: int = 1,
-             kind: str | None = None) -> Iterator[tuple[int, ...]]:
+    def take(self, memory_mb: int = 0, cpus: int = 1, kind: str | None = None,
+             group: str | None = None) -> Iterator[tuple[int, ...]]:
         """Hold `memory_mb` and `cpus` on a host while the block runs, and give it its cores
         where they're stated: here for anything that isn't a bench job (`kind` None, as a
-        slice), else on the fastest host with room for it now. `run` runs its job there.
+        slice), else on the fastest host with room for it now; or, in a `group` (a candidate's
+        cases), on the host its first job took, while that host takes jobs. `run` runs its job
+        there.
 
         Raises:
             ValueError: If no host's budget can hold it at all.
         """
-        while True:
+        lock = None
+        if group is not None:
             with self._lock:
-                seen = sum(p.slots.ended for p in self.places)
-                places = [p for p in self.places if not p.down
-                          and (kind is not None or p.remote is None)
-                          and memory_mb <= p.slots.budget.free_memory_mb
-                          and p.slots.budget.free_cpus >= 1]
-            if not places:
-                self.places[0].slots.refuse_past(memory_mb)
-                raise ValueError(f"no host takes a job of {memory_mb} MiB: "
-                                 + "; ".join(f"{p.name} {p.down}" for p in self.places[1:]))
-            held = next((h for p in self._order(places, kind)
-                         if (h := self._try(p, memory_mb, cpus, kind)) is not None), None)
-            if held is not None:
-                break
-            with self._lock:
-                if sum(p.slots.ended for p in self.places) == seen:
-                    self._lock.wait(timeout=LOOK_AGAIN)
+                lock = self._group_locks.setdefault(group, threading.Lock())
+            # One of a group's jobs is placed at a time, so its first sets the host for all.
+            lock.acquire()
+        try:
+            held = self._place(memory_mb, cpus, kind, group)
+        finally:
+            if lock is not None:
+                lock.release()
         with self._lock:
             self._running += 1
             self.most = max(self.most, self._running)
@@ -173,6 +181,45 @@ class Pool:
                 self._running -= 1
                 held.place.no_room_until = 0.0
                 self._lock.notify_all()
+
+    def _place(self, memory_mb: int, cpus: int, kind: str | None,
+               group: str | None) -> _Held:
+        while True:
+            avoid = self._avoided()
+            with self._lock:
+                seen = sum(p.slots.ended for p in self.places)
+                pinned = self._groups.get(group) if group is not None else None
+                if pinned is not None and any(p.name == pinned and (p.down or p.name in avoid)
+                                              for p in self.places):
+                    pinned = None
+                places = [p for p in self.places if not p.down and p.name not in avoid
+                          and (pinned is None or p.name == pinned)
+                          and (kind is not None or p.remote is None)
+                          and memory_mb <= p.slots.budget.free_memory_mb
+                          and p.slots.budget.free_cpus >= 1]
+            if not places:
+                self.places[0].slots.refuse_past(memory_mb)
+                raise ValueError(f"no host takes a job of {memory_mb} MiB: "
+                                 + "; ".join(f"{p.name} {p.down}" for p in self.places[1:]))
+            held = next((h for p in self._order(places, kind)
+                         if (h := self._try(p, memory_mb, cpus, kind)) is not None), None)
+            if held is not None:
+                if group is not None:
+                    held.group = group
+                    with self._lock:
+                        self._groups[group] = held.place.name
+                        self._ran_on.setdefault(group, set()).add(held.place.name)
+                return held
+            with self._lock:
+                if sum(p.slots.ended for p in self.places) == seen:
+                    self._lock.wait(timeout=LOOK_AGAIN)
+
+    def _avoided(self) -> set[str]:
+        """The hosts this thread's job ran past its limit on: it isn't placed there again."""
+        if not hasattr(self._local, "avoid"):
+            self._local.avoid = set()
+        avoid: set[str] = self._local.avoid
+        return avoid
 
     def _held_here(self) -> list[_Held]:
         """The slots this thread holds, the last it took last."""
@@ -192,7 +239,9 @@ class Pool:
 
         Raises:
             RuntimeError: If this thread holds no slot.
-            HostLost: If the host stopped answering: it takes no more jobs.
+            HostLost: If the host failed it: it takes no more jobs. `RanPastThere` where it ran
+                past its limit there: the host stays in use, and this thread's next take of a
+                slot for it is on another, so a slower host never makes the part's answer.
         """
         stack = self._held_here()
         if not stack:
@@ -205,10 +254,18 @@ class Pool:
                 done = self.here_runner(job)
             else:
                 done = place.remote.run(job, held.cores, held.reserved)
+        except RanPastThere:
+            self._avoided().add(place.name)
+            with self._lock:
+                place.ran_past += 1
+                if held.kind is not None:
+                    place.seconds.setdefault(held.kind, []).append(time.monotonic() - began)
+            raise
         except HostLost as exc:
             with self._lock:
                 place.down = str(exc)
             raise
+        self._avoided().clear()
         seconds = time.monotonic() - began
         with self._lock:
             place.placed += 1
@@ -233,6 +290,9 @@ class Pool:
         host that was refused or went down."""
         heavy = megabytes(memory)
         parts = [f"here, {self.budget.said(memory)}"]
+        if len(self.places) > 1:
+            parts[0] += ("; each candidate's cases on one host, as the last digits of a figure "
+                         "may differ between hosts")
         for place in self.places[1:]:
             assert place.remote is not None
             parts.append(f"{place.remote.host.said()}: {place.slots.budget.at_once(heavy)} "
@@ -249,6 +309,16 @@ class Pool:
             if place.refusals:
                 said += (f". {place.name}'s free memory held no more {place.refusals} times, "
                          f"last: {place.no_room}")
+            if place.ran_past:
+                said += (f". {place.ran_past} jobs ran past their limits on {place.name}, each "
+                         "read again on another host")
+            if place.remote is not None and place.remote.over:
+                said += f". On {place.name}, " + "; ".join(place.remote.over)
+        with self._lock:
+            mixed = {g: sorted(h) for g, h in self._ran_on.items() if len(h) > 1}
+        for group, hosts in sorted(mixed.items()):
+            said += (f". {group}'s cases were read on more than one host: {', '.join(hosts)}, "
+                     "as one failed them")
         if left := self.left():
             said += f". Volumes left behind: {', '.join(left)}"
         return said

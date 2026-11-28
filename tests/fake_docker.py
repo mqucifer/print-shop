@@ -4,9 +4,14 @@ Run as `python tests/fake_docker.py ROOT ARGS...` in place of `docker -H ssh://H
 Its volumes are folders in ROOT, its images' IDs are `ROOT/images.json`'s, and its `/proc/meminfo`
 is `ROOT/meminfo` (plenty, where that's absent). A bench command it runs is a made-up `load`
 (`bench`), read from the files sent; every other command is the few the remote's helpers run:
-`tar` in and out, `cat /proc/meminfo` and `df`. Every call is logged in `ROOT/log.jsonl`, so a
-test sees what was asked. `ROOT/down` makes every call fail as an SSH that can't connect would;
-`ROOT/drop` makes the next bench command fail so, and the host go down.
+`tar` in and out (with `du` of /work, `ROOT/du_k` where given), `/proc/meminfo` and `df`
+(`ROOT/df_free` bytes where given). An image is run by its ID alone, one of `images.json`'s.
+Every call is logged in `ROOT/log.jsonl`, so a test sees what was asked. `ROOT/down` makes
+every call fail as an SSH that can't connect would; `ROOT/drop` makes the next bench command
+fail so, and the host go down; `ROOT/ncpu` is how many cores it has, past which a pinned run
+is refused as Docker refuses it; `ROOT/silent` makes a bench command say nothing;
+`ROOT/slow_in` slows the files going in, by that many seconds; and `ROOT/others` lists other
+processes' bench containers, a name and a memory label to a line, as `docker ps` gives them.
 
 Standard library only, and nothing of the tests' own: it runs as a program of its own.
 """
@@ -24,7 +29,7 @@ from pathlib import Path
 from typing import Any
 
 #: The options of `docker run` that take a value.
-VALUED = {"--name", "--network", "--cpus", "--cpuset-cpus", "--memory", "--memory-swap",
+VALUED = {"--name", "--label", "--network", "--cpus", "--cpuset-cpus", "--memory", "--memory-swap",
           "--pids-limit", "--tmpfs", "--cap-drop", "--cap-add", "--security-opt",
           "--log-driver", "--ulimit", "--user", "-e", "-v", "-w"}
 PLENTY = "MemTotal: 127000000 kB\nMemFree: 40000000 kB\nMemAvailable: 90000000 kB\n"
@@ -103,20 +108,45 @@ def _run(argv: list[str], root: Path) -> int:
             image = word
             break
     command = list(words)
+    images = json.loads((root / "images.json").read_text()) if (
+        root / "images.json").exists() else {}
+    if image not in images.values():
+        print(f"Unable to find image '{image}' locally\ndocker: Error response from daemon: "
+              f"No such image: {image}", file=sys.stderr)
+        return 125
+    pinned = options.get("--cpuset-cpus", [""])[0]
+    ncpu = root / "ncpu"
+    if pinned and ncpu.exists():
+        most = max(int(c) for part in pinned.split(",") for c in part.split("-"))
+        if most >= int(ncpu.read_text()):
+            print("docker: Error response from daemon: Requested CPUs are not available - "
+                  f"requested {pinned}, available: 0-{int(ncpu.read_text()) - 1}",
+                  file=sys.stderr)
+            return 125
+    if command[:1] == ["timeout"]:
+        command = command[4:]
     mounts = _mounts(options.get("-v", []), root)
     for target, folder in mounts.items():
         if not folder.is_dir():
             print(f"no volume for {target}", file=sys.stderr)
             return 125
     _log(root, {"run": argv, "image": image, "command": command[:3]})
-    if command[:2] == ["cat", "/proc/meminfo"]:
+    if command[:2] == ["sh", "-c"] and command[2].startswith("cat /proc/meminfo"):
         meminfo = root / "meminfo"
         print(meminfo.read_text() if meminfo.exists() else PLENTY, end="")
+        free = (root / "df_free").read_text() if (root / "df_free").exists() else "900000000000"
+        print(f"Filesystem 1B-blocks Used Available Use% Mounted\noverlay 1 1 {free} 1% /")
         return 0
+    if command[:2] == ["sh", "-c"] and command[2].startswith("du -sk /work"):
+        du = (root / "du_k").read_text() if (root / "du_k").exists() else "12"
+        print(f"{du}\t/work", file=sys.stderr)
+        command = ["tar", "-c", "-C", "/work", "-f", "-", "--", *command[4:]]
     if command[:1] == ["df"]:
         print("Filesystem 1B-blocks Used Available Use% Mounted\noverlay 1 1 900000000000 1% /")
         return 0
     if command[:2] == ["tar", "-x"]:
+        if (root / "slow_in").exists():
+            time.sleep(float((root / "slow_in").read_text()))
         base = command[command.index("-C") + 1]
         got = []
         with tarfile.open(fileobj=io.BytesIO(sys.stdin.buffer.read()), mode="r") as tar:
@@ -153,7 +183,8 @@ def _run(argv: list[str], root: Path) -> int:
     name = options["--name"][0]
     running = root / "running"
     running.mkdir(exist_ok=True)
-    (running / name).write_text(options["--memory"][0])
+    labels = dict(e.split("=", 1) for e in options.get("--label", []))
+    (running / name).write_text(next(iter(labels.values()), ""))
     try:
         if (root / "drop").exists():
             (root / "drop").unlink()
@@ -164,7 +195,8 @@ def _run(argv: list[str], root: Path) -> int:
         if delay.exists():
             time.sleep(float(delay.read_text()))
         code, said = bench(args, mounts["/work"], env)
-        print(said, end="")
+        if not (root / "silent").exists():
+            print(said, end="")
         return code
     finally:
         (running / name).unlink()
@@ -209,6 +241,14 @@ def main(argv: list[str]) -> int:
             return 0
         case ["kill", name]:
             _log(root, {"kill": name})
+            return 0
+        case ["ps", "--filter", _, "--format", _]:
+            others = root / "others"
+            if others.exists():
+                print(others.read_text(), end="")
+            for running in sorted((root / "running").glob("*")) if (
+                    root / "running").exists() else ():
+                print(f"{running.name} {running.read_text()}")
             return 0
         case ["stats", "--no-stream", "--format", _, *names]:
             for name in names:
