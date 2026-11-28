@@ -350,11 +350,7 @@ def test_a_printed_part_s_joint_carries_what_statics_says(cae: Any) -> None:
     assert two.verdict == "OK", two.text
     joint = two.numbers["joints"]["root+tip"]
     assert joint["statics_force_n"] == pytest.approx([0, 0, -G], abs=1e-4)
-    # Within 1.5% of the weight: each node's movement is read to CalculiX's seven figures,
-    # some 4e-6 mm where the halves move 4 mm, and across a skin's wedge 0.8 mm deep that's a
-    # strain of 5e-6, about half a percent of what the weight makes; across the solid halves'
-    # 5 mm elements a sixth of it, and they read within 0.04% (mqucifer/print-shop#363).
-    assert joint["force_n"] == pytest.approx(joint["statics_force_n"], abs=0.015 * G)
+    assert joint["force_n"] == pytest.approx(joint["statics_force_n"], abs=0.003 * G)
     assert joint["moment_nmm"] == pytest.approx(joint["statics_moment_nmm"], abs=1.0)
     assert joint["bolt_pull_n"] == pytest.approx(joint["bolt_pull_statics_n"], rel=2e-3)
     for name in ("root", "tip"):

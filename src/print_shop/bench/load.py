@@ -578,6 +578,7 @@ class _Model:
         self.wedge_part = np.zeros(0, dtype=int)
         self.wedge_tensor = np.zeros((0, 3, 3, 3, 3))
         self.wedge_set: list[str] = []
+        self.wedge_elements = np.zeros(0, dtype=int)
         self._wedge_rows: np.ndarray | None = None
         #: Each set's map from its elements' strain to its core's own (`classify.core_strain`).
         self.core_strains: list[np.ndarray] = []
@@ -615,6 +616,7 @@ class _Model:
         #: meshed at --mesh and no finer round them (mqucifer/print-shop#301).
         self.spread = spread
         self.iterated: str | None = None
+
         #: The pairs of faces closer than the mesh's sag, meshed finer there
         #: (`close_faces`, mqucifer/print-shop#346): filled by `solve`. And how many faces curve
         #: tighter than gmsh's sizing would mesh at `close_faces.LEAST`, the least element then.
@@ -747,7 +749,8 @@ class _Model:
             in_wedge = wedges.covered(true.points @ turn.T + at, skin_layer)
             covered = in_wedge & ~true.core
             material = true.core | covered
-            read = classify.Read(true.cells, material.mean(axis=1), true.points, material)
+            read = classify.Read(true.cells, material.mean(axis=1), true.points, material,
+                                 true.point_cells)
             step_of = classify.step_of(read.share)
             steps[mine] = step_of
             core_points[mine] = true.core
@@ -803,8 +806,7 @@ class _Model:
                                      orca=true.core)
             # Each region's own volume and core, at each point's own cell, not its element's: the
             # mesh is coarser than a band of layers or a box's edge.
-            point_cells = layered.cell_of(true.points.reshape(-1, 3)).reshape(
-                -1, classify.POINTS)
+            point_cells = true.point_cells
             said = []
             for c in np.unique(read.cells):
                 cell = layered.cells[int(c)]
@@ -1134,13 +1136,15 @@ class _Model:
                 self._stiffnesses(fea.inp_file_name)
             self._add_to(fea.inp_file_name)
         kills = oom_kills()
-        if self.cores and ITERATE_PRINTED:
-            # A part read as printed is meshed finer at its faces, a few times the elements:
-            # CalculiX's iterative solver holds them in a fraction of its direct one's memory
-            # (mqucifer/print-shop#363), corrected to the balance as two passes are.
-            with step(f"CalculiX's iterative solve of the joined parts, as a part is printed, "
-                      f"{made}"):
-                self._iterated(fea, analysis, memory_met(kills) or 0, printed=True)
+        if self.cores and not self.two_pass:
+            # A part read as printed is corrected for what the seven figures of each movement
+            # leave unbalanced (`_iterated`, mqucifer/print-shop#363): by the direct solver,
+            # or the iterative one where that meets the memory or it's asked for.
+            with step(f"CalculiX's solve of the joined parts, as a part is printed, {made}"):
+                solved = not ITERATE_PRINTED and self._iterated(
+                    fea, analysis, 0, printed=True, direct=True)
+                if not solved:
+                    self._iterated(fea, analysis, memory_met(kills) or 0, printed=True)
             self.solve_s = round(time.time() - began, 2)
             self._inverted(fea)
             tidy_solve(fea)
@@ -1464,7 +1468,8 @@ class _Model:
             "round can be: give a finer --mesh"
         )
 
-    def _iterated(self, fea: Any, analysis: Any, limit: int, printed: bool = False) -> None:
+    def _iterated(self, fea: Any, analysis: Any, limit: int, printed: bool = False,
+                  direct: bool = False) -> bool:
         """Solved by CalculiX's iterative solver, where its direct one met the container's
         memory (mqucifer/print-shop#301), and corrected: the iterative solver stops at a fixed
         residual, which moves a strain by a percent or so, so what's left unbalanced at each
@@ -1473,13 +1478,19 @@ class _Model:
         the strain, the stress and the held faces' reaction add; and in one pass, each node's
         movement to CalculiX's seven figures (`_printed`) too. With `printed`, it's a part read
         as printed that's solved so from the start (mqucifer/print-shop#363): an element turned
-        inside out stops it at its first solve, as the direct solver's would."""
+        inside out stops it at its first solve, as the direct solver's would. With `direct`, by
+        CalculiX's direct solver, corrected at least once: the seven figures it prints of each
+        movement, some 4e-6 mm where a part moves 4 mm, leave a skin's thin wedges, stiff
+        across their depth, unbalanced by a part in a few hundred of the load, and the
+        correction's own seven figures are of what's left, so a joint's force read from the
+        nodes' balance is as good as statics. False where the direct solver gave no result."""
         path = Path(fea.inp_file_name)
         text = path.read_text()
         static = re.search(r"^\*STATIC\s*$", text, re.M)
         if static is None:
             raise NoAnswer("FreeCAD's CalculiX input has no *STATIC step to solve iteratively")
-        text = text[: static.start()] + ITERATIVE + text[static.end() :]
+        if not direct:
+            text = text[: static.start()] + ITERATIVE + text[static.end() :]
         loaded = sum(float(np.linalg.norm(p)) for p in self.pushed.values())
         runs: list[float] = []
         for run in range(1 + CORRECTIONS):
@@ -1488,10 +1499,12 @@ class _Model:
             fea.inp_file_name = str(job)
             ccx_one_thread(fea)
             if run == 0 and "nonpositive jacobian" in str(getattr(fea, "ccx_stdout", "")):
-                return
+                return True
             fea.load_results()
             results = [o for o in analysis.Group if o.isDerivedFrom("Fem::FemResultObject")]
             if not results or not results[-1].NodeStrainXX:
+                if direct and run == 0:
+                    return False
                 if printed and limit == 0:
                     raise NoAnswer(
                         f"CalculiX's iterative solver gave no result for the "
@@ -1521,13 +1534,15 @@ class _Model:
                 analysis.Document.removeObject(result.Name)
             left = self._unbalanced()
             runs.append(float(np.abs(left).sum()) / loaded if loaded else 0.0)
-            if runs[-1] <= RESIDUAL:
+            if runs[-1] <= RESIDUAL and (not direct or run >= 1):
                 break
             text = _cload(text, left, self.row)
         self.residuals = runs
         why = (
-            "a part is read as printed, and it's solved by CalculiX's iterative solver, as it "
-            "was asked to be,"
+            "a part is read as printed, so it's solved by CalculiX's direct solver,"
+            if direct
+            else "a part is read as printed, and it's solved by CalculiX's iterative solver, as "
+            "it was asked to be,"
             if printed
             else f"CalculiX's direct solver met the container's memory, {limit / 2**30:g} GiB, "
             "as the container's own count of what it stopped for memory says, so it's solved by "
@@ -1541,6 +1556,7 @@ class _Model:
             raise NoAnswer(
                 f"{self.iterated}: more than the {RESIDUAL:g} it's held to, so nothing is read"
             )
+        return True
 
     def _wired(self) -> np.ndarray:
         """Each element's nodes as rows, its corners first and then `MIDS`' mid-side nodes,

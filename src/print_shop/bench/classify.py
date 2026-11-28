@@ -114,6 +114,10 @@ class Layered:
     _sparse: dict[tuple[int, tuple[float, ...]], list[np.ndarray] | None] = field(
         default_factory=dict)
     unread: set[int] = field(default_factory=set)
+    #: Each layer's sparse area by the sections it's read from (`sparse`), and each section's
+    #: profile (`profile`).
+    _same: dict[tuple[Any, ...], list[np.ndarray] | None] = field(default_factory=dict)
+    _profiles: dict[tuple[Any, ...], tuple[Any, ...]] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         settings = self.printed.settings
@@ -232,6 +236,20 @@ class Layered:
             return self._sparse[key]
         at = self.low + (layer + 0.5) * self.height
         walls, top, bottom = self._key(cell)
+        # A layer's sparse area is its section's, less what its shells take, by its sections
+        # `top` above and `bottom` below (`as_printed.layer_core`), and less its islands': where
+        # each of those is the same as a layer already read, so is its sparse area, as on a
+        # part that's prismatic between its features, read once (`profile`).
+        shape = (self._key(cell), self.profile(at), self.profile(at + top * self.up),
+                 self.profile(at - bottom * self.up),
+                 tuple(self.profile(at, solid) for region, solid in self.regions
+                       if region.settings.walls is not None
+                       and not isinstance(region.shape, Layers)))  # fmt: skip
+        if shape in self._same:
+            self._sparse[key] = self._same[shape]
+            if self._same[shape] is None:
+                self.unread.add(layer)
+            return self._same[shape]
         try:
             found = as_printed.layer_core(
                 self.part, self.layers, at, walls, top, bottom, self.up,
@@ -248,7 +266,31 @@ class Layered:
         first, second = (a for a in range(3) if a != self.layers)
         rings = _rings(faces, first, second)
         self._sparse[key] = rings
+        self._same[shape] = rings
         return rings
+
+    def profile(self, at: float, shape: Any = None) -> tuple[Any, ...]:
+        """The part's section at `at` along its layers, or `shape`'s, as what tells it from
+        another: each of its wires' length and box, to a micrometre. Two the same are one
+        section, the one moved along the layers; none, an empty tuple."""
+        solid = self.part if shape is None else shape
+        cache = (id(solid), round(at, 9))
+        if cache not in self._profiles:
+            way = [0.0, 0.0, 0.0]
+            way[self.layers] = 1.0
+            import FreeCAD as App
+
+            wires = solid.slice(App.Vector(*way), float(at))
+            first, second = (a for a in range(3) if a != self.layers)
+            found = []
+            for wire in wires:
+                box = wire.BoundBox
+                low = (box.XMin, box.YMin, box.ZMin)
+                high = (box.XMax, box.YMax, box.ZMax)
+                found.append((round(wire.Length, 6), round(low[first], 6), round(low[second], 6),
+                              round(high[first], 6), round(high[second], 6)))  # fmt: skip
+            self._profiles[cache] = tuple(sorted(found))
+        return self._profiles[cache]
 
     def _less_islands(self, faces: list[Any], at: float) -> list[Any]:
         """A layer's sparse area less an island's ring of walls each side of its region's faces
@@ -329,12 +371,15 @@ POINTS = 64
 @dataclass(frozen=True)
 class Read:
     """A part's elements as read by their layers (`shares`): each one's cell, its share of
-    core, its `POINTS` points in the part's own axes and which of them are core."""
+    core, its `POINTS` points in the part's own axes, which of them are core, and each one's
+    own cell."""
 
     cells: np.ndarray
     share: np.ndarray
     points: np.ndarray
     core: np.ndarray
+    #: Each point's own cell.
+    point_cells: np.ndarray | None = None
 
 
 def shares(layered: Layered, corners: np.ndarray, to_own: Any) -> Read:
@@ -344,8 +389,12 @@ def shares(layered: Layered, corners: np.ndarray, to_own: Any) -> Read:
     part of it."""
     points = to_own(fine_middles(corners).reshape(-1, 3))
     cells = layered.cell_of(to_own(corners.mean(axis=1)))
-    core = layered.core(points, np.repeat(cells, POINTS)).reshape(len(corners), POINTS)
-    return Read(cells, core.mean(axis=1), points.reshape(len(corners), POINTS, 3), core)
+    # Each point by its own cell's layers, not its element's: an element across a band's or a
+    # box's edge has points in both, and a cell's layers are read within its own region.
+    own = layered.cell_of(points)
+    core = layered.core(points, own).reshape(len(corners), POINTS)
+    return Read(cells, core.mean(axis=1), points.reshape(len(corners), POINTS, 3), core,
+                own.reshape(len(corners), POINTS))
 
 
 # The blend
