@@ -22,6 +22,9 @@ Nothing here changes how the bench reads anything else.
 - `unplaceable`: `inverted`, with placing the element failing;
 - `alone-inverted`: the same element turned inside out in a part on its own's curved try in
   the second pass, and nowhere else;
+- `inverted-at:X,Y,Z`: CalculiX's words for the element whose middle is nearest (X, Y, Z) turned
+  inside out, in every try of the whole's read, curved and straight, and never in a glass band's
+  own read, with each band left out (mqucifer/print-shop#382);
 - `search-fails`: the search for faces closer than the mesh's sag failing;
 - `unsized`: the faces found close where gmsh's triangles cross given no local size, so gmsh
   refuses them as it did (mqucifer/print-shop#346);
@@ -234,6 +237,37 @@ elif mode in ("inverted", "unplaceable", "alone-inverted"):
             raise RuntimeError("forced by the test")
 
         load._Model._faces_near = unplaceable
+elif mode.startswith("inverted-at:"):
+    # The element nearest a place turned inside out, as a traced frame's leading's arcs turned
+    # one on a design run's table (mqucifer/print-shop#382), in the whole's read alone: the
+    # band's read, each band left out, solves as it is.
+    import numpy as np
+
+    at = np.array([float(v) for v in mode.split(":", 1)[1].split(",")])
+    ccx, solve = load._ccx, load._Model.solve
+    solving: list[Any] = []
+
+    def tracked(self: Any, doc: Any) -> None:
+        solving.append(self)
+        try:
+            solve(self, doc)
+        finally:
+            solving.pop()
+
+    def inverted_at(fea: Any, size: float) -> None:
+        ccx(fea, size)
+        if load._bands:
+            return
+        model = solving[-1]
+        numbers = list(model.fem.Volumes)
+        middles = np.array([np.mean([model.nodes[n] for n in model.fem.getElementNodes(e)[:4]],
+                                    axis=0) for e in numbers])  # fmt: skip
+        nearest = numbers[int(np.linalg.norm(middles - at, axis=1).argmin())]
+        fea.ccx_stdout += (" *ERROR in e_c3d: nonpositive jacobian\n        determinant in "
+                           f"element {nearest}\n")  # fmt: skip
+
+    load._Model.solve = tracked
+    load._ccx = inverted_at
 elif mode == "search-fails":
     # The search for faces closer than the mesh's sag itself failing (mqucifer/print-shop#346).
     def search_fails(*given: Any, **more: Any) -> Any:

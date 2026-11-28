@@ -2622,6 +2622,66 @@ def test_parts_reads_a_glass_band_s_lower_bound_where_two_passes_meet_the_time(
     assert forced["ran"]["limit_s"] == host.TWO_PASSES
 
 
+#: Where an element is turned inside out on the plain frame (`load_forced.py`'s `inverted-at`,
+#: mqucifer/print-shop#382): on its panel's top face, half way across, the panel its band; and in
+#: the block, 7 mm in from its held end and 8 mm up from its foot, away from every bolt.
+IN_LEADING = f"{PLATE_W / 2:g},{0.625 * PLATE_W / 2:g},4.5"
+IN_BLOCK = f"{PLATE_W + 28:g},8,-12"
+
+
+@pytest.mark.assembly
+@pytest.mark.bands
+def test_an_element_turned_inside_out_in_a_glass_band_s_leading_reads_the_band_s_bound(
+    cae: Any, plain_frame: Path
+) -> None:
+    """mqucifer/print-shop#382: on a design run's table, read whole on a host with room enough,
+    gmsh's curved mesh was refused, and CalculiX found an element of the straight one turned
+    inside out among a glass frame's leading's tiny arcs. That was `NO ANSWER`, with no band's
+    bound tried. Now an element turned inside out in a band's leading, its nearest faces the
+    frame's and within its band, leaves the whole unread, as memory and time do: the frame is
+    read with its band left out, a lower bound, saying why. The band's own read, each band
+    left out, solves as it is."""
+    args = ["load", f"{plain_frame.name}/joined.json", *_case("weight", PLATE_AT)]
+    forced = _forced(cae, "load_forced.py", [f"inverted-at:{IN_LEADING}", *args])
+    assert forced["verdict"] == "OK", forced["text"]
+    lower = forced["numbers"]["lower_bound"]
+    assert lower["parts"] == ["frame"]
+    assert lower["why"].startswith(
+        "CalculiX solved nothing: an element of the mesh, at most "
+    ), lower["why"]
+    assert (
+        " mm, is turned inside out, and each one it found is in a glass band's leading, frame's, "
+        "the faces nearest it within the band: 1 element(s), the first in frame, round "
+    ) in lower["why"], lower["why"]
+    assert forced["why"].startswith(
+        "read as a lower bound, frame with its glass band left out, the band unread: "
+    ), forced["why"]
+    assert "read as a lower bound: frame read with its glass band left out" in forced["text"]
+    assert "two_passes" not in forced["numbers"], "an element inside out isn't memory or time"
+
+
+@pytest.mark.assembly
+@pytest.mark.bands
+def test_an_element_turned_inside_out_away_from_any_band_is_still_no_answer(
+    cae: Any, plain_frame: Path
+) -> None:
+    """mqucifer/print-shop#382: the same banded frame, its element turned inside out in the
+    block, which names no band, as at a bolt's bore or a tight round elsewhere. It stays `NO
+    ANSWER`, with its advice to give a finer --mesh, and no band's bound is read for it."""
+    args = ["load", f"{plain_frame.name}/joined.json", *_case("weight", PLATE_AT)]
+    forced = _forced(cae, "load_forced.py", [f"inverted-at:{IN_BLOCK}", *args])
+    assert forced["verdict"] == "NO ANSWER", forced["text"]
+    why = forced["why"]
+    assert why.startswith("CalculiX solved nothing: an element of the mesh, at most "), why
+    assert ": 1 element(s), the first in block, round " in why, why
+    assert (
+        "; 1 of the 1 in no glass band's leading, so no band is left out for them. One with a "
+        "curved side on a small hole or a tight round can be: give a finer --mesh"
+    ) in why, why
+    assert "lower_bound" not in forced.get("numbers", {})
+    assert "read as a lower bound" not in forced["text"]
+
+
 @pytest.mark.assembly
 @pytest.mark.bands
 def test_a_lift_on_a_glass_frame_without_its_band_keeps_its_weight_and_strains_no_less(

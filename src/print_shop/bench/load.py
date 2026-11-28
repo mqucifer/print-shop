@@ -71,9 +71,13 @@ held to `--friction` where that's given.
 axes and turns and moves with the part, and a part turned off the assembly's axes is cut round
 its dovetail in its own. Where gmsh can't curve every element onto the parts' faces without
 turning one inside out, as on a traced glass frame, the mesh is made again with straight sides,
-and the reply says why. On that mesh a triangle is on a face where its corners are, as its
-mid-side nodes are on its chords, off a curved face, so a part drawn in its print pose and placed
-by its turns, as a design run places it, is told from the curved parts it meets
+and the reply says why. Where CalculiX still finds an element of it turned inside out, it's
+`NO ANSWER`, unless each one is in a glass band's leading, its nearest faces a banded part's
+and within its band: then the whole is unread, as where it meets the memory, and each banded
+part is read next with its band left out, a lower bound (mqucifer/print-shop#382). On the
+straight mesh a triangle is on a face where its corners are, as its mid-side nodes are on its
+chords, off a curved face, so a part drawn in its print pose and placed by its turns, as a
+design run places it, is told from the curved parts it meets
 (mqucifer/print-shop#319). Where gmsh refuses the joined parts because its triangles on one face
 cross another's, as where a cap sits in its counterbore with play round it and the two
 cylinders' chords sag into each other, the pairs of faces that meet nowhere and lie closer than
@@ -554,6 +558,28 @@ def on_band(face: Any, band: list[Any]) -> bool:
     )
     middle = Part.Vertex(App.Vector(*corners[int(areas.argmax())].mean(axis=0)))
     return any(s.distToShape(middle)[0] <= ON_BAND for s in near)
+
+
+def in_band(face: Any, band: list[Any]) -> bool:
+    """Whether a face of a whole part lies within its glass band's region, as its leading's
+    faces do (mqucifer/print-shop#382): the middle of each of its own triangles is inside one of
+    the band's solids, or on it, within `ON_BAND`. A face that only meets the band along an
+    edge, or runs on past it, is off it."""
+    import FreeCAD as App
+
+    box = App.BoundBox(face.BoundBox)
+    box.enlarge(ON_BAND)
+    near = [s for s in band if s.BoundBox.intersect(box)]
+    if not near:
+        return False
+    points, triangles = face.tessellate(ON_BAND_CHORD)
+    if not triangles:
+        return False
+    corners = np.array([[[p.x, p.y, p.z] for p in (points[i] for i in t)] for t in triangles])
+    return all(
+        any(s.isInside(App.Vector(*middle), ON_BAND, True) for s in near)
+        for middle in corners.mean(axis=1)
+    )
 
 
 def _moved(solid: Any, part: PartAt) -> Any:
@@ -1050,11 +1076,7 @@ class _Model:
                     self.closes,
                     self.tight,
                 )
-            raise NoAnswer(
-                f"CalculiX solved nothing: an element of the mesh, at most {self.size:g} mm, is "
-                f"turned inside out{where}. One with a curved side on a small hole or a tight "
-                "round can be: give a finer --mesh"
-            )
+            raise self._inverted_read(str(fea.ccx_stdout), where)
         # Two passes, and a glass band's read, which nothing follows (the operator, on a design
         # run's assembly on mqucifer/print-shop#376), are solved again iteratively where the
         # direct solver met the memory.
@@ -1083,6 +1105,97 @@ class _Model:
             self.printed = _printed(os.path.splitext(fea.inp_file_name)[0] + ".dat", self.row)
         tidy_solve(fea)
         self._balance()
+
+    def _inverted_read(self, said: str, where: str) -> NoAnswer:
+        """What the straight mesh says where CalculiX finds elements turned inside out: no answer,
+        with the advice to give a finer --mesh; or, where each one lies in a glass band's
+        leading (`_leading`), as on a traced frame's tiny arcs, the whole unread, so each part
+        that names its band is read next with it left out, a lower bound, as where the whole
+        meets the memory or the time or the mesh doesn't part it (mqucifer/print-shop#382). The
+        band's own read, with every band left out already, is never left to it again."""
+        mesh = f"an element of the mesh, at most {self.size:g} mm,"
+        numbers = list(dict.fromkeys(int(n) for n in INVERTED.findall(said)))
+        found = ""
+        if numbers and not _bands and any(p.band is not None for p in self.assembly.parts):
+            try:
+                with step(
+                    f"finding whether the {len(numbers)} element(s) CalculiX found turned inside "
+                    "out are in a glass band's leading"
+                ):
+                    leading, elsewhere = self._leading(numbers)
+            except NoAnswer as unfound:
+                # Where it can't be found, nothing is left to the band: said as it is.
+                found = f"; whether they're in a glass band's leading couldn't be found: {unfound}"
+            else:
+                if leading and not elsewhere:
+                    evidence = (
+                        f"CalculiX solved nothing: {mesh} is turned inside out, and each one it "
+                        f"found is in a glass band's leading, {', '.join(leading)}'s, the faces "
+                        f"nearest it within the band{where}"
+                    )
+                    return _Unread(
+                        f"{evidence}. The whole is unread, and each part that names its glass "
+                        "band is read next with it left out, as a lower bound",
+                        evidence,
+                    )
+                found = (
+                    f"; {elsewhere} of the {len(numbers)} in no glass band's leading, so no band "
+                    "is left out for them"
+                )
+        return NoAnswer(
+            f"CalculiX solved nothing: {mesh} is turned inside out{where}{found}. One with a "
+            "curved side on a small hole or a tight round can be: give a finer --mesh"
+        )
+
+    def _leading(self, numbers: list[int]) -> tuple[list[str], int]:
+        """Which of the elements CalculiX found turned inside out lie in a glass band's leading
+        (mqucifer/print-shop#382): an element does where each of its nearest faces, those
+        within its longest side of its middle, or the one nearest it within the mesh's size
+        where none is, is a face of a part that names its band and lies within that band's
+        region, where the assembly puts it (`in_band`). The names of the parts whose leading
+        holds any, and how many lie elsewhere: one with no face near it is elsewhere."""
+        import FreeCAD as App
+        import Part
+
+        folder = Path(self.assembly.path).parent
+        regions = {
+            k: [_moved(s, part) for s in Part.read(str(folder / part.band)).Solids
+                if s.Volume > 1e-6]
+            for k, part in enumerate(self.assembly.parts)
+            if part.band is not None
+        }  # fmt: skip
+        faces = self.whole.Faces
+        boxes = np.array(
+            [[b.XMin, b.YMin, b.ZMin, b.XMax, b.YMax, b.ZMax] for b in (f.BoundBox for f in faces)]
+        ).reshape(-1, 6)
+        owners = self._face_owners()
+        #: Each face looked at, by its index: the parts it's a face of whose band it lies in.
+        banded: dict[int, set[int]] = {}
+        held: set[int] = set()
+        elsewhere = 0
+        for number in numbers:
+            corners = np.array([self.nodes[n] for n in self.fem.getElementNodes(number)[:4]])
+            middle = corners.mean(axis=0)
+            longest = max(float(np.linalg.norm(a - b)) for a in corners for b in corners)
+            reach = max(longest, self.size)
+            close = np.nonzero(
+                np.all(boxes[:, :3] - reach <= middle, axis=1)
+                & np.all(middle <= boxes[:, 3:] + reach, axis=1)
+            )[0]
+            point = Part.Vertex(App.Vector(*middle))
+            near = sorted((float(faces[i].distToShape(point)[0]), int(i)) for i in close)
+            mine = [i for d, i in near if d <= longest] or [i for _, i in near[:1]]
+            for i in mine:
+                if i not in banded:
+                    banded[i] = {
+                        k for k in owners[i] if k in regions and in_band(faces[i], regions[k])
+                    }
+            if mine and all(banded[i] for i in mine):
+                held.update(*(banded[i] for i in mine))
+            else:
+                elsewhere += 1
+        close_faces._let_go(*faces)
+        return [self.assembly.parts[k].name for k in sorted(held)], elsewhere
 
     def _unparted_read(self, unparted: _Unparted) -> NoAnswer:
         """What two passes say of a mesh that gives parts no element of their own: the whole

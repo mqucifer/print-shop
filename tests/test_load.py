@@ -1631,3 +1631,99 @@ def test_a_triangle_taken_by_its_corners_lies_on_the_face_or_is_left_out() -> No
     up = np.array([0, 0, 1.0])
     assert lies_on(flat, flat.mean(axis=0), up, 0.0)
     assert not lies_on(flat + [0, 0, 0.01], flat.mean(axis=0), up, 0.0)
+
+
+def _inverted_model(banded: bool, leading: tuple[list[str], int] | Exception) -> Any:
+    """A model as far as `_Model._inverted_read` asks: its size, its parts, banded or not, and
+    which of the elements turned inside out its `_leading` puts in a band's leading."""
+    import types
+
+    def found(numbers: list[int]) -> tuple[list[str], int]:
+        if isinstance(leading, Exception):
+            raise leading
+        return leading
+
+    parts = [
+        types.SimpleNamespace(name="frame", band="band.step" if banded else None),
+        types.SimpleNamespace(name="block", band=None),
+    ]
+    return types.SimpleNamespace(
+        size=3.0, assembly=types.SimpleNamespace(parts=parts), _leading=found
+    )
+
+
+#: CalculiX's words for two elements turned inside out, the second twice.
+INVERTED_SAID = (
+    " *ERROR in e_c3d: nonpositive jacobian\n        determinant in element 7\n"
+    " *ERROR in e_c3d: nonpositive jacobian\n        determinant in element 9\n"
+    " *ERROR in e_c3d: nonpositive jacobian\n        determinant in element 9\n"
+)
+WHERE = ": 2 element(s), the first in frame"
+ADVICE = ". One with a curved side on a small hole or a tight round can be: give a finer --mesh"
+
+
+def test_elements_turned_inside_out_in_a_glass_band_s_leading_leave_the_whole_unread() -> None:
+    """mqucifer/print-shop#382: where each element CalculiX finds turned inside out is in a
+    glass band's leading, the whole is unread, not for memory, so the band's lower bound is read
+    next, and its why says where they are. No advice to mesh finer goes with it."""
+    from print_shop.bench import load
+
+    model = _inverted_model(True, (["frame"], 0))
+    found = load._Model._inverted_read(model, INVERTED_SAID, WHERE)
+    assert isinstance(found, load._Unread) and not found.memory
+    assert found.evidence == (
+        "CalculiX solved nothing: an element of the mesh, at most 3 mm, is turned inside out, "
+        "and each one it found is in a glass band's leading, frame's, the faces nearest it "
+        "within the band: 2 element(s), the first in frame"
+    )
+    assert str(found).endswith(
+        ". The whole is unread, and each part that names its glass band is read next with it "
+        "left out, as a lower bound"
+    )
+    assert "--mesh" not in str(found)
+
+
+@pytest.mark.parametrize(
+    ("banded", "leading", "said"),
+    [
+        # Away from any band: no band is tried, and the advice stands.
+        (True, ([], 2), "; 2 of the 2 in no glass band's leading, so no band is left out for them"),
+        # One in the leading and one elsewhere: the one elsewhere isn't the band's.
+        (True, (["frame"], 1),
+         "; 1 of the 2 in no glass band's leading, so no band is left out for them"),
+        # Where it can't be found, it's said, and nothing is left to the band.
+        (True, ValueError("forced"),
+         "; whether they're in a glass band's leading couldn't be found: load stopped finding "
+         "whether the 2 element(s) CalculiX found turned inside out are in a glass band's "
+         "leading: ValueError: forced"),
+        # No part names a band: as it was.
+        (False, (["frame"], 0), ""),
+    ],
+)  # fmt: skip
+def test_an_element_turned_inside_out_outside_any_band_s_leading_is_no_answer(
+    banded: bool, leading: tuple[list[str], int] | Exception, said: str
+) -> None:
+    """mqucifer/print-shop#382: an element turned inside out away from any glass band's leading
+    (a bolt's bore, a tight round elsewhere) stays `NO ANSWER`, with its advice to give a finer
+    `--mesh`, as before; and where the assembly names no band, its words are as they were."""
+    from print_shop.bench import load
+
+    found = load._Model._inverted_read(_inverted_model(banded, leading), INVERTED_SAID, WHERE)
+    assert type(found) is NoAnswer
+    assert str(found) == (
+        f"CalculiX solved nothing: an element of the mesh, at most 3 mm, is turned inside out"
+        f"{WHERE}{said}{ADVICE}"
+    )
+
+
+def test_the_band_s_own_read_never_leaves_an_element_turned_inside_out_to_the_band_again(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """mqucifer/print-shop#382: with each band left out already, a face where the band was cut
+    away lies on its band, so an element turned inside out there is no answer: the band's read
+    can't be left to itself."""
+    from print_shop.bench import load
+
+    monkeypatch.setitem(load._bands, "frame", object())
+    found = load._Model._inverted_read(_inverted_model(True, (["frame"], 0)), INVERTED_SAID, WHERE)
+    assert type(found) is NoAnswer and str(found).endswith(WHERE + ADVICE)
