@@ -894,9 +894,9 @@ class Bands:
         return None
 
 
-#: How near to the fullest cell round it a cell's core must be for it to be read
-#: (`element_averaged`).
-FULLEST = 0.9
+#: How much of its window's spread a line must explain for a core's strain to be read by it
+#: (`element_averaged`): a gradient's all of it, a single element's peak little.
+FIT_HOLDS = 0.9
 
 
 @dataclass
@@ -1110,18 +1110,18 @@ def _apart(one: list[np.ndarray], other: list[np.ndarray]) -> float:
     return float(shape(one).symmetric_difference(shape(other)).area)
 
 
-def _edge_of(where: np.ndarray, up: int, core_at: Callable[[np.ndarray], np.ndarray],
-             step: float, cell: float, way: float) -> np.ndarray:
-    """How far each place's core goes on across its layers, `way` up or down, where it ends
-    within half a cell of it: half a layer's `step` short of the first layer that isn't core
-    (`element_averaged`), its middle being the layer's; infinite where it goes on past that."""
+def _edge_of(where: np.ndarray, axis: int, core_at: Callable[[np.ndarray], np.ndarray],
+             step: float, reach: float, way: float) -> np.ndarray:
+    """How far each place's core goes on along `axis`, `way` up or down it, where it ends within
+    `reach` of it: half a `step` short of the first point that isn't core
+    (`element_averaged`); infinite where it goes on past that."""
     found = np.full(len(where), np.inf)
     going = np.ones(len(where), dtype=bool)
-    for k in range(1, int(math.ceil(cell / 2 / step)) + 1):
+    for k in range(1, int(math.ceil(reach / step)) + 1):
         if not going.any():
             break
         ahead = where[going].copy()
-        ahead[:, up] += way * k * step
+        ahead[:, axis] += way * k * step
         stops = ~core_at(ahead)
         ended = np.flatnonzero(going)[stops]
         found[ended] = way * (k - 0.5) * step
@@ -1142,37 +1142,30 @@ def element_averaged(middles: np.ndarray, strains: np.ndarray, weights: np.ndarr
                      cell: float, up: int | None = None,
                      core_at: Callable[[np.ndarray], np.ndarray] | None = None,
                      step: float = 0.0) -> Averaged:
-    """A core's strain averaged over its own cell, element by element (mqucifer/print-shop#363):
-    each element's core's mean strain, at its core's middle, weighted by its core's volume, and
-    averaged over the elements whose middles lie within its cell, a cube `cell` across centred
-    on it; its fill the share of that cube their core holds. Its stiffness is its cell's mean,
-    so it's read no finer than that; and a thick core is read in its fullest cells, each that
-    holds `FULLEST` of the most any within a cell of it holds, as a lattice's cell lies in its
-    core and not centred on its edge. Per element, not per voxel, so it holds what the mesh
-    does, whatever the part's size.
+    """A core's strain over its own cell, element by element (mqucifer/print-shop#363): each
+    element's core's mean strain at its core's middle, weighted by its core's volume. Its
+    stiffness is its cell's mean, so it's read over its cell: each place's neighbours within a
+    cube `cell` across centred on it, or a place and a quarter's own size, as its volume's
+    cube, whichever is more; its fill the share of that window their core holds. Per element,
+    not per voxel, so it holds what the mesh does, whatever the part's size.
 
-    With `up`, the layers' axis: the cell is a spacing in the layers' plane, so across them
-    the strain is the material's own, and averaging over the cube read a core bent across its
-    layers half a cell in from its edge (mqucifer/print-shop#363's review: 0.525 of its edge's
-    strain at a 4.07 mm cell). So across the layers it's fitted as a line in its height, each
-    place's neighbours weighted as they are, and read at the place's own height; and where the
-    core ends within half a cell of it, by `core_at` a layer `step` at a time, at that edge
-    too. A place is read where it holds `FULLEST` of the most its neighbours at its own
-    height hold, a quarter of a cell up or down, so the core's edge across its layers isn't
-    left out for being at it."""
+    The strain over a place's window is fitted as a field linear in each axis, its neighbours
+    weighted as they are, and read at the place itself; and, with `core_at`, where the core
+    ends within half its window each way, across its layers (`up`, a layer's `step` at a time)
+    and in their plane (an eighth of its cell at a time), at that edge too
+    (mqucifer/print-shop#363's review): averaged over a cube, a core bent across its layers read
+    half a cell in from its edge, 0.525 of its edge's strain at a 4.07 mm cell; and a cell read
+    only where it held near the fullest round it sat inside its walls' edge, where the core is
+    pulled hardest. A way its window's places don't spread along has no slope; and a line that
+    doesn't explain `FIT_HOLDS` of its window's spread isn't one, as a single element's own
+    peak isn't its cell's, so there it's its window's mean, and its edges the same."""
     held = np.flatnonzero(weights > 0)
     if not len(held):
         return Averaged(np.zeros((0, 3, 3)), np.zeros((0, 3)), np.zeros(0),
                         np.zeros(0, dtype=int))
     where, strain, weight = middles[held], strains[held], weights[held]
-    # Its window: a cell across in the layers' plane; across them, where they're `up`, half a
-    # cell each way or a place and a quarter's own size, as its volume's cube, whichever is
-    # more, so the line has heights to fit where the cell is finer than the places.
-    size = np.full(3, cell)
-    if up is not None:
-        size[up] = max(cell, 2.5 * float(np.cbrt(weight.mean())))
-    # Voxels half a window across: the 27 round one hold every place within its window, and
-    # little more.
+    size = np.full(3, max(cell, 2.5 * float(np.cbrt(weight.mean()))))
+    # Voxels half a window across: the 27 round one hold every place within its window.
     key = np.floor(where / (size / 2)).astype(int)
     key -= key.min(axis=0)
     shape = key.max(axis=0) + 3
@@ -1183,7 +1176,7 @@ def element_averaged(middles: np.ndarray, strains: np.ndarray, weights: np.ndarr
                for dz in (-1, 0, 1)]  # fmt: skip
 
     def pairs(rows: np.ndarray) -> list[tuple[np.ndarray, np.ndarray]]:
-        """Each of `rows` with each place within its cell, by the 27 voxels round it."""
+        """Each of `rows` with each place within its window, by the 27 voxels round it."""
         found = []
         for offset in offsets:
             other = np.ravel_multi_index((key[rows] + 1 + offset).T, shape)
@@ -1192,71 +1185,76 @@ def element_averaged(middles: np.ndarray, strains: np.ndarray, weights: np.ndarr
             if not many.any():
                 continue
             mine = np.repeat(rows, many)
-            step = np.arange(len(mine)) - np.repeat(np.cumsum(many) - many, many)
-            theirs = order[np.repeat(low, many) + step]
+            count = np.arange(len(mine)) - np.repeat(np.cumsum(many) - many, many)
+            theirs = order[np.repeat(low, many) + count]
             apart = where[theirs] - where[mine]
             inside = np.all((apart >= -size / 2) & (apart < size / 2), axis=1)
             found.append((mine[inside], theirs[inside]))
         return found
 
-    # A few thousand places at a time, so their pairs fit the memory however fine the mesh.
+    n = len(where)
+    # The weighted sums a field linear in each axis is fitted from, by least squares.
+    gram = np.zeros((n, 4, 4))
+    right = np.zeros((n, 4, 9))
+    squares = np.zeros(n)
     per_voxel = max(1, int(np.bincount(flat).max()))
     chunk = max(1, 2_000_000 // (27 * per_voxel))
-    n = len(where)
-    summed, moment, second = np.zeros(n), np.zeros(n), np.zeros(n)
-    weighted, tilted = np.zeros((n, 3, 3)), np.zeros((n, 3, 3))
     for start in range(0, n, chunk):
         rows = np.arange(start, min(start + chunk, n))
         for mine, theirs in pairs(rows):
             w = weight[theirs]
-            dz = (where[theirs, up] - where[mine, up]) if up is not None else np.zeros(len(w))
-            summed += np.bincount(mine, weights=w, minlength=n)
-            moment += np.bincount(mine, weights=w * dz, minlength=n)
-            second += np.bincount(mine, weights=w * dz * dz, minlength=n)
-            for i in range(3):
-                for j in range(3):
-                    weighted[:, i, j] += np.bincount(
-                        mine, weights=w * strain[theirs, i, j], minlength=n)  # fmt: skip
-                    if up is not None:
-                        tilted[:, i, j] += np.bincount(
-                            mine, weights=w * dz * strain[theirs, i, j], minlength=n)  # fmt: skip
-    safe = np.maximum(summed, 1e-300)
-    mean = weighted / safe[:, None, None]
-    mean_dz = moment / safe
-    spread = second / safe - mean_dz**2
-    # The line across the layers: its slope where its places span more than a layer's step
-    # of height, none where they lie in one layer.
-    flat = spread <= max(step, 1e-9) ** 2
-    slope = (tilted / safe[:, None, None] - mean_dz[:, None, None] * mean) / np.where(
-        flat, 1.0, spread)[:, None, None]
-    slope[flat] = 0.0
-    averaged = mean - mean_dz[:, None, None] * slope
+            basis = np.concatenate([np.ones((len(w), 1)), where[theirs] - where[mine]], axis=1)
+            values = strain[theirs].reshape(-1, 9)
+            squares += np.bincount(mine, weights=w * (values**2).sum(axis=1), minlength=n)
+            for i in range(4):
+                for j in range(i, 4):
+                    gram[:, i, j] += np.bincount(mine, weights=w * basis[:, i] * basis[:, j],
+                                                 minlength=n)  # fmt: skip
+                for c in range(9):
+                    right[:, i, c] += np.bincount(mine, weights=w * basis[:, i] * values[:, c],
+                                                  minlength=n)  # fmt: skip
+    for i in range(4):
+        for j in range(i):
+            gram[:, i, j] = gram[:, j, i]
+    summed = gram[:, 0, 0]
+    total = np.maximum(summed, 1e-300)
+    mean = gram[:, 0, 1:] / total[:, None]
+    variance = np.diagonal(gram, axis1=1, axis2=2)[:, 1:] / total[:, None] - mean**2
+    # A way the places don't spread along, by more than a layer's step or a hair, has no slope.
+    flat_way = variance <= max(step, 1e-6) ** 2
+    for k in range(3):
+        rows = np.flatnonzero(flat_way[:, k])
+        gram[rows, k + 1, :] = 0.0
+        gram[rows, :, k + 1] = 0.0
+        gram[rows, k + 1, k + 1] = 1.0
+        right[rows, k + 1, :] = 0.0
+    fit = np.linalg.solve(gram, right)
+    # The line kept where it explains its window's spread (`FIT_HOLDS`), as a gradient does;
+    # else its window's mean, as an element's own peak, a spike, isn't its cell's.
+    average = right[:, 0, :] / total[:, None]
+    spread_of = squares - summed * (average**2).sum(axis=1)
+    left = squares - np.einsum("nic,nic->n", fit, right)
+    holds = (spread_of <= 1e-30 * np.maximum(squares, 1e-300)) | (
+        left <= (1 - FIT_HOLDS) * np.maximum(spread_of, 1e-300))
+    fit[~holds, 0, :] = average[~holds]
+    fit[~holds, 1:, :] = 0.0
+    at_place = fit[:, 0, :].reshape(n, 3, 3)
+    slopes = fit[:, 1:, :].reshape(n, 3, 3, 3)
     fill = summed / float(np.prod(size))
-    fullest = np.zeros(n)
-    for start in range(0, n, chunk):
-        rows = np.arange(start, min(start + chunk, n))
-        for mine, theirs in pairs(rows):
-            if up is not None:
-                level = np.abs(where[theirs, up] - where[mine, up]) < cell / 4
-                mine, theirs = mine[level], theirs[level]
-            np.maximum.at(fullest, mine, fill[theirs])
-    read = fill >= FULLEST * fullest
-    if up is not None and core_at is not None and step > 0:
-        # Where the core ends within half a cell above or below, the line read there too.
-        edges = [_edge_of(where, up, core_at, step, float(size[up]), way) for way in (1.0, -1.0)]
-        rows = np.flatnonzero(read)
-        strain_at = [averaged[rows]]
-        places = [where[rows]]
-        held_rows = [held[rows]]
-        fills = [fill[rows]]
-        for edge in edges:
-            near = rows[np.isfinite(edge[rows])]
-            strain_at.append(averaged[near] + edge[near][:, None, None] * slope[near])
-            moved = where[near].copy()
-            moved[:, up] += edge[near]
-            places.append(moved)
-            held_rows.append(held[near])
-            fills.append(fill[near])
-        return Averaged(np.concatenate(strain_at), np.concatenate(places),
-                        np.concatenate(fills), np.concatenate(held_rows))
-    return Averaged(averaged[read], where[read], fill[read], held[read])
+    strains_at, places, rows_at, fills = [at_place], [where], [np.arange(n)], [fill]
+    if core_at is not None and up is not None:
+        for axis in range(3):
+            own_step = step if axis == up and step > 0 else cell / 8
+            for way in (1.0, -1.0):
+                edge = _edge_of(where, axis, core_at, own_step, float(size[axis]) / 2, way)
+                near = np.flatnonzero(np.isfinite(edge))
+                strains_at.append(at_place[near] + edge[near][:, None, None]
+                                  * slopes[near, axis])  # fmt: skip
+                moved = where[near].copy()
+                moved[:, axis] += edge[near]
+                places.append(moved)
+                rows_at.append(near)
+                fills.append(fill[near])
+    rows = np.concatenate(rows_at)
+    return Averaged(np.concatenate(strains_at), np.concatenate(places), np.concatenate(fills),
+                    held[rows])

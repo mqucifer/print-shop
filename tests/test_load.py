@@ -1712,7 +1712,7 @@ def test_a_core_read_near_its_limit_in_coarse_elements_is_meshed_again_finer() -
     assert load.refined(_read_with(coarse), _read_with(coarse), 20.0)
     resolved = {**coarse, "stretch_cell_mesh_mm": near, "across_cell_mesh_mm": near}
     assert load.refined(_read_with(resolved), _read_with(resolved), 20.0) == []
-    low = {**coarse, "stretch_pct": 0.5 * 1.51}
+    low = {**coarse, "stretch_pct": 0.3 * 1.51}
     assert load.refined(_read_with(low), _read_with(low), 20.0) == []
     # The coarser mesh refined at `REFINE_COARSER` times the finer's size, so the second check
     # reads the mesh there, not gmsh's spread at one size.

@@ -573,6 +573,10 @@ class _Model:
         #: worst cell held too few elements for its reading to be its cell's (`refined`,
         #: mqucifer/print-shop#363).
         self.refine_at: list[Refine] = []
+        #: Boxes, each a middle in the assembly's axes and how far it reaches each way, whose
+        #: skin isn't read: a held face's zone meshed finer for its core, whose skin, a point
+        #: reading at a singular edge, is read from the mesh as it was (`skin_kept`).
+        self.skin_unread: list[tuple[np.ndarray, float]] = []
         #: Each mixed or core element's step of core share, 0 for skin, `classify.STEPS` for
         #: core, -1 for a part read solid; and each printed part's cells as read (`_classify`).
         self.element_step: np.ndarray | None = None
@@ -2546,9 +2550,26 @@ class _Model:
                               "pct": round(float(value[row]), 4), "share": float(share[row]),
                               "mesh_mm": round(float(sized[row]), 3)}
         ordered = sorted(found.values(), key=lambda f: -f["share"])[:REFINE_MOST]
+        # Whether each is within a held face's zone: refined there for its core, but its skin,
+        # a point reading at a singular edge, read as it was (`_Model.skin_unread`).
+        import FreeCAD as App
+        import Part
+
+        held_faces = [*self.fixed, *sum(self.standing.values(), [])]
+        zone = max((self.held_mesh() or (0.0, 0.0))[1], HELD_ZONE)
         for one in ordered:
             one.pop("share")
+            vertex = Part.Vertex(App.Vector(*one["at"]))
+            one["held"] = bool(held_faces) and min(
+                f.distToShape(vertex)[0] for f in held_faces) <= zone + reach  # fmt: skip
         return ordered
+
+    def _skin_read_at(self, places: np.ndarray) -> np.ndarray:
+        """Which of the skin's `places` are read: none within `skin_unread`'s boxes."""
+        kept = np.ones(len(places), dtype=bool)
+        for middle, half in self.skin_unread:
+            kept &= ~np.all(np.abs(places - middle) <= half, axis=1)
+        return kept
 
     def _read_rows(self, part: PartAt, rows: np.ndarray) -> dict[str, Any]:
         """The worst pull across its layers and largest stretch any way, of a part's `rows`."""
@@ -2565,6 +2586,7 @@ class _Model:
         web too thin for infill: the worse of each, against the material's own limits."""
         k = [p.name for p in self.assembly.parts].index(part.name)
         rows = self.skin_rows.get(part.name, np.zeros(0, dtype=int))
+        rows = rows[self._skin_read_at(self.points[rows])] if len(rows) else rows
         read = []
         if len(rows):
             read.append(self._read_rows(part, rows))
@@ -2578,7 +2600,12 @@ class _Model:
                 one, where = wedges.strains(self.points[some], moved[some], wedges.POINTS)
                 strain.append(one.reshape(-1, 3, 3))
                 at.append(where.reshape(-1, 3))
-            found = self._read_tensors(part, np.concatenate(strain), np.concatenate(at))
+            places, tensors = np.concatenate(at), np.concatenate(strain)
+            kept = self._skin_read_at(places)
+            if not kept.any():
+                raise NoAnswer(f"the part {part.name}'s skin is all in held faces' zones meshed "
+                               "finer, and none of it is read")
+            found = self._read_tensors(part, tensors[kept], places[kept])
             found["nodes"] = len(np.unique(wired))
             read.append(found)
         if not read:
@@ -2946,8 +2973,10 @@ HELD_ZONE = 3.0
 REFINE_DOUBT = 0.10
 #: And a core whose worst cell is unresolved, in elements coarser than its aim, is refined
 #: where it reads this share of its limit or more, in doubt or not (mqucifer/print-shop#363's
-#: review): such a cell's reading is the mesh's, not its own, and nothing under 90% was.
-REFINE_UNRESOLVED = 0.60
+#: review, and the operator's ruling): such a cell's reading is the mesh's, not its own; a 60%
+#: core over-read at a beam's clamp, at 49% of its limit, under a 20% one at 41%, ranking
+#: them wrong, and a study ranks candidates.
+REFINE_UNRESOLVED = 0.40
 #: The coarser mesh refined at this many times the finer's size, so the second check reads
 #: the mesh there and not gmsh's spread at one size (`coarser_refine`).
 REFINE_COARSER = 1.5
@@ -3299,6 +3328,8 @@ def _solved(
     def model(straight: bool) -> _Model:
         made = _Model(assembly, placed, args, size, straight, two_pass, spread, cores)
         made.refine_at = list(refine or [])
+        made.skin_unread = [(np.asarray(at, dtype=float), half) for at, _, half, why
+                            in (refine or []) if why.get("held")]  # fmt: skip
         if weighed is not None:
             made.weighed = weighed
         coarser(made, coarser_of)
@@ -3394,12 +3425,38 @@ def refined(fine: dict[str, Any], coarse: dict[str, Any], size: float) -> list[R
                     continue
                 why = {"part": name, "cell": core.get("cell"), "reading": one["reading"],
                        "first_pct": one["pct"], "limit_pct": limit_pct,
-                       "first_cell_mesh_mm": one["mesh_mm"]}
+                       "first_cell_mesh_mm": one["mesh_mm"], "held": bool(one.get("held"))}
                 found[box] = (share, (list(one["at"]), near, reach, why))
     ordered = sorted(found.values(), key=lambda kv: -kv[0])
     for _, place in ordered:
         place[3]["of"] = len(ordered)
     return [place for _, place in ordered[:REFINE_MOST]]
+
+
+def skin_kept(first: dict[str, Any], refined: dict[str, Any], places: list[Refine]) -> None:
+    """A refined read's printed parts' skin, with its first read's where that was in a held
+    face's zone meshed finer for its core, and the higher (mqucifer/print-shop#363, the
+    operator's ruling): there the refined read leaves its skin out (`_Model.skin_unread`), as
+    a point reading at a singular edge only rises with a finer mesh; its own averaging scale is
+    mqucifer/print-shop#378."""
+    boxes = [(np.asarray(at, dtype=float), half) for at, _, half, why in places
+             if why.get("held")]  # fmt: skip
+    if not boxes:
+        return
+    for name, part in refined.get("parts", {}).items():
+        was = first.get("parts", {}).get(name) or {}
+        if not part.get("printed") or not was:
+            continue
+        for value, at, extra in (("across_layers_pct", "across_at", ()),
+                                 ("stretch_pct", "stretch_at",
+                                  ("stretch_is", "stretch_from_layers_deg"))):
+            where = np.asarray(was.get(at, [np.inf] * 3), dtype=float)
+            inside = any(np.all(np.abs(where - middle) <= half) for middle, half in boxes)
+            if inside and float(was.get(value, 0)) > float(part.get(value, 0)):
+                part[value], part[at] = was[value], was[at]
+                for key in extra:
+                    if key in was:
+                        part[key] = was[key]
 
 
 def coarser_refine(places: list[Refine]) -> list[Refine]:
@@ -3848,12 +3905,15 @@ def _run(
             # finer round every place it reads near its limit, and read again, both meshes.
             with step("meshing again finer round a printed core's worst cells"):
                 pass
+            first_fine, first_coarse = fine, coarse
             fine = {**_solved(assembly, placed, args, size, cores=cores, refine=places),
                     "refined": places}
             coarse = _solved(
                 assembly, placed, args, round(size * COARSER, 3), cores=cores,
                 coarser_of=fine["closes"], refine=coarser_refine(places),
             )
+            skin_kept(first_fine, fine, places)
+            skin_kept(first_coarse, coarse, places)
     force = float(sum(np.linalg.norm(one["force"]) for one in fine["raw_loads"]))
     if fine.get("refined"):
         report.numbers["refined"] = [{"at": at, "mesh_mm": near, "reach_mm": half, **why}
@@ -4145,6 +4205,13 @@ def _as_printed(assembly: Assembly, report: Report, printed: dict[str, list[dict
                 "not as printed: stronger than a printed part's, so read it with a margin"
             )
     report.numbers["printed"] = found
+    if found and assembly.held:
+        report.note(
+            "a printed part's skin at a held face's edge is read at its wedges' own points, a "
+            "point reading at the mesh's scale: a held edge is singular, so it has no one "
+            "figure, and a mesh refined there for the core leaves its skin as the mesh first "
+            "read it; its own averaging scale is mqucifer/print-shop#378"
+        )
     patterns = sorted({c["pattern"] for cells in found.values() for c in cells})
     reach = "; ".join(
         f"{p} from {infill.checked_from(p):g}%, "

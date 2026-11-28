@@ -562,9 +562,12 @@ def test_parts_beside_a_printed_one_keep_elements_of_their_own(cae: Any) -> None
 
 
 #: How far each layer's core read from the part's mesh may be from OCCT's on its B-rep: the
-#: largest distance between their outlines, and the mean, in mm, the mesh's chord being
-#: 0.003 mm, and their areas, in % (mqucifer/print-shop#363).
-SLICED_FARTHEST_MM = 0.01
+#: largest distance between their outlines, in mm, as `BRepMesh` holds its 0.003 mm deflection
+#: at the points it samples, not everywhere on a B-spline face: on the bowed bar its mesh is
+#: 0.018 mm off the surface at its farthest, by `distToShape`, at Orca's own parameters, so Orca
+#: prints it too, and their outlines 0.033 mm apart; their mean, in mm; and their areas, in %
+#: (mqucifer/print-shop#363's review).
+SLICED_FARTHEST_MM = 0.04
 SLICED_APART_MM = 0.005
 SLICED_AREA_PCT = 0.1
 

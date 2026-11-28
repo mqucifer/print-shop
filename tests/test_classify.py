@@ -206,23 +206,27 @@ def test_a_core_s_strain_is_averaged_over_its_own_cell_and_only_its_core() -> No
     """mqucifer/print-shop#363: a core's strain is read no finer than its own cell, place by
     place of its elements (`classify.element_averaged`): a strain the same throughout is read
     as it is, every place's cell full of core in the middle; a spike at one place is spread
-    over its cell, by its weight's share, in the core's middle and at its corner alike, as a
-    lattice's cell lies in its core, not centred on its edge; and a core thinner than its cell
-    is read over what core there is, its fill saying so."""
+    over its window, its cell's mean in the core's middle and its eighth's at its corner; and a
+    core thinner than its cell is read over what core there is, its fill saying so."""
     cell, step = 4.0, 1.0
     where = grid_points((0, 0, 0), (20, 20, 12), step)
     weights = np.full(len(where), step**3)
     even = np.tile(np.diag([1e-3, -4e-4, 2e-4]), (len(where), 1, 1))
     read = classify.element_averaged(where, even, weights, cell)
     assert np.allclose(read.strain, even[0])
-    assert read.fill.min() >= classify.FULLEST and read.fill.max() <= 1 + 1e-9
+    assert read.fill.max() <= 1 + 1e-9
     middle = np.all(np.abs(read.at - [10, 10, 6]) < 1, axis=1)
     assert np.allclose(read.fill[middle], 1.0)
-    for spot in ([10.5, 10.5, 6.5], [0.5, 0.5, 0.5]):
+    # A spike at one place, an element's own peak, is its window's mean, not a line through
+    # it: a line explains a window's spread, a spike doesn't (`FIT_HOLDS`). In the core's
+    # middle, its cell's mean; at its corner, where an eighth of the cell is core, the mean of
+    # that eighth, 8 times the cell's, and no more (mqucifer/print-shop#363's review).
+    share = 1e-2 * step**3 / cell**3
+    for spot, most in (([10.5, 10.5, 6.5], 1.0), ([0.5, 0.5, 0.5], 8.0)):
         spiked = np.zeros((len(where), 3, 3))
         spiked[np.argmin(np.linalg.norm(where - spot, axis=1))] = np.diag([1e-2, 0, 0])
         peak = classify.element_averaged(where, spiked, weights, cell).strain[:, 0, 0].max()
-        assert peak == pytest.approx(1e-2 * step**3 / cell**3, rel=0.01), spot
+        assert peak <= most * share * 1.01, (spot, peak / share)
     thin = grid_points((0, 0, 0), (20, 1, 12), step)
     read = classify.element_averaged(thin, np.tile(even[0], (len(thin), 1, 1)),
                                      np.full(len(thin), step**3), cell)  # fmt: skip
@@ -291,3 +295,27 @@ def test_a_share_steps_toward_core_never_away() -> None:
     core is none, any is at least an eighth, all is all."""
     share = np.array([0.0, 1e-12, 0.01, 0.124, 0.126, 0.51, 0.99, 1.0])
     assert classify.step_of(share).tolist() == [0, 0, 1, 1, 2, 5, 8, 8]
+
+
+def test_a_core_pulled_hardest_by_its_walls_reads_its_edge_in_the_layers_plane_too() -> None:
+    """mqucifer/print-shop#363's review, the operator's ruling: a cell average that sat inside
+    the walls' edge, as `FULLEST` read it, missed where the strain is highest, the unsafe side.
+    A core whose strain across its layers rises linearly from the middle of its width to its
+    walls reads its walls' edge, as it reads its layers' edge."""
+    spacing, cell = 1.25, 4.07
+    xs = np.arange(spacing / 2, 40, spacing)
+    ys = np.arange(1.0 + spacing / 2, 19.0, spacing)
+    zs = np.arange(0.6 + spacing / 2, 9.0, spacing)
+    where = np.array([[x, y, z] for x in xs for y in ys for z in zs])
+    strain = np.zeros((len(where), 3, 3))
+    strain[:, 2, 2] = 1e-3 * np.abs(where[:, 1] - 10.0) / 9.0
+    weight = np.full(len(where), spacing**3)
+
+    def core_at(points: np.ndarray) -> np.ndarray:
+        return ((points[:, 1] >= 1.0) & (points[:, 1] <= 19.0)
+                & (points[:, 2] >= 0.6) & (points[:, 2] <= 9.0))  # fmt: skip
+
+    found = classify.element_averaged(where, strain, weight, cell, up=2, core_at=core_at,
+                                      step=0.2)  # fmt: skip
+    across = found.strain[:, 2, 2].max()
+    assert 0.95e-3 <= across <= 1.05e-3, across
