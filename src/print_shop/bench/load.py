@@ -2000,7 +2000,10 @@ class _Model:
                 raise self._too_big(limit)
             row, strain, stress, moved = _arrays(results[-1])
             reaction, held = _reaction(str(job.with_suffix(".dat")))
-            seven = None if self.two_pass else _printed(str(job.with_suffix(".dat")), row)
+            # A part read as printed's seven figures, its joints read from them; any other
+            # read's joints from its movement summed whole, as main reads a glass band's.
+            seven = (_printed(str(job.with_suffix(".dat")), row)
+                     if (printed or direct) and not self.two_pass else None)  # fmt: skip
             if run == 0:
                 self.row, self.strain, self.stress, self.moved = row, strain, stress, moved
                 self.points = np.array([self.nodes[n] for n in results[-1].NodeNumbers])
