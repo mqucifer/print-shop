@@ -2929,8 +2929,9 @@ HELD_ZONE = 3.0
 #: `HELD_ZONE` each way, whichever is more, `REFINE_MOST` places at the most, the highest
 #: first. Half its cell, as at a corner where three faces meet inside it, a slotted bar's, two
 #: meshes read its cell within 6% of each other; at its cell, 16%; at twice it, as a held face
-#: is meshed, 37%. Out two cells, a real part's core read a tenth over what it read out three,
-#: so three. Gated on nearness alone, a real part whose two meshes agreed it held, well under
+#: is meshed, 37%. Out two cells, a real part's core read a tenth over what it read out three;
+#: out four, the slotted bar's two meshes agreed best, within 2% either way, at 1.2 times three's
+#: time, so four. Gated on nearness alone, a real part whose two meshes agreed it held, well under
 #: its limit, was refined, at several times its read's cost. Within a held face's zone it's
 #: meshed as held.
 REFINE_DOUBT = 0.10
@@ -2941,7 +2942,7 @@ REFINE_SURE = 1.5
 REFINE_MARGIN = 0.25
 REFINE_OVER = 1.5
 REFINE_SIZE_CELLS = 0.5
-REFINE_CELLS = 3.0
+REFINE_CELLS = 4.0
 REFINE_MOST = 24
 #: How many of those the reply names, with what each read first; the rest are in its numbers.
 REFINE_SAID = 6
