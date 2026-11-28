@@ -1657,8 +1657,8 @@ def _read_with(core: dict[str, Any]) -> dict[str, Any]:
 
 
 def test_a_core_read_near_its_limit_in_coarse_elements_is_meshed_again_finer() -> None:
-    """mqucifer/print-shop#363: where a printed core's verdict is in doubt, its two meshes'
-    worst readings either side of its limit or either within `REFINE_DOUBT` of it, every place
+    """mqucifer/print-shop#363: where a printed core's verdict is in doubt, either mesh's worst
+    reading within `REFINE_DOUBT` under its limit or over it, not failing beyond doubt, every place
     either reads near its limit in coarse elements (`_Model._near_limit`) is meshed again
     finer, at `REFINE_SIZE_CELLS` of its cell, no finer than `HELD_FINEST`, out `REFINE_CELLS`
     cells or `HELD_ZONE`, whichever is more, each with what it read first, one to a box. A
@@ -1679,16 +1679,31 @@ def test_a_core_read_near_its_limit_in_coarse_elements_is_meshed_again_finer() -
     # Both well under it, though within the margin, the meshes apart: not in doubt.
     assert load.refined(_read_with({"stretch_pct": 1.23}), _read_with({"stretch_pct": 0.94}),
                         20.0) == []  # fmt: skip
-    # Both well over it: a FAIL either way.
+    # Both over it past `REFINE_SURE`: a FAIL either way.
     high = _read_with({"across_layers_pct": 1.5})
     assert load.refined(high, high, 20.0) == []
-    # Another reading over its limit beyond doubt on both meshes, its skin's here: a FAIL
-    # whatever this core reads, so nothing's refined.
-    failing = {"parts": {"leg": {**over["parts"]["leg"], "across_layers_pct": 2.0,
-                                 "across_limit_pct": 1.0}}}
-    failing_too = {"parts": {"leg": {**under["parts"]["leg"], "across_layers_pct": 1.9,
-                                     "across_limit_pct": 1.0}}}
-    assert load.refined(failing, failing_too, 20.0) == []
+    # A coarse cell over its limit by 15% to 30% on both meshes, as a real leg's first read:
+    # refined, not a FAIL, as such a cell over-reads.
+    for share in (1.15, 1.3):
+        reading = share * 0.481
+        assert load.refined(_read_with({"across_layers_pct": reading}),
+                            _read_with({"across_layers_pct": reading}), 20.0)  # fmt: skip
+    # The same, its worst cells already in elements at its aim on both meshes: a finer mesh
+    # wouldn't move them, so it fails beyond doubt.
+    sized = {"across_layers_pct": 1.3 * 0.481, "across_cell_mesh_mm": near}
+    assert load.refined(_read_with(sized), _read_with(sized), 20.0) == []
+    # Over by more than `REFINE_SURE` on both meshes, as the tall bar's core at three times:
+    # a FAIL whatever this core reads elsewhere, coarse cells or not.
+    sure = _read_with({"across_layers_pct": 3.2 * 0.481, "stretch_pct": 1.45})
+    assert load.refined(sure, sure, 20.0) == []
+    # And a skin's: no cell of its own to refine, so only past `REFINE_SURE`.
+    skin = {"across_layers_pct": 1.6, "across_limit_pct": 1.0}
+    failing = {"parts": {"leg": {**over["parts"]["leg"], **skin}}}
+    assert load.refined(failing, {"parts": {"leg": {**under["parts"]["leg"], **skin}}},
+                        20.0) == []  # fmt: skip
+    nearer = {"parts": {"leg": {**over["parts"]["leg"], "across_layers_pct": 1.3,
+                                "across_limit_pct": 1.0}}}
+    assert load.refined(nearer, nearer, 20.0)
     # No place near its limit in coarse elements: read as it was.
     bare = _read_with({"across_layers_pct": 0.55, "near_limit": []})
     assert load.refined(bare, bare, 20.0) == []

@@ -2921,22 +2921,27 @@ HELD_CELLS = 2.0
 HELD_FINEST = 1.0
 HELD_DEPTH = 2.0
 HELD_ZONE = 3.0
-#: Where a printed core's verdict is in doubt, its two meshes either side of its limit or
-#: either within `REFINE_DOUBT` of it, each place its cells read within `REFINE_MARGIN` of its
-#: limit in elements more than `REFINE_OVER` times what it'd be meshed at is meshed again finer
-#: round it (`refined`, mqucifer/print-shop#363): at `REFINE_SIZE_CELLS` of its cell, no finer
-#: than `HELD_FINEST`, out `REFINE_CELLS` cells or `HELD_ZONE` each way, whichever is more
-#: (two cells read the slotted bar's two meshes within 6% as three did, in 106 s against 170),
-#: `REFINE_MOST` places at the most, the highest first. Gated on the margin alone, a real part
-#: whose two meshes agreed it held, well under its limit, was refined, at several times its
-#: read's cost. Half its cell, as at a corner where three faces meet inside
-#: it, a slotted bar's, two meshes read its cell within 6% of each other; at its cell, 16%; at
-#: twice it, as a held face is meshed, 37%. Within a held face's zone it's meshed as held.
+#: Where a printed core's verdict is in doubt, either mesh within `REFINE_DOUBT` under its
+#: limit or over it, not failing beyond doubt (`REFINE_SURE`), each place its cells read within
+#: `REFINE_MARGIN` of its limit in elements more than `REFINE_OVER` times what it'd be meshed
+#: at is meshed again finer round it (`refined`, mqucifer/print-shop#363): at
+#: `REFINE_SIZE_CELLS` of its cell, no finer than `HELD_FINEST`, out `REFINE_CELLS` cells or
+#: `HELD_ZONE` each way, whichever is more, `REFINE_MOST` places at the most, the highest
+#: first. Half its cell, as at a corner where three faces meet inside it, a slotted bar's, two
+#: meshes read its cell within 6% of each other; at its cell, 16%; at twice it, as a held face
+#: is meshed, 37%. Out two cells, a real part's core read a tenth over what it read out three,
+#: so three. Gated on nearness alone, a real part whose two meshes agreed it held, well under
+#: its limit, was refined, at several times its read's cost. Within a held face's zone it's
+#: meshed as held.
 REFINE_DOUBT = 0.10
+#: Over its limit by more than this many times it on both meshes, a read fails beyond doubt,
+#: past what a coarse cell over-reads (`_fails_beyond_doubt`): a real leg's core read 1.4 times
+#: its refined figure in a coarse cell of a few elements.
+REFINE_SURE = 1.5
 REFINE_MARGIN = 0.25
 REFINE_OVER = 1.5
 REFINE_SIZE_CELLS = 0.5
-REFINE_CELLS = 2.0
+REFINE_CELLS = 3.0
 REFINE_MOST = 24
 #: How many of those the reply names, with what each read first; the rest are in its numbers.
 REFINE_SAID = 6
@@ -3316,8 +3321,9 @@ Refine = tuple[list[float], float, float, dict[str, Any]]
 
 def refined(fine: dict[str, Any], coarse: dict[str, Any], size: float) -> list[Refine]:
     """Where a read's printed cores are meshed finer and read again (mqucifer/print-shop#363):
-    where a core's verdict is in doubt, its two meshes' worst readings, across its layers or its
-    stretch, either side of its limit or either within `REFINE_DOUBT` of it, every place either
+    where a core's verdict is in doubt, either mesh's worst reading, across its layers or its
+    stretch, within `REFINE_DOUBT` under its limit or over it, the read not failing beyond
+    doubt (`_fails_beyond_doubt`), every place either
     mesh's cell reads within `REFINE_MARGIN` of its limit in elements more than `REFINE_OVER`
     times what it would be meshed at, so read at the mesh's scale and not its cell's
     (`_Model._near_limit`): all of them, so the worst isn't only moved to the next, one to a
@@ -3325,8 +3331,7 @@ def refined(fine: dict[str, Any], coarse: dict[str, Any], size: float) -> list[R
     most. Each is meshed at `REFINE_SIZE_CELLS` of its cell, no finer than `HELD_FINEST`, out
     that box each way; none where that's no finer than the mesh. A verdict not in doubt, or a
     core read in elements near its cell, is read as it was; and so is a read that fails beyond
-    doubt already, any part's skin or core over its limit by more than `REFINE_DOUBT` on both
-    meshes, which no finer mesh round another place would turn."""
+    doubt already (`_fails_beyond_doubt`)."""
     if _fails_beyond_doubt(fine, coarse):
         return []
     found: dict[tuple[int, ...], tuple[float, Refine]] = {}
@@ -3348,9 +3353,9 @@ def refined(fine: dict[str, Any], coarse: dict[str, Any], size: float) -> list[R
                 readings = [float(r) for r in (core.get(value), other.get(value)) if r]
                 if not most or not readings:
                     continue
-                shares = [r / float(most) for r in readings]
-                if min(shares) <= 1 <= max(shares) or any(abs(x - 1) <= REFINE_DOUBT
-                                                         for x in shares):  # fmt: skip
+                # Either side of its limit, within `REFINE_DOUBT` under it, or over it but
+                # not beyond doubt (`_fails_beyond_doubt`, already ruled out).
+                if max(r / float(most) for r in readings) >= 1 - REFINE_DOUBT:
                     doubt = True
             if not doubt:
                 continue
@@ -3371,20 +3376,34 @@ def refined(fine: dict[str, Any], coarse: dict[str, Any], size: float) -> list[R
 
 
 def _fails_beyond_doubt(fine: dict[str, Any], coarse: dict[str, Any]) -> bool:
-    """Whether any part's skin or core reads over its limit by more than `REFINE_DOUBT` on both
-    meshes, across its layers or its stretch (`refined`)."""
-    pairs = (("across_layers_pct", "across_limit_pct"), ("stretch_pct", "stretch_limit_pct"))
+    """Whether a read fails beyond doubt already, so no finer mesh would turn it (`refined`):
+    a part's skin or core over its limit on both meshes, across its layers or its stretch, by
+    more than `REFINE_SURE` times it; or a core's, its worst cells on both meshes already in
+    elements no coarser than `REFINE_OVER` times its aim, over by more than `REFINE_DOUBT`. A
+    coarse cell of a few elements reads a core over what it reads refined, as a real leg's read
+    well past its limit and under it once refined: a FAIL there, nearer than that, would have
+    a study pile on walls and infill for nothing."""
+    pairs = (("across", "across_layers_pct", "across_limit_pct"),
+             ("stretch", "stretch_pct", "stretch_limit_pct"))
     for name, part in fine.get("parts", {}).items():
         theirs = coarse.get("parts", {}).get(name) or {}
-        readers = [(part, theirs)]
-        readers += list(zip(part.get("cores", []) or [], theirs.get("cores", []) or [],
-                            strict=False))  # fmt: skip
-        for mine, other in readers:
-            for value, limit in pairs:
+        readers = [(part, theirs, False)]
+        readers += [(mine, other, True) for mine, other in zip(
+            part.get("cores", []) or [], theirs.get("cores", []) or [], strict=False)]
+        for mine, other, core in readers:
+            for key, value, limit in pairs:
                 most = mine.get(limit)
                 if not most or mine.get(value) is None or other.get(value) is None:
                     continue
-                if min(float(mine[value]), float(other[value])) > (1 + REFINE_DOUBT) * float(most):
+                share = min(float(mine[value]), float(other[value])) / float(most)
+                if share > REFINE_SURE:
+                    return True
+                if not core or share <= 1 + REFINE_DOUBT:
+                    continue
+                cell = float(mine.get("cell_mm") or 0)
+                aim = REFINE_OVER * max(REFINE_SIZE_CELLS * cell, HELD_FINEST)
+                sizes = [one.get(f"{key}_cell_mesh_mm") for one in (mine, other)]
+                if cell > 0 and all(size is not None and size <= aim for size in sizes):
                     return True
     return False
 
@@ -3406,8 +3425,8 @@ def refined_said(places: list[Refine] | None) -> str:
     counted = (f"{len(places)} place(s)" if many <= len(places)
                else f"the {len(places)} highest of {many} places")
     return (f"; meshed again, both meshes, at {', '.join(f'{n:g}' for n in sizes)} mm within "
-            f"{reach:g} mm of {counted}: a printed core's verdict was in doubt, its two meshes "
-            f"either side of its limit or within {100 * REFINE_DOUBT:g}% of it, and its cells "
+            f"{reach:g} mm of {counted}: a printed core's verdict was in doubt, a mesh within "
+            f"{100 * REFINE_DOUBT:g}% under its limit or over it, and its cells "
             f"read within {100 * REFINE_MARGIN:g}% of it there in elements more than "
             f"{REFINE_OVER:g} times that, so at the mesh's scale and not their own ({first})")
 
