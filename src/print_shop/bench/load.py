@@ -116,16 +116,16 @@ import os
 import re
 import subprocess
 import sys
-import tempfile
 import time
 from collections.abc import Iterator
 from pathlib import Path
-from typing import Any
+from typing import Any, NoReturn
 
 import numpy as np
 
 from . import (
     as_printed,
+    cae,
     close_faces,
     dovetail,
     infill,
@@ -160,8 +160,35 @@ OVERLAP = 1e-4
 NOTHING = 1e-3
 #: A push's point is on the faces that meet within this, in mm.
 ON_FACE = 0.01
+#: What setting a mesh up takes in `load`'s own process, in bytes (`_Model._set_up_fits`): each
+#: node's place, 374 to 430 measured on three meshes in the image, at its peak 421, and in two
+#: passes the rest of it, each element's faces and its neighbours, 735 at its peak on a mesh of
+#: 646,197 elements (a design run's assembly on mqucifer/print-shop#376). Each held about a
+#: tenth under the least; and, where a lower bound can follow, a half above the most (the
+#: operator's ruling), as a step let through that doesn't fit costs the container.
+SET_UP_NODE = 335
+SET_UP_FACES = 660
+SET_UP_NODE_HIGH = 650
+SET_UP_FACES_HIGH = 1110
+#: What FreeCAD's writer of CalculiX's input takes in `load`'s own process at its peak, and its
+#: reader of CalculiX's results, in bytes a node, or an element, as if either alone: on two
+#: meshes that solved in the image, of 356,359 and 531,542 elements, the writer 3,100 to 3,130 a
+#: node, or 4,360 an element, and the reader 3,390 to 3,520, or 4,720 to 4,940 (a design run's
+#: assembly on mqucifer/print-shop#376 was killed writing its input, its set-up checked). Both
+#: meshes had the same nodes to an element, so each need is taken both ways: low, a tenth under
+#: the less, and where a lower bound can follow, a half above the more (`_Model._solve_need`).
+WRITE_NODE, WRITE_ELEMENT = 3100, 4360
+WRITE_NODE_HIGH, WRITE_ELEMENT_HIGH = 3130, 4360
+READ_NODE, READ_ELEMENT = 3390, 4720
+READ_NODE_HIGH, READ_ELEMENT_HIGH = 3520, 4940
 #: How a mesh whose elements' sides are straight is said where a step names it.
 STRAIGHT = ", its elements straight-sided"
+#: A face of a part read without its glass band is where the band met it where a point inside it
+#: is this close to the band's solids, in mm: on a face the band was cut away by, its triangles'
+#: middles are on the band's own face, or within its chord of it, `ON_BAND_CHORD`, where it's
+#: curved (mqucifer/print-shop#375).
+ON_BAND = 0.02
+ON_BAND_CHORD = 0.005
 #: CalculiX prints each node's movement to seven figures (`*NODE PRINT`, E13.6), where its .frd
 #: file, which FreeCAD reads, has six (mqucifer/print-shop#320).
 PRINTED = 7
@@ -430,14 +457,29 @@ def beyond(
     return (force, moment) if free_is_far else (-force, -moment)
 
 
+@dataclasses.dataclass
+class Band:
+    """What a part's glass band took from it, where the part is read without it
+    (mqucifer/print-shop#375): the band's solids where the assembly puts them, the volume of the
+    part it took, in mm³, and the whole part's volume and middle, where the assembly puts it. A
+    lift keeps the band's weight, put on the faces where it met the rest of the part."""
+
+    solids: list[Any]
+    volume: float
+    whole_volume: float
+    whole_middle: np.ndarray
+
+
 def _placed(assembly: Assembly, without_bands: bool = False) -> list[Any]:
     """Each part's one solid, where the assembly puts it: with `without_bands`, less its glass
-    band where it names one (mqucifer/print-shop#295)."""
+    band where it names one (mqucifer/print-shop#295), and what the band took kept in `_bands`
+    (mqucifer/print-shop#375)."""
     folder = Path(assembly.path).parent
     found = []
+    _bands.clear()
     for part in assembly.parts:
         with step(f"placing the part {part.name} by its turn and its at"):
-            found.append(_one_placed(part, folder, without_bands))
+            found.append(_one_placed(part, folder, without_bands, _bands))
     for i, first in enumerate(found):
         for j in range(i + 1, len(found)):
             if not first.BoundBox.intersect(found[j].BoundBox):
@@ -455,8 +497,11 @@ def _placed(assembly: Assembly, without_bands: bool = False) -> list[Any]:
     return found
 
 
-def _one_placed(part: PartAt, folder: Path, without_bands: bool) -> Any:
-    """One part's one solid, turned by its `turn` and moved by its `at`."""
+def _one_placed(
+    part: PartAt, folder: Path, without_bands: bool, bands: dict[str, Band] | None = None
+) -> Any:
+    """One part's one solid, turned by its `turn` and moved by its `at`; and, given `bands`,
+    what its glass band took from it there, where it's left out."""
     import Part
 
     solids = [s for s in Part.read(str(folder / part.file)).Solids if s.Volume > 1e-6]
@@ -474,8 +519,41 @@ def _one_placed(part: PartAt, folder: Path, without_bands: bool) -> Any:
                 f"the part {part.name} with its band, {part.band}, left out is "
                 f"{len(left)} solids: a part read without its band is one solid still"
             )
+        if bands is not None:
+            whole = Part.Vertex(solid.CenterOfMass)
+            middle = _moved(whole, part).Point
+            bands[part.name] = Band(
+                solids=[_moved(s, part) for s in band],
+                volume=float(solid.Volume - left[0].Volume),
+                whole_volume=float(solid.Volume),
+                whole_middle=np.array([middle.x, middle.y, middle.z]),
+            )
         solid = left[0]
     return _moved(solid, part)
+
+
+def on_band(face: Any, band: list[Any]) -> bool:
+    """Whether a face of a part read without its glass band lies on the band's surface, where
+    the band met the rest of the part (mqucifer/print-shop#375): the middle of the largest of
+    its own triangles is within `ON_BAND` of one of the band's solids. A face that only meets
+    the band along an edge is off it there."""
+    import FreeCAD as App
+    import Part
+
+    box = App.BoundBox(face.BoundBox)
+    box.enlarge(ON_BAND)
+    near = [s for s in band if s.BoundBox.intersect(box)]
+    if not near:
+        return False
+    points, triangles = face.tessellate(ON_BAND_CHORD)
+    if not triangles:
+        return False
+    corners = np.array([[[p.x, p.y, p.z] for p in (points[i] for i in t)] for t in triangles])
+    areas = np.linalg.norm(
+        np.cross(corners[:, 1] - corners[:, 0], corners[:, 2] - corners[:, 0]), axis=1
+    )
+    middle = Part.Vertex(App.Vector(*corners[int(areas.argmax())].mean(axis=0)))
+    return any(s.distToShape(middle)[0] <= ON_BAND for s in near)
 
 
 def _moved(solid: Any, part: PartAt) -> Any:
@@ -868,9 +946,11 @@ class _Model:
         began = time.time()
         # Where the curved try found faces close, the straight one is meshed finer there from
         # the start (mqucifer/print-shop#346).
+        kills = oom_kills()
         tools = self._gmsh(
             GmshTools, mesh, close_faces.fields(self.closes, self.size, self.local_scale)
         )
+        self._mesh_met(mesh, kills, tools)
         said = None if mesh.FemMesh.VolumeCount else _gmsh_said(tools)
         for _ in range(RETRIES):
             if said is None or not CROSSED.search(said):
@@ -887,7 +967,9 @@ class _Model:
                 raise NoAnswer(f"{stopped}; gmsh had refused the mesh: {said[:300]}") from stopped
             if not more:
                 break
+            kills = oom_kills()
             tools = self._gmsh(GmshTools, mesh, sizes)
+            self._mesh_met(mesh, kills, tools)
             said = None if mesh.FemMesh.VolumeCount else _gmsh_said(tools)
         words = said
         if said is not None:
@@ -910,31 +992,52 @@ class _Model:
                 "gmsh made no mesh of the joined parts, with its elements' sides curved onto "
                 f"the parts' faces or straight: {words[:900]}"
             )
-        self.nodes = {n: np.array([p.x, p.y, p.z]) for n, p in fem.Nodes.items()}
-        if self.two_pass and len(self.solids) > 1:
-            # Each part has elements of its own, before anything is solved: a mesh that doesn't
-            # part them is refused at once in two passes (mqucifer/print-shop#301), which then
-            # leave time for a glass band's lower bound.
-            order = sorted(self.nodes)
-            row = {n: i for i, n in enumerate(order)}
-            corners = np.array([[row[n] for n in fem.getElementNodes(e)[:4]] for e in fem.Volumes])
-            self._owned(corners, row, np.array([self.nodes[n] for n in order]))
+        self._set_up_fits(fem)
+        with step(
+            f"setting the mesh up in load's own process: {fem.VolumeCount} elements, "
+            f"{fem.NodeCount} nodes"
+        ):
+            self.nodes = {n: np.array([p.x, p.y, p.z]) for n, p in fem.Nodes.items()}
+            if self.two_pass and len(self.solids) > 1:
+                # Each part has elements of its own, before anything is solved: a mesh that
+                # doesn't part them is refused at once in two passes (mqucifer/print-shop#301),
+                # which then leave time for a glass band's lower bound.
+                order = sorted(self.nodes)
+                row = {n: i for i, n in enumerate(order)}
+                corners = np.array(
+                    [[row[n] for n in fem.getElementNodes(e)[:4]] for e in fem.Volumes]
+                )
+                try:
+                    self._owned(corners, row, np.array([self.nodes[n] for n in order]))
+                except _Unparted as unparted:
+                    raise self._unparted_read(unparted) from unparted
         fea = ccxtools.FemToolsCcx(analysis, solver)
         fea.update_objects()
-        fea.setup_working_dir(tempfile.mkdtemp(prefix="load-"))
+        # On disk, where /tmp is the container's memory (`cae.scratch`, mqucifer/print-shop#376).
+        fea.setup_working_dir(cae.scratch("load-"))
         fea.setup_ccx()
         wrong = self._prerequisites(fea.check_prerequisites())
         if wrong:
             raise NoAnswer(f"the solve couldn't be set up: {wrong[:300]}")
         began = time.time()
-        fea.write_inp_file()
-        if self.core_solids:
-            self._stiffnesses(fea.inp_file_name)
-        self._add_to(fea.inp_file_name)
+        # FreeCAD's writer, in this process, held to the room first (mqucifer/print-shop#376).
+        self._fits(fem, self._write_need(fem), "to write CalculiX's input with its loads")
+        with step(
+            f"writing CalculiX's input: {fem.VolumeCount} elements, {fem.NodeCount} nodes"
+        ):
+            fea.write_inp_file()
+            if self.core_solids:
+                self._stiffnesses(fea.inp_file_name)
+            self._add_to(fea.inp_file_name)
         kills = oom_kills()
+        #: Each of CalculiX's tries, and how long it ran, in s, for the reply where they meet
+        #: the memory (the operator, mqucifer/print-shop#376).
+        self.tries: list[tuple[str, float]] = []
         with step("CalculiX's solve of the joined parts"):
+            solving = time.time()
             _ccx(fea, self.size)
-            fea.load_results()
+            self.tries.append(("direct", time.time() - solving))
+        self._results_back(fea)
         self.solve_s = round(time.time() - began, 2)
         results = [o for o in analysis.Group if o.isDerivedFrom("Fem::FemResultObject")]
         if "nonpositive jacobian" in str(getattr(fea, "ccx_stdout", "")):
@@ -952,7 +1055,10 @@ class _Model:
                 f"turned inside out{where}. One with a curved side on a small hole or a tight "
                 "round can be: give a finer --mesh"
             )
-        if (not results or not results[0].NodeStrainXX) and self.two_pass:
+        # Two passes, and a glass band's read, which nothing follows (the operator, on a design
+        # run's assembly on mqucifer/print-shop#376), are solved again iteratively where the
+        # direct solver met the memory.
+        if (not results or not results[0].NodeStrainXX) and (self.two_pass or bool(_bands)):
             full = memory_met(kills)
             if full is not None:
                 self._iterated(fea, analysis, full)
@@ -978,6 +1084,136 @@ class _Model:
         tidy_solve(fea)
         self._balance()
 
+    def _unparted_read(self, unparted: _Unparted) -> NoAnswer:
+        """What two passes say of a mesh that gives parts no element of their own: the whole
+        unread, for `load --parts` to read each glass band left out as the one pass's two
+        passes do (mqucifer/print-shop#375), only where it's the leads' doing, each such part
+        banded or meeting a banded part, and none of them turned. A turned part's placement
+        (mqucifer/print-shop#334), or the faces two parts with no band meet by not found on the
+        mesh (mqucifer/print-shop#319), is said as it is, as one pass says it (the operator's
+        review)."""
+        parts = {p.name: p for p in self.assembly.parts}
+        banded = {name for name, p in parts.items() if p.band is not None}
+        by_band = all(
+            name in banded or any(name in pair and pair & banded for pair in self.met)
+            for name in unparted.empty
+        )
+        if by_band and not any(parts[name].turn for name in unparted.empty):
+            return _Unread(str(unparted))
+        return unparted
+
+    def _set_up_fits(self, fem: Any) -> None:
+        """Whether the mesh, read back, can be set up in `load`'s own process
+        (mqucifer/print-shop#376): each node's place, and in two passes each element's faces,
+        to find each part's own. Its need, by the mesh's counts, at the least measured per node
+        and per element (`SET_UP_NODE`, `SET_UP_FACES`), is held against the container's room
+        (`cae.room`). Where it won't fit, the whole is unread for memory before anything is
+        allocated, where the kernel would have stopped `load`; off the container, nothing's
+        asked."""
+        faces = self.two_pass and len(self.solids) > 1
+        high = self._falls_back()
+        node, face = (
+            (SET_UP_NODE_HIGH, SET_UP_FACES_HIGH) if high else (SET_UP_NODE, SET_UP_FACES)
+        )
+        need = fem.NodeCount * node + (fem.VolumeCount * face if faces else 0)
+        give_back()
+        left = cae.room(files=not high)
+        if left is None or left >= need:
+            return
+        _model_unread(
+            self,
+            f"the mesh of the joined parts at a mesh of at most {self.size:g} mm"
+            f"{STRAIGHT if self.straight else ''}, {fem.VolumeCount:,} elements and "
+            f"{fem.NodeCount:,} nodes, takes about {need / 2**30:.2f} GiB to set up in load's "
+            f"own process, and the container's memory has {max(left, 0) / 2**30:.2f} GiB left, "
+            "by its own count: so it isn't set up"
+            + (", as held high, where a lower bound can follow, it may not fit" if high else "")
+        )
+
+    def _write_need(self, fem: Any) -> float:
+        return _solve_need(
+            fem, self._falls_back(), (WRITE_NODE, WRITE_ELEMENT),
+            (WRITE_NODE_HIGH, WRITE_ELEMENT_HIGH),
+        )  # fmt: skip
+
+    def _read_need(self, fem: Any) -> float:
+        return _solve_need(
+            fem, self._falls_back(), (READ_NODE, READ_ELEMENT),
+            (READ_NODE_HIGH, READ_ELEMENT_HIGH),
+        )  # fmt: skip
+
+    def _fits(self, fem: Any, need: float, what: str) -> None:
+        """Whether a step of `load`'s own process, `what`, its `need` in bytes, fits the
+        container's room (mqucifer/print-shop#376): where it won't, the whole is unread for
+        memory, before anything's begun. FreeCAD's own code aborts where it meets the memory,
+        so this is asked first. Off the container, nothing's asked."""
+        high = self._falls_back()
+        give_back()
+        left = cae.room(files=not high)
+        if left is None or left >= need:
+            return
+        _model_unread(
+            self,
+            f"the mesh of the joined parts at a mesh of at most {self.size:g} mm"
+            f"{STRAIGHT if self.straight else ''}, {fem.VolumeCount:,} elements and "
+            f"{fem.NodeCount:,} nodes, takes about {need / 2**30:.2f} GiB {what} in load's own "
+            f"process, and the container's memory has {max(left, 0) / 2**30:.2f} GiB left, by "
+            "its own count: so it isn't done"
+            + (", as held high, where a lower bound can follow, it may not fit" if high else "")
+        )
+
+    def _results_back(self, fea: Any) -> None:
+        """CalculiX's results read back into FreeCAD, in this process: where it left a results
+        file, its need held to the room first (`_fits`), as a step of its own with the mesh's
+        counts. Where it left none, as where it was stopped, FreeCAD's reader finds none, as
+        before."""
+        fem = self.fem
+        if not os.path.exists(os.path.splitext(fea.inp_file_name)[0] + ".frd"):
+            fea.load_results()
+            return
+        self._fits(fem, self._read_need(fem), "to read CalculiX's results back")
+        with step(
+            f"reading CalculiX's results back: {fem.VolumeCount} elements, {fem.NodeCount} nodes"
+        ):
+            fea.load_results()
+
+    def _falls_back(self) -> bool:
+        """Whether a lower bound can follow where the whole is unread: a part names its glass
+        band, and this isn't the band's own read (`_bands`). A mesh's needs are held high then,
+        and low anywhere else, where the try is all there is (the operator's ruling)."""
+        return any(p.band is not None for p in self.assembly.parts) and not _bands
+
+    def _mesh_met(self, mesh: Any, kills: int | None, tools: Any = None) -> None:
+        """Where gmsh made no mesh and the kernel stopped a process in the container for memory
+        while it ran, `kills` its count before (mqucifer/print-shop#375), or where its mesh
+        won't fit read back (`cae.gmsh`, `tools.memory`, mqucifer/print-shop#376): the whole is
+        unread, for the container's memory, as where CalculiX meets it, never meshed again
+        straight, which takes as much. gmsh is the first to go (`cae.gmsh`), so this read is
+        left to say so, and to read in two passes or each glass band left out, where it can."""
+        if mesh.FemMesh.VolumeCount:
+            return
+        refused = getattr(tools, "memory", None)
+        if refused is not None:
+            need, left, high = refused
+            _model_unread(
+                self,
+                f"gmsh meshed the joined parts at a mesh of at most {self.size:g} mm"
+                f"{STRAIGHT if self.straight else ''}, and its mesh takes about "
+                f"{need / 2**30:.2f} GiB read back, where the container's memory has "
+                f"{max(left, 0) / 2**30:.2f} GiB left, by its own count: so it isn't read back"
+                + (", as held high, where a lower bound can follow, it may not fit" if high else "")
+            )
+        full = memory_met(kills)
+        if full is None:
+            return
+        _model_unread(
+            self,
+            f"gmsh made no mesh of the joined parts at a mesh of at most {self.size:g} mm"
+            f"{STRAIGHT if self.straight else ''}: it met the container's memory, "
+            f"{full / 2**30:g} GiB, meshing them, and the kernel stopped it there, as the "
+            "container's own count of what it stopped for memory says"
+        )
+
     def _gmsh(self, gmsh_tools: Any, mesh: Any, sizes: str) -> Any:
         """gmsh's mesh, as FreeCAD makes it, with a pass that isn't spread told so, and `sizes`,
         gmsh's local sizes where faces are close, where there are any; its files deleted once
@@ -1001,7 +1237,9 @@ class _Model:
                 path.write_text(text.replace("// meshing", given + "// meshing", 1))
 
             tools.write_geo = write_geo
-        gmsh(tools)
+        # First to go, so a mesh that meets the container's memory stops gmsh, and this read
+        # goes on to say so (mqucifer/print-shop#375).
+        gmsh(tools, first=True, high=self._falls_back())
         tidy_mesh(tools)
         return tools
 
@@ -1268,8 +1506,10 @@ class _Model:
             job = path if run == 0 else path.with_name(f"{path.stem}_{run}.inp")
             job.write_text(text)
             fea.inp_file_name = str(job)
+            solving = time.time()
             ccx_one_thread(fea)
-            fea.load_results()
+            self.tries.append(("iterative", time.time() - solving))
+            self._results_back(fea)
             results = [o for o in analysis.Group if o.isDerivedFrom("Fem::FemResultObject")]
             if not results or not results[-1].NodeStrainXX:
                 raise self._too_big(limit)
@@ -1446,12 +1686,25 @@ class _Model:
                 else ""
             )
         )
+        parts = getattr(getattr(self, "assembly", None), "parts", [])
+        banded = any(getattr(p, "band", None) is not None for p in parts)
         to_do = (
-            "name each glass frame's `band` in the assembly file, and it's read as a lower "
+            _banded_to_do()
+            if banded
+            else "name each glass frame's `band` in the assembly file, and it's read as a lower "
             "bound with its band left out, or read fewer of the parts at once"
             if finer > alone
             else "give a coarser --mesh, or read fewer of the parts at once"
         )
+        tries = getattr(self, "tries", [])
+        if tries:
+            evidence += (
+                "; CalculiX's "
+                + " and its ".join(f"{kind} solver ran {seconds:.0f} s" if k == 0 else
+                                   f"{kind} one {seconds:.0f} s"
+                                   for k, (kind, seconds) in enumerate(tries))
+                + (", each stopped there" if len(tries) > 1 else ", stopped there")
+            )  # fmt: skip
         return _Unread(
             f"nothing of the assembly is read, as it's past what the container's memory solves: "
             f"{to_do}. {evidence}. Every part, joint and bolt of it is left unread",
@@ -1471,7 +1724,9 @@ class _Model:
         moved = self.printed if self.core_solids and self.printed is not None else self.moved
         forces = element_forces(self.points[wired], moved[wired], *self._stiff())
         owned = self._owned(wired, self.row, self.points)
-        if not self.two_pass:
+        # Solved iteratively, the elements' balance is what the corrections hold to `RESIDUAL`
+        # (`_iterated`), from the same wiring, checked as it's read (`_wired`).
+        if not self.two_pass and self.iterated is None:
             self._balanced(wired, owned)
         self.part_rows = {name: np.unique(wired[owned[k]]) for k, name in enumerate(names)}
         if self.element_core is not None:
@@ -1591,11 +1846,12 @@ class _Model:
                 for p in parts
                 if p.name in empty and p.turn
             )
-            raise NoAnswer(
+            raise _Unparted(
                 f"the mesh gives {', '.join(empty)} no element of its own, at a mesh of at most "
                 f"{self.size:g} mm{STRAIGHT if self.straight else ''}: the mesh's triangles on "
                 f"the faces where it meets {', '.join(meets) or 'the other parts'} weren't "
-                f"found, so it isn't parted from them, and nothing of it is read{turned}"
+                f"found, so it isn't parted from them, and nothing of it is read{turned}",
+                empty,
             )
         return owned
 
@@ -1753,10 +2009,23 @@ class _Model:
             np.add.at(shared, wired[mine, 4:], each[:, None] / 5)
             rows = np.unique(wired[mine])
             pushes = {order[r]: shared[r] * self.toward for r in rows if shared[r] != 0}
-            for node, push in pushes.items():
-                self.pushed[node] = self.pushed.get(node, 0) + push
             centre = solid.CenterOfMass
             middle = np.array([centre.x, centre.y, centre.z])
+            whole = float(solid.Volume)
+            kept: dict[str, Any] = {}
+            band = _bands.get(part.name)
+            if band is not None:
+                # Read without its glass band, it hangs by its whole weight still
+                # (mqucifer/print-shop#375): the band's is put where the band met it.
+                band_pushes, area, band_grams = self._band_weight(k, part, band)
+                for node, push in band_pushes.items():
+                    pushes[node] = pushes.get(node, 0) + push
+                grams += band_grams
+                newtons = grams / 1000 * G
+                middle, whole = band.whole_middle, band.whole_volume
+                kept = {"band_grams": band_grams, "band_mm2": area}
+            for node, push in pushes.items():
+                self.pushed[node] = self.pushed.get(node, 0) + push
             self.loads.append(
                 {
                     "at": middle,
@@ -1766,10 +2035,41 @@ class _Model:
                     "nodes": [order[r] for r in rows],
                     "pushes": pushes,
                     "middle": middle,
-                    "volume_mm3": float(solid.Volume),
+                    "volume_mm3": whole,
                     "grams": grams,
+                    **kept,
                 }
             )
+
+    def _band_weight(
+        self, k: int, part: PartAt, band: Band
+    ) -> tuple[dict[int, np.ndarray], float, float]:
+        """A glass band's weight, where its part is read without it under a lift
+        (mqucifer/print-shop#375): the volume it took at the part's density, pulling `--toward`,
+        spread over the faces where it met the rest of the part (`on_band`), each of their
+        triangles taking its share by its area, a third of it on each mid-side node, as a
+        weight on a place is (`_put`). Its stiffness is left out, never made up. Each push by
+        node, the faces' area in mm², and the band's grams."""
+        grams = band.volume * part.material.density_g_cm3 / 1000
+        newtons = grams / 1000 * G
+        between = Faces(self.between)
+        with step(f"finding the faces where the part {part.name}'s glass band met it"):
+            faces = [
+                f for f in self.solids[k].Faces if not between.has(f) and on_band(f, band.solids)
+            ]
+        triangles = [t for f in faces for t in self._triangles(f)]
+        if not triangles:
+            raise NoAnswer(
+                f"the part {part.name} with its glass band, {part.band}, left out has no face of "
+                f"the mesh where the band met it, so the band's {grams:.2f} g has nowhere to "
+                "hang from it, and nothing is read: a band is what the part is cut by"
+            )
+        area = sum(t[1] for t in triangles)
+        pushes: dict[int, np.ndarray] = {}
+        for nodes, size, _ in triangles:
+            for node in nodes[3:]:
+                pushes[node] = pushes.get(node, 0) + newtons * size / area / 3 * self.toward
+        return pushes, float(area), float(grams)
 
     def _add_to(self, path: str) -> None:
         """The loads, the pins that stop a standing assembly sliding, and the held faces'
@@ -1993,7 +2293,11 @@ class _Model:
         for load in self.loads:
             moved = self.moved[[self.row[n] for n in load["nodes"] if n in self.row]].mean(axis=0)
             # A part's own weight says its volume and its mass too.
-            own: dict[str, Any] = {k: load[k] for k in ("volume_mm3", "grams") if k in load}
+            # And where it hangs without its glass band, the band's weight it carries still
+            # (mqucifer/print-shop#375).
+            own: dict[str, Any] = {
+                k: load[k] for k in ("volume_mm3", "grams", "band_grams", "band_mm2") if k in load
+            }
             found.append(
                 {
                     "at": _list(load["at"], 3),
@@ -2196,11 +2500,45 @@ def step(what: str) -> Iterator[None]:
             yield
     except NoAnswer:
         raise
+    except MemoryError as met:
+        # Python's own allocation failed: the whole unread for memory (mqucifer/print-shop#376),
+        # only where the container's room is short of it (the operator's review).
+        if not _short_of(met):
+            raise NoAnswer(f"load stopped {what}: MemoryError: {met}"[:500]) from met
+        evidence = f"load's own process met the container's memory, {what}"
+        raise _Unread(
+            f"nothing of the assembly is read, as {evidence}. Every part, joint and bolt of it is "
+            "left unread",
+            evidence,
+            memory=True,
+        ) from met
     except Exception as exc:  # noqa: BLE001 - whatever stops a step is said with the step
         raise NoAnswer(f"load stopped {what}: {type(exc).__name__}: {exc}"[:500]) from exc
     finally:
         forget()
         give_back()
+
+
+#: numpy's words for what it couldn't allocate, and each unit's bytes.
+ASKED = re.compile(r"Unable to allocate ([\d.]+) (B|KiB|MiB|GiB|TiB|PiB|EiB)\b")
+UNITS = {"B": 1, "KiB": 2**10, "MiB": 2**20, "GiB": 2**30, "TiB": 2**40, "PiB": 2**50,
+         "EiB": 2**60}  # fmt: skip
+
+
+def _short_of(met: MemoryError) -> bool:
+    """Whether a `MemoryError` was the container's memory: off the container, never; where
+    numpy says what it asked for, where that's within the container's limit and past its room;
+    and where it doesn't say, where the room is gone. An array no container could hold is a
+    plain error (the operator's review of mqucifer/print-shop#376)."""
+    left = cae.room()
+    if left is None:
+        return False
+    found = ASKED.search(str(met))
+    if found is None:
+        return left <= 0
+    asked = float(found.group(1)) * UNITS[found.group(2)]
+    most = cae.memory_max()
+    return most is not None and asked <= most and asked > left
 
 
 #: gmsh's lines that only sum up its errors.
@@ -2222,8 +2560,10 @@ RETRIES = 4
 
 def _gmsh_said(tools: Any) -> str:
     """gmsh's own error lines, from what FreeCAD's tools kept of what it printed."""
-    said = bytes(tools.process.readAllStandardOutput()).decode(errors="replace")
-    said += bytes(tools.process.readAllStandardError()).decode(errors="replace")
+    said = getattr(tools, "said", None)
+    if said is None:
+        said = bytes(tools.process.readAllStandardOutput()).decode(errors="replace")
+        said += bytes(tools.process.readAllStandardError()).decode(errors="replace")
     return "; ".join(_gmsh_errors(said)) or "it gave no reason"
 
 
@@ -2262,6 +2602,66 @@ class _Unread(NoAnswer):
         #: Whether it met the container's memory, which two passes read within
         #: (mqucifer/print-shop#301).
         self.memory = memory
+
+
+class _Unparted(NoAnswer):
+    """A mesh that gives parts no element of their own (mqucifer/print-shop#319): `empty`, their
+    names."""
+
+    def __init__(self, said: str, empty: list[str]) -> None:
+        super().__init__(said)
+        self.empty = empty
+
+
+def _solve_need(
+    fem: Any, falls_back: bool, low: tuple[int, int], high: tuple[int, int]
+) -> float:
+    """A step's need by the mesh's counts, from what it took a node and an element, each as if
+    alone (`WRITE_NODE` and the rest): where a lower bound can follow, a half above the more of
+    the two; anywhere else, a tenth under the less (mqucifer/print-shop#376)."""
+    nodes, elements = int(fem.NodeCount), int(fem.VolumeCount)
+    if falls_back:
+        return 1.5 * max(nodes * high[0], elements * high[1])
+    return 0.9 * min(nodes * low[0], elements * low[1])
+
+
+def _banded_to_do() -> str:
+    """What to do where the whole is past the memory and its glass bands are named
+    (mqucifer/print-shop#376): never to name them."""
+    if _bands:
+        return (
+            "with each glass band left out already, it's past the container's memory still: "
+            "read fewer of the parts at once"
+        )
+    return (
+        "each glass frame's band is named, and it's read next with its band left out, as a "
+        "lower bound"
+    )
+
+
+def _model_unread(model: Any, evidence: str) -> NoReturn:
+    """`_memory_unread`, for a model: banded where any of its parts names its glass band."""
+    parts = getattr(getattr(model, "assembly", None), "parts", [])
+    _memory_unread(evidence, any(getattr(p, "band", None) is not None for p in parts))
+
+
+def _memory_unread(evidence: str, banded: bool = False) -> NoReturn:
+    """The whole unread for the container's memory, `evidence` what it met
+    (mqucifer/print-shop#375, mqucifer/print-shop#376), with what to do: `banded` where its
+    glass bands are named."""
+    to_do = (
+        _banded_to_do()
+        if banded
+        else "name each glass frame's `band` in the assembly file, and it's read as a lower "
+        "bound with its band left out, or give a coarser --mesh, or read fewer of the parts at "
+        "once"
+    )
+    raise _Unread(
+        f"nothing of the assembly is read, as its mesh is past what the container's memory "
+        f"holds: {to_do}. {evidence}. Every part, joint and bolt of it is left unread",
+        evidence,
+        memory=True,
+    )
 
 
 class _Slow(_Unread):
@@ -2410,6 +2810,11 @@ def _ccx(fea: Any, size: float) -> None:
 _kept: list[Any] = []
 #: Of them, the parts as placed, kept for the whole read whatever else is let go.
 _placed_now: list[Any] = []
+#: What each part's glass band took from it, where the parts are placed without their bands, by
+#: the part's name (`_placed`, mqucifer/print-shop#375).
+_bands: dict[str, Band] = {}
+#: Which of CalculiX's solvers read the last read's mesh and its coarser one (`_run`).
+_solvers: list[str] = []
 
 
 def keep(shapes: list[Any]) -> None:
@@ -2679,19 +3084,23 @@ def run(args: Any, report: Report) -> None:
     # The container's memory said as it goes, for the host to say where it was killed
     # (mqucifer/print-shop#336).
     progress.watch()
+    # A killed command's mesh and solve files, left on disk, go (mqucifer/print-shop#376).
+    cae.clear_stale()
     try:
         _read(args, report)
     finally:
+        cae.clear_own()
         _clock["now"] = None
         _joined.clear()
         _kept.clear()
         _placed_now.clear()
+        _bands.clear()
         progress.stop()
 
 
 def _read(args: Any, report: Report) -> None:
     if getattr(args, "parts", False):
-        _run(args, report, two_pass="asked for with --parts")
+        _parts_read(args, report)
         return
     began = time.time()
     try:
@@ -2747,43 +3156,184 @@ def _read(args: Any, report: Report) -> None:
             failed = again
     if not banded:
         raise failed or unread
-    why = unread.evidence + (f"; and in two passes, {failed}" if failed else "")
-    refused = band_refused(args.lift, banded, why)
-    if refused:
-        raise NoAnswer(refused)
+    _band_read(
+        args,
+        report,
+        banded,
+        unread.evidence + (f"; and in two passes, {failed}" if failed else ""),
+        (
+            "its one pass wouldn't end inside the container's time, and two passes were tried "
+            "first"
+            if slow
+            else "its whole met the container's memory, and two passes were tried first"
+            if unread.memory
+            else "its whole couldn't be read"
+        ),
+        tried,
+        "its read, which a mesh no larger than the one pass's try takes",
+    )
+
+
+def _parts_read(args: Any, report: Report) -> None:
+    """`load --parts`: two passes, asked for (mqucifer/print-shop#301). Where they can't read
+    the whole, by the container's time or its memory, or where no mesh of it reads, and parts of
+    it name their glass band, each is read again with its band left out, as the one pass's two
+    passes are followed (mqucifer/print-shop#375). With no one pass's try to time the band's
+    read by, two passes are given the container's time less `load_parts.RESERVE` times a one
+    pass's limit, `load_parts.ONE_PASS`, held back for it. Anything else two passes say, they
+    say: a whole that reads is read whole."""
+    from . import load_parts
+
+    try:
+        banded = [p.name for p in read(args.assembly).parts if p.band is not None]
+    except NoAnswer:
+        # Said by `_run`, after what it says of the command's own words.
+        banded = []
+    began = time.time()
+    try:
+        _run(
+            args,
+            report,
+            two_pass="asked for with --parts",
+            reserve=load_parts.RESERVE * load_parts.ONE_PASS if banded else 0.0,
+        )
+        return
+    except (load_parts.OutOfTime, _Unread) as stopped:
+        if not banded:
+            raise
+        met = stopped.evidence if isinstance(stopped, _Unread) else str(stopped)
+        memory = isinstance(stopped, _Unread) and stopped.memory
+        late = isinstance(stopped, load_parts.OutOfTime)
+    _clock["now"] = None
+    _give_back()
+    _band_read(
+        args,
+        report,
+        banded,
+        f"read in two passes, as --parts asks: {met}",
+        "two passes, asked for with --parts, "
+        + (
+            "met the container's time"
+            if late
+            else "met the container's memory"
+            if memory
+            else "couldn't read its whole"
+        ),
+        load_parts.ONE_PASS,
+        "its read, which a one pass's limit is given for",
+        tried_s=time.time() - began,
+    )
+
+
+def _band_read(
+    args: Any,
+    report: Report,
+    banded: list[str],
+    why: str,
+    done: str,
+    tried: float,
+    what: str,
+    tried_s: float | None = None,
+) -> None:
+    """Each part that names its glass band read again with it left out, where the whole can't
+    be read (mqucifer/print-shop#295), `why`, said first, with `done`, what was tried. The read
+    has the container's time left: where that's less than `tried`, what the band's read is
+    taken to take, s, it says so. Under a weight it's a lower bound (`BOUND`). Lifted, each band's
+    weight is kept, hung from where it met its part (`_Model._band_weight`), the movement taken
+    together is an upper bound, never a part's strain (`LIFT_BOUND`, mqucifer/print-shop#375),
+    and a joint's and its bolts' share is the full weight's only where statics fixes it: every
+    other share is said not to be a bound (the operator's review). Either way the verdict's
+    line says the band is unread. `tried_s` is what's said the try took, `tried` unless
+    given."""
     report.again()
     from . import load_parts
 
-    # The band's read has the container's time left: where that's less than the one pass's try
-    # took, or runs out before a bolt's reading, it says so.
     clock = load_parts.Clock(report.started, label="the glass band's lower bound")
-    clock.done.append(
-        "its one pass wouldn't end inside the container's time, and two passes were tried first"
-        if slow
-        else "its whole met the container's memory, and two passes were tried first"
-    )
+    clock.done.append(done)
     clock.time("band", tried)
-    clock.check("band", "its read, which a mesh no larger than the one pass's try takes")
+    clock.check("band", what)
     _clock["now"] = clock
     band_began = time.time()
-    _run(args, report, without_bands=True)
     names = ", ".join(banded)
-    report.facts.insert(
-        0,
-        f"read as a lower bound: {names} read with its glass band left out, the leads and lips "
-        "its `band` names, as the whole couldn't be read: "
-        f"{why}. The rest of each is read with no stiffness for its band, as it would be with "
-        "the band gone, never with a stiffness made up for it, and the band itself is unread. "
-        f"{BOUND}",
-    )
+    try:
+        _run(args, report, without_bands=True)
+    except load_parts.OutOfTime:
+        raise  # it says it's the band's lower bound's own clock
+    except NoAnswer as stopped:
+        # The bound itself unread, said as it is, never as if it were the whole
+        # (mqucifer/print-shop#376).
+        raise NoAnswer(
+            f"the glass band's lower bound couldn't be read either: the whole couldn't be read "
+            f"({why}), and with {names}'s glass band left out, {stopped}"
+        ) from stopped
+    lifted = args.lift is not None
+    joints = report.numbers.get("joints", {})
+    fixed = sorted(n for n, j in joints.items() if "statics_force_n" in j)
+    loose = sorted(n for n, j in joints.items() if "statics_force_n" not in j)
+    if lifted:
+        report.facts.insert(
+            0,
+            f"read as a bound: {names} read with its glass band's stiffness left out and its "
+            "weight kept, the leads and lips its `band` names hung from the faces where they "
+            f"met the rest of it, as the whole couldn't be read: {why}. The band's stiffness is "
+            f"never made up, and the band itself is unread. {LIFT_BOUND}"
+            + (
+                f". Statics fixes {', '.join(fixed)}: each carries the load beyond it, which "
+                "hangs from it alone, the full weight's as with the band in, and so its bolts "
+                "share the same"
+                if fixed
+                else ""
+            )
+            + (
+                f". {' and '.join(loose)} can carry more or less than with the band in, as the "
+                "band's stiffness moves load between the ways it goes round a loop, and so can "
+                "their bolts: no share of theirs is a bound"
+                if loose
+                else ""
+            ),
+        )
+        report.why = (
+            f"read as a bound, {names} with its glass band's stiffness left out and its weight "
+            f"kept, the band unread: {report.why}"
+        )
+    else:
+        report.facts.insert(
+            0,
+            f"read as a lower bound: {names} read with its glass band left out, the leads and "
+            "lips its `band` names, as the whole couldn't be read: "
+            f"{why}. The rest of each is read with no stiffness for its band, as it would be "
+            "with the band gone, never with a stiffness made up for it, and the band itself is "
+            f"unread. {BOUND}",
+        )
+        report.why = (
+            f"read as a lower bound, {names} with its glass band left out, the band unread: "
+            f"{report.why}"
+        )
     report.numbers["lower_bound"] = {
         "parts": banded,
         "why": why,
-        # How long the one pass's try took, and the band's read (mqucifer/print-shop#301).
-        "tried_s": round(tried, 1),
+        # How long the try took, and the band's read (mqucifer/print-shop#301).
+        "tried_s": round(tried if tried_s is None else tried_s, 1),
         "band_s": round(time.time() - band_began, 1),
+        # And which of CalculiX's solvers read it, at the mesh and the coarser one: the
+        # iterative where the direct met the memory (mqucifer/print-shop#376).
+        "solvers": dict(zip(("mesh", "coarser"), _solvers, strict=False)),
+        # Lifted, each band's weight kept, in g (mqucifer/print-shop#375), and the joints whose
+        # load statics fixes, and those whose share isn't a bound (the operator's review).
+        **(
+            {
+                "weight_kept_g": {
+                    one["part"]: one["band_grams"]
+                    for one in report.numbers.get("loads", [])
+                    if "band_grams" in one
+                },
+                "statics_fixed": fixed,
+                "shares_not_bound": loose,
+            }
+            if lifted
+            else {}
+        ),
     }
-    report.why = f"read as a lower bound, {names} with its glass band left out: {report.why}"
 
 
 #: Which figures read without a band are a bound, and which aren't (mqucifer/print-shop#295).
@@ -2793,21 +3343,15 @@ BOUND = (
     "part's strain, and each joint's and bolt's share of the load, can be more or less than "
     "with the band in, and isn't one"
 )
-
-
-def band_refused(lift: str | None, banded: list[str], why: str) -> str | None:
-    """Why the assembly isn't read without its bands, or None where it is: lifted, each part
-    hangs by its own weight, and without its band a part would hang by less, so every strain
-    would be read under less than it carries (mqucifer/print-shop#295)."""
-    if lift is None:
-        return None
-    return (
-        f"--lift {lift}: the whole assembly couldn't be read ({why}), and it isn't read with "
-        f"the glass band of {', '.join(banded)} left out, as lifted each part hangs by its own "
-        "weight, and without its band it would hang by less: every strain would be read under "
-        "less than it carries. Read a weight case, which is read without the band as a lower "
-        "bound"
-    )
+#: And lifted, with each band's weight kept (mqucifer/print-shop#375).
+LIFT_BOUND = (
+    "Lifted, every part hangs by its whole weight still, the band's in it, with less of the "
+    "part to carry it: how far what hangs moves along its weight, taken together, is an upper "
+    "bound under the full weight, the safe side. Each part's strain isn't one: a banded part's "
+    "is read on the rest of it alone, and its band, where its worst may be, is unread; and any "
+    "part's, at a corner where parts meet, reads by the mesh there, which differs with the band "
+    "left out"
+)
 
 
 def _run(
@@ -2950,11 +3494,16 @@ def _run(
         coarse = _solved(
             assembly, placed, args, round(size * COARSER, 3), cores=cores, coarser_of=fine["closes"]
         )
+    # Which of CalculiX's solvers read each mesh, for a glass band's read (mqucifer/print-shop#376).
+    _solvers[:] = [
+        "iterative, corrected" if one.get("iterated") else "direct" for one in (fine, coarse)
+    ]
     force = float(sum(np.linalg.norm(one["force"]) for one in fine["raw_loads"]))
     meshed = (
         f"a mesh of at most {size:g} mm ({fine['nodes']} nodes, {fine['elements']} elements, "
         f"meshed in {fine['mesh_s']} s and solved in {fine['solve_s']} s)"
         + _straight_said(fine)
+        + (f"; {fine['iterated']}" if fine.get("iterated") else "")
         if two_pass is None
         else "in two passes, each one's meshes below"
     )
@@ -3029,7 +3578,15 @@ def _run(
             report.line(
                 f"the part {one['part']} hangs by its own weight: {one['volume_mm3']:.1f} mm³ "
                 f"solid is {one['grams']:.2f} g, {np.linalg.norm(one['force_n']):.4f} N, at its "
-                f"middle, {_xyz(one['middle'])}; it moves {one['moves_mm']:.4f} mm {args.toward}"
+                f"middle, {_xyz(one['middle'])}"
+                + (
+                    f", {one['band_grams']:.2f} g of it its glass band's, left out of its "
+                    f"stiffness and hung from the {one['band_mm2']:.1f} mm² where the band met "
+                    "the rest of it"
+                    if "band_grams" in one
+                    else ""
+                )
+                + f"; it moves {one['moves_mm']:.4f} mm {args.toward}"
             )
             continue
         report.line(
@@ -3069,8 +3626,9 @@ def _run(
     )
     report.second(
         f"the same solve on a mesh of at most {coarse['mesh_mm']:g} mm ({coarse['nodes']} nodes"
-        f"{_straight_said(coarse)}): "
-        f"the loaded places move {moves}"
+        f"{_straight_said(coarse)}"
+        + (f"; {coarse['iterated']}" if two_pass is None and coarse.get("iterated") else "")
+        + f"): the loaded places move {moves}"
     )
     report.second(
         f"the held faces' reaction, as CalculiX sums it: {_xyz(fine['reaction'])} N, against the "

@@ -2482,3 +2482,297 @@ def test_a_glass_frame_bolted_to_a_block_reads_as_a_lower_bound_with_its_band_le
     assert joint["force_n"] == pytest.approx([0, 0, G], abs=0.01), "the block holds the weight up"
     assert len(joint["bolts"]) == 3 and joint["bolt_pull_n"] > 0
     assert answer.record["seconds"] < host.TIMEOUT
+
+
+# `load --parts` and a lift on a glass frame's band (mqucifer/print-shop#375). Marked `bands` as
+# well as `assembly`, so CI runs them in a job of their own: the assembly job is near its 30
+# minutes as it is.
+
+#: The smaller made-up panel's width, in mm: its frame bolted to a block reads whole, in one pass
+#: and in two, so each bound has the whole beside it (at 80 mm, `pieces build` leaves a piece no
+#: pane, and the fixes it says don't mend it). And a weight's place on its -x border, half way
+#: up, as the larger one's.
+BANDS_W = 120
+BANDS_AT = f"-6,{0.625 * BANDS_W / 2:g},6"
+
+
+@pytest.fixture(scope="module")
+def small_glass(cae: Any) -> Path:
+    return glass_built(cae, BANDS_W)
+
+
+def _forced(cae: Any, script: str, args: list[str], timeout: int = host.TIMEOUT) -> dict[str, Any]:
+    """`args`, a bench command, run by one of `cae_cases`' forced scripts as the bench runs it,
+    given `timeout` as its container's limit; and what it saved."""
+    shutil.copy(CASES / script, cae.work / script)
+    done = host.run([script, *args], cae.work, python=True, image=host.CAE_IMAGE, timeout=timeout)
+    found = re.search(r"saved: (\S+)\.txt and \.json", done.stdout)
+    assert found, done.stdout + done.stderr
+    record: dict[str, Any] = json.loads((cae.work / f"{found.group(1)}.json").read_text())
+    record["text"] = done.stdout
+    return record
+
+
+#: The plain frame's panel width, in mm (`cae_cases/band_plate.py`), and a weight's place on its
+#: -x border's top, half way up.
+PLATE_W = 60
+PLATE_AT = f"-6,{0.625 * PLATE_W / 2:g},6"
+
+
+@pytest.fixture(scope="module")
+def plain_frame(cae: Any) -> Path:
+    """A plain frame round a panel, its panel named as its band, bored and bolted to a block as
+    the traced one is (`glass_joined.py`), in the folder `plate-WIDTH`."""
+    for script in ("band_plate.py", "glass_joined.py"):
+        shutil.copy(CASES / script, cae.work / script)
+    for argv in (["band_plate.py", str(PLATE_W), "plate.step"],
+                 ["glass_joined.py", "plate.step", f"plate-{PLATE_W}"]):  # fmt: skip
+        made = host.run(argv, cae.work, python=True, image=host.CAE_IMAGE)
+        assert made.returncode == 0, made.stdout + made.stderr
+    return Path(cae.work) / f"plate-{PLATE_W}"
+
+
+def _case(case: str, at: str) -> list[str]:
+    return ["--weight", "1", "--at", at] if case == "weight" else ["--lift", "block"]
+
+
+@pytest.mark.assembly
+@pytest.mark.bands
+def test_parts_reads_a_banded_frame_whole_where_two_passes_can(
+    cae: Any, plain_frame: Path
+) -> None:
+    """mqucifer/print-shop#375: a read that can be had whole is still read whole. A plain frame
+    whose panel is named as its band, bolted to a block, under `--parts` and a weight: two
+    passes read it whole, the band in, and nothing is a bound. Two passes refuse the traced
+    frame by their own checks, as what's evened out of its first pass's push, more than they
+    hold to: neither time nor memory, so it's said as it is. Lifted, two passes refuse this
+    frame too, on main as here, as the lifted block on its own doesn't balance in pass 2: so a
+    lift read whole is the one pass's, beside its bound, below."""
+    whole = cae("load", f"{plain_frame.name}/joined.json", *_case("weight", PLATE_AT), "--parts")
+    assert whole.verdict == "OK", whole.text
+    assert "lower_bound" not in whole.numbers, "a whole that reads is read whole"
+    assert whole.numbers["two_passes"]["why"] == "asked for with --parts"
+    assert "read as a" not in whole.record["why"]
+
+
+@pytest.mark.assembly
+@pytest.mark.bands
+@pytest.mark.parametrize("case", ["weight", "lift"])
+def test_parts_where_two_passes_meet_the_memory_meshing_reads_a_glass_band_s_bound(
+    cae: Any, small_glass: Path, case: str
+) -> None:
+    """mqucifer/print-shop#375: `load --parts` on the traced glass frame bolted to a block, the
+    first pass's mesher taking memory until the kernel stops it
+    (`cae_cases/mesh_memory_forced.py`). The container is left standing, as gmsh is the first
+    to go, the whole is unread for its memory, and the frame is read with its band left out, as
+    the one pass's two passes are followed. Under the weight it's a lower bound; lifted, the
+    band's weight is kept, and the movement taken together is an upper bound."""
+    args = ["load", f"{small_glass.name}/joined.json", *_case(case, BANDS_AT), "--parts"]
+    forced = _forced(cae, "mesh_memory_forced.py", args, timeout=host.TWO_PASSES)
+    assert forced["verdict"] == "OK", forced["text"]
+    assert "killed" not in forced["text"]
+    lower = forced["numbers"]["lower_bound"]
+    assert lower["parts"] == ["frame"]
+    assert lower["why"].startswith(
+        "read in two passes, as --parts asks: gmsh made no mesh of the joined parts at a mesh of "
+    ), lower["why"]
+    assert "it met the container's memory, 3 GiB, meshing them, and the kernel stopped it" in (
+        lower["why"]
+    )
+    assert "two_passes" not in forced["numbers"], "the band's read is one pass"
+    if case == "weight":
+        assert forced["why"].startswith(
+            "read as a lower bound, frame with its glass band left out, the band unread: "
+        ), forced["why"]
+        assert "weight_kept_g" not in lower
+        return
+    assert forced["why"].startswith(
+        "read as a bound, frame with its glass band's stiffness left out and its weight kept, "
+        "the band unread: "
+    ), forced["why"]
+    assert "is an upper bound under the full weight" in forced["text"]
+    assert lower["weight_kept_g"]["frame"] > 0
+
+
+@pytest.mark.assembly
+@pytest.mark.bands
+def test_parts_reads_a_glass_band_s_lower_bound_where_two_passes_meet_the_time(
+    cae: Any, small_glass: Path
+) -> None:
+    """mqucifer/print-shop#375: `load --parts` on the frame bolted to a block, two passes left
+    two seconds of the hour, as if what's kept for the band took the rest
+    (`cae_cases/reserve_forced.py`, whose one pass isn't run with `--parts`). They stop before
+    their first pass, and the frame is read with its band left out, a lower bound, saying the
+    two passes met the container's time less what's kept for it, and that the band's unread."""
+    args = ["load", f"{small_glass.name}/joined.json", "--weight", "1", "--at", BANDS_AT,
+            "--parts"]  # fmt: skip
+    forced = _forced(cae, "reserve_forced.py", args, timeout=host.TWO_PASSES)
+    assert forced["verdict"] == "OK", forced["text"]
+    lower = forced["numbers"]["lower_bound"]
+    assert lower["parts"] == ["frame"]
+    # The forced clock keeps all but two seconds for the band, in place of the one pass's limit
+    # `--parts` keeps (`load_parts.ONE_PASS`, which `test_load_parts.py` reads).
+    assert lower["why"].startswith(
+        "read in two passes, as --parts asks: two passes met the container's time, 3600 s, less "
+    ), lower["why"]
+    assert " s kept for a glass band's lower bound" in lower["why"]
+    assert forced["why"].startswith(
+        "read as a lower bound, frame with its glass band left out, the band unread: "
+    ), forced["why"]
+    assert forced["ran"]["limit_s"] == host.TWO_PASSES
+
+
+@pytest.mark.assembly
+@pytest.mark.bands
+def test_a_lift_on_a_glass_frame_without_its_band_keeps_its_weight_and_strains_no_less(
+    cae: Any, small_glass: Path
+) -> None:
+    """mqucifer/print-shop#375: lifted by the block, the frame hangs from its bolted border, and
+    its panel, the band, stiffens it. Read whole in one pass, and read with the band's stiffness
+    left out and its weight kept (`cae_cases/band_forced.py`, as where the whole can't be read):
+    the same weight hangs, so the joint carries the same, each bolt no less, and with less to
+    carry it the frame moves further. Its band's stiffness matters here: the rest of the frame,
+    outside the band, strains more without it than with it, the whole's read there by
+    `cae_cases/band_outside.py`. The frame's worst strain read whole is in the band itself,
+    which the bound leaves unread: so no part's strain is called a bound, and the reply says the
+    band is unread (the operator's ruling on the planted figures)."""
+    args = ["load", f"{small_glass.name}/joined.json", "--lift", "block"]
+    whole = _forced(cae, "band_outside.py", args)
+    assert whole["verdict"] == "OK", whole["text"]
+    read = whole["numbers"]
+    assert "lower_bound" not in read and "two_passes" not in read
+    found = re.search(r"^outside: (.*)$", whole["text"], re.M)
+    assert found, whole["text"]
+    rest = json.loads(found.group(1))["frame"][0]
+    without = _forced(cae, "band_forced.py", args)
+    assert without["verdict"] == "OK", without["text"]
+    assert without["why"].startswith(
+        "read as a bound, frame with its glass band's stiffness left out and its weight kept, "
+        "the band unread: "
+    ), without["why"]
+    kept = without["numbers"]
+    lower = kept["lower_bound"]
+    assert lower["parts"] == ["frame"] and lower["weight_kept_g"]["frame"] > 0
+    assert "Each part's strain isn't one" in without["text"]
+    # Every gram hangs, the band's from where it met the frame.
+    assert kept["force_n"] == pytest.approx(read["force_n"], rel=1e-6)
+    frame = next(one for one in kept["loads"] if one["part"] == "frame")
+    frame_whole = next(one for one in read["loads"] if one["part"] == "frame")
+    assert frame["grams"] == pytest.approx(frame_whole["grams"], rel=1e-6)
+    assert frame["band_mm2"] > 0 and 0 < frame["band_grams"] < frame["grams"]
+    # Statics fixes the one joint, everything beyond it hanging from it alone: it carries the
+    # full weight's load, as whole, and each of its bolts the same share of it.
+    assert lower["statics_fixed"] == ["frame+block"] and lower["shares_not_bound"] == []
+    joint, joint_whole = kept["joints"]["frame+block"], read["joints"]["frame+block"]
+    assert np.allclose(joint["force_n"], joint_whole["force_n"], atol=1e-3 * read["force_n"])
+    bolts = [b["pull_n"] for b in joint["bolts"]]
+    bolts_whole = [b["pull_n"] for b in joint_whole["bolts"]]
+    assert len(bolts) == len(bolts_whole) == 3
+    for one, other in zip(bolts, bolts_whole, strict=True):
+        assert one == pytest.approx(other, rel=0.01), (bolts, bolts_whole)
+    # Further along the way it hangs, at its middle and at the most.
+    assert frame["moves_mm"] > frame_whole["moves_mm"]
+    assert kept["most_moves_mm"] > read["most_moves_mm"]
+    # The rest of the frame strains more without its band.
+    for key in ("across_layers_pct", "stretch_pct"):
+        assert kept["parts"]["frame"][key] > rest[key], key
+    # Read whole, the frame's worst is in its band, unread here.
+    assert read["parts"]["frame"]["across_layers_pct"] > rest["across_layers_pct"]
+
+
+@pytest.mark.assembly
+@pytest.mark.bands
+def test_a_lift_on_a_banded_frame_hung_two_ways_says_no_share_in_the_loop_is_a_bound(
+    cae: Any,
+) -> None:
+    """The operator's review of mqucifer/print-shop#376: a banded frame hung from a lifted
+    block two ways at once, directly and through a post and an arm (`cae_cases/band_loop.py`).
+    Statics fixes none of its joints. Read whole, and with the band's stiffness left out and its
+    weight kept (`band_forced.py`): the same weight hangs, but taking the band's stiffness out
+    moves load between the two ways, and a joint carries less than whole. So the reply names
+    every joint in the loop as one whose share can be more or less, and calls none a bound."""
+    shutil.copy(CASES / "band_loop.py", cae.work / "band_loop.py")
+    made = host.run(["band_loop.py", "loop"], cae.work, python=True, image=host.CAE_IMAGE)
+    assert made.returncode == 0, made.stdout + made.stderr
+    args = ["load", "loop/loop.json", "--lift", "block"]
+    whole = cae(*args)
+    assert whole.verdict == "UNREAD", whole.text  # bonded: what's read is each joint's force
+    assert "lower_bound" not in whole.numbers
+    without = _forced(cae, "band_forced.py", args)
+    assert without["verdict"] == "UNREAD", without["text"]
+    kept, read = without["numbers"], whole.numbers
+    lower = kept["lower_bound"]
+    names = ["arm+block", "frame+block", "post+arm", "post+frame"]
+    assert lower["statics_fixed"] == [] and lower["shares_not_bound"] == names
+    assert all("statics_force_n" not in read["joints"][n] for n in names)
+    assert "can carry more or less than with the band in" in without["text"]
+    assert kept["force_n"] == pytest.approx(read["force_n"], rel=1e-6), "every gram hangs"
+    change = {
+        n: float(np.linalg.norm(kept["joints"][n]["force_n"]))
+        - float(np.linalg.norm(read["joints"][n]["force_n"]))
+        for n in names
+    }
+    # A joint in the loop carries less without the band: so a share there isn't a bound.
+    assert min(change.values()) < -0.01 * read["force_n"], change
+
+
+@pytest.mark.assembly
+@pytest.mark.bands
+def test_parts_where_the_first_pass_s_mesh_won_t_fit_read_back_reads_a_glass_band_s_bound(
+    cae: Any, small_glass: Path
+) -> None:
+    """A design run's assembly on mqucifer/print-shop#376 was killed in `load`'s own process,
+    holding its mesh read back: FreeCAD's reader aborts where it meets the memory, so nothing
+    could catch it. Now the mesh's need, by its file's size, is held against the container's
+    room before it's read. Here a process of its own takes all of the room but a few MB as the
+    first pass's mesh is about to be read back (`cae_cases/room_forced.py`): it isn't read, the
+    whole is unread for memory, and the traced frame reads its band's lower bound, the container
+    standing."""
+    args = ["load", f"{small_glass.name}/joined.json", "--weight", "1", "--at", BANDS_AT,
+            "--parts"]  # fmt: skip
+    forced = _forced(cae, "room_forced.py", args, timeout=host.TWO_PASSES)
+    assert forced["verdict"] == "OK", forced["text"]
+    assert "killed" not in forced["text"]
+    lower = forced["numbers"]["lower_bound"]
+    assert lower["parts"] == ["frame"]
+    assert lower["why"].startswith(
+        "read in two passes, as --parts asks: gmsh meshed the joined parts at a mesh of at most "
+    ), lower["why"]
+    assert "GiB read back, where the container's memory has " in lower["why"]
+    assert forced["why"].startswith(
+        "read as a lower bound, frame with its glass band left out, the band unread: "
+    ), forced["why"]
+
+
+@pytest.mark.assembly
+@pytest.mark.bands
+def test_a_band_s_read_whose_direct_solve_meets_the_memory_is_solved_iteratively(
+    cae: Any, plain_frame: Path
+) -> None:
+    """The operator, on a design run's assembly on mqucifer/print-shop#376: its band's own read
+    met the memory in CalculiX's direct solve, and as nothing follows it, it's solved again by
+    the iterative solver and corrected, as two passes are. Planted on the plain banded frame
+    (`cae_cases/band_iterative_forced.py`): the band's first direct solve meets the memory,
+    really, and the band's read is solved iteratively, says so, and reads as the same band's
+    read by the direct solver does (`band_forced.py`), within the corrections' residual."""
+    args = ["load", f"{plain_frame.name}/joined.json", "--weight", "1", "--at", PLATE_AT]
+    direct = _forced(cae, "band_forced.py", args)
+    assert direct["verdict"] == "OK", direct["text"]
+    assert direct["numbers"]["lower_bound"]["solvers"] == {"mesh": "direct", "coarser": "direct"}
+    iterated = _forced(cae, "band_iterative_forced.py", args)
+    assert iterated["verdict"] == "OK", iterated["text"]
+    assert "killed" not in iterated["text"]
+    lower = iterated["numbers"]["lower_bound"]
+    assert lower["solvers"] == {"mesh": "iterative, corrected", "coarser": "direct"}, lower
+    assert "CalculiX's direct solver met the container's memory" in iterated["text"]
+    one, other = iterated["numbers"], direct["numbers"]
+    assert one["moves_mm"] == pytest.approx(other["moves_mm"], rel=1e-4)
+    for name in ("frame", "block"):
+        for key in ("across_layers_pct", "stretch_pct"):
+            assert one["parts"][name][key] == pytest.approx(
+                other["parts"][name][key], rel=1e-3
+            ), (name, key)
+    assert np.allclose(
+        one["joints"]["frame+block"]["force_n"], other["joints"]["frame+block"]["force_n"],
+        atol=1e-4 * one["force_n"],
+    )  # fmt: skip

@@ -971,3 +971,989 @@ def test_a_part_the_squaring_left_as_it_was_stays_kept_once_the_squared_join_goe
     load.unjoined(square)
     assert [s for s in load._kept if s is placed[0]], "a part as placed stays kept"
     assert not [s for s in load._kept if s is square[1] or s is joined]
+
+
+# `--parts` on glass bands (mqucifer/print-shop#375)
+
+
+def _banded(tmp_path: Path, banded: bool = True) -> str:
+    """A made-up glass frame bolted to a block, the frame naming its glass band where `banded`:
+    files only, for the stand-ins below."""
+    import json
+
+    frame: dict[str, Any] = {"name": "frame", "file": "frame.step", "layers": "z"}
+    if banded:
+        frame["band"] = "band.step"
+        (tmp_path / "band.step").write_text("")
+    data = {
+        "parts": [frame, {"name": "block", "file": "block.step", "layers": "z", "at": [0, 0, -20]}],
+        "joints": [
+            {"between": ["frame", "block"], "kind": "through", "bolt": "m5-8.8", "nut": "m5-nut",
+             "washer": "m5-washer", "at": [[6, 10, 6]]}
+        ],
+        "held": [{"plane": "x=40", "how": "fixed", "part": "block"}],
+    }  # fmt: skip
+    for name in ("frame", "block"):
+        (tmp_path / f"{name}.step").write_text("")
+    path = tmp_path / f"glass-{'banded' if banded else 'plain'}.json"
+    path.write_text(json.dumps(data))
+    return str(path)
+
+
+def _two_passes_then(
+    monkeypatch: pytest.MonkeyPatch, calls: list[dict[str, Any]], stopped: Exception | None
+) -> None:
+    """`load._run` stood in for where it needs FreeCAD: in two passes it raises `stopped`, or
+    reads where that's None; read with the bands left out, it reads, its loads as a lift's with
+    the band's weight kept where it's lifted."""
+
+    def run(
+        args: Any, report: Report, without_bands: bool = False, two_pass: str | None = None,
+        reserve: float = 0.0, tried: float = 0.0,
+    ) -> None:  # fmt: skip
+        calls.append({"two_pass": two_pass, "without_bands": without_bands, "reserve": reserve,
+                      "clock": load._clock["now"]})  # fmt: skip
+        report.line(f"read {'without bands' if without_bands else two_pass}")
+        if two_pass is not None and stopped is not None:
+            raise stopped
+        if without_bands:
+            load._solvers[:] = ["iterative, corrected", "direct"]
+        if without_bands and args.lift is not None:
+            report.numbers["loads"] = [
+                {"part": "frame", "grams": 30.0, "band_grams": 12.5, "band_mm2": 400.0}
+            ]
+        report.verdict("OK", "every part is within its material's limits")
+
+    monkeypatch.setattr(load, "_run", run)
+    monkeypatch.setattr(load, "_clock", {"now": None})
+
+
+def _parts_args(path: str, lift: str | None = None) -> Any:
+    args = _args(path, parts=True)
+    args.lift = lift
+    return args
+
+
+def test_parts_on_a_glass_band_that_meets_the_time_reads_its_lower_bound_and_says_why(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """`load --parts` on a frame that names its band: two passes go first, with a one pass's
+    limit, `RESERVE` times over, held back from their time for the band's read; where they meet
+    the container's time, the frame is read with its band left out, a lower bound, and the reply
+    leads with it and says why, as the one pass's two passes do."""
+    import time
+
+    monkeypatch.setenv(load_parts.TIMEOUT, str(host.TWO_PASSES))
+    calls: list[dict[str, Any]] = []
+    late = load_parts.OutOfTime("two passes met the container's time, 3600 s, after 2900 s")
+    _two_passes_then(monkeypatch, calls, late)
+    report = Report("load", ["glass.json"])
+    report.started = time.time()
+    load.run(_parts_args(_banded(tmp_path)), report)
+    assert [(c["two_pass"], c["without_bands"]) for c in calls] == [
+        ("asked for with --parts", False), (None, True)
+    ]  # fmt: skip
+    assert calls[0]["reserve"] == load_parts.RESERVE * load_parts.ONE_PASS
+    band = calls[1]["clock"]
+    assert band.label == "the glass band's lower bound" and band.reserve == 0
+    assert band.done == ["two passes, asked for with --parts, met the container's time"]
+    lower = report.numbers["lower_bound"]
+    assert lower["parts"] == ["frame"]
+    assert lower["why"] == f"read in two passes, as --parts asks: {late}"
+    assert lower["solvers"] == {"mesh": "iterative, corrected", "coarser": "direct"}
+    assert "weight_kept_g" not in lower
+    assert report.why.startswith(
+        "read as a lower bound, frame with its glass band left out, the band unread: "
+    )
+    assert report.facts[0].startswith("read as a lower bound: frame read with its glass band left")
+    assert load.BOUND in report.facts[0]
+    assert report.facts[1:] == ["read without bands"], "what two passes said is gone"
+
+
+def test_parts_on_a_glass_band_whose_whole_meets_the_memory_reads_its_lower_bound(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Where two passes meet the container's memory, meshing or solving, they're answered as
+    unread (`load._Unread`), and the band's read follows, saying what they met, without what to
+    do about it."""
+    monkeypatch.setenv(load_parts.TIMEOUT, str(host.TWO_PASSES))
+    calls: list[dict[str, Any]] = []
+    met = load._Unread(
+        "nothing of the assembly is read: give a coarser --mesh. gmsh met it",
+        "gmsh met the container's memory, 4 GiB",
+        memory=True,
+    )
+    _two_passes_then(monkeypatch, calls, met)
+    report = Report("load", ["glass.json"])
+    load.run(_parts_args(_banded(tmp_path)), report)
+    assert [c["without_bands"] for c in calls] == [False, True]
+    done = calls[1]["clock"].done
+    assert done == ["two passes, asked for with --parts, met the container's memory"]
+    lower = report.numbers["lower_bound"]
+    assert lower["why"] == (
+        "read in two passes, as --parts asks: gmsh met the container's memory, 4 GiB"
+    )
+
+
+@pytest.mark.parametrize("banded", [True, False])
+def test_parts_reads_a_whole_that_reads_whole(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, banded: bool
+) -> None:
+    """A read that can be had whole is still read whole, band or none: no lower bound, and with
+    no band, nothing is held back from two passes."""
+    monkeypatch.setenv(load_parts.TIMEOUT, str(host.TWO_PASSES))
+    calls: list[dict[str, Any]] = []
+    _two_passes_then(monkeypatch, calls, None)
+    report = Report("load", ["glass.json"])
+    load.run(_parts_args(_banded(tmp_path, banded)), report)
+    assert [c["without_bands"] for c in calls] == [False]
+    assert calls[0]["reserve"] == (load_parts.RESERVE * load_parts.ONE_PASS if banded else 0.0)
+    assert "lower_bound" not in report.numbers
+    assert report.why == "every part is within its material's limits"
+
+
+@pytest.mark.parametrize(
+    "stopped",
+    [
+        NoAnswer("pass 2, frame on its own, on the mesh: what it's given doesn't balance"),
+        load._Unread("met", "met", memory=True),
+        load_parts.OutOfTime("two passes met the container's time"),
+    ],
+)
+def test_parts_says_what_two_passes_say_where_there_s_no_band_or_it_isn_t_time_or_memory(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, stopped: Exception
+) -> None:
+    """No check is loosened: the band's read follows two passes only where they can't read the
+    whole and a part names its band. A refusal of their own, as a part whose loads don't
+    balance, is said as it is, band or none; and with no band, so is the time or the memory."""
+    monkeypatch.setenv(load_parts.TIMEOUT, str(host.TWO_PASSES))
+    for banded in (True, False):
+        if banded and type(stopped) is not NoAnswer:
+            continue
+        calls: list[dict[str, Any]] = []
+        _two_passes_then(monkeypatch, calls, stopped)
+        with pytest.raises(NoAnswer) as said:
+            load.run(_parts_args(_banded(tmp_path, banded)), Report("load", ["glass.json"]))
+        assert said.value is stopped
+        assert [c["without_bands"] for c in calls] == [False]
+
+
+def test_parts_band_s_read_says_where_what_s_left_is_less_than_a_one_pass_s_limit(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The band's read has the container's time left, and is taken to take a one pass's limit
+    at the most: where less is left, it says so as the band's, and nothing more is read."""
+    import time
+
+    monkeypatch.setenv(load_parts.TIMEOUT, str(host.TWO_PASSES))
+    calls: list[dict[str, Any]] = []
+    _two_passes_then(monkeypatch, calls, load_parts.OutOfTime("two passes met it"))
+    report = Report("load", ["glass.json"])
+    report.started = time.time() - (host.TWO_PASSES - load_parts.ONE_PASS)
+    with pytest.raises(load_parts.OutOfTime) as late:
+        load.run(_parts_args(_banded(tmp_path)), report)
+    assert str(late.value).startswith("the glass band's lower bound met the container's time")
+    assert "before its read, which a one pass's limit is given for" in str(late.value)
+    assert [c["without_bands"] for c in calls] == [False]
+
+
+@pytest.mark.parametrize("parts", [True, False])
+def test_a_lift_on_a_glass_band_that_can_t_be_read_whole_keeps_the_band_s_weight(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, parts: bool
+) -> None:
+    """mqucifer/print-shop#375: a lift on a frame whose whole can't be read was refused, as read
+    without its band the frame would hang by less than its weight. Now the band's weight is
+    kept, hung where it met the frame, with its stiffness left out: the reply leads with that,
+    says the movement taken together is an upper bound under the full weight, never a part's
+    strain, that the band is unread, and gives the weight kept. In two passes
+    asked for, and after the one pass's."""
+    monkeypatch.setenv(load_parts.TIMEOUT, str(host.TWO_PASSES))
+    calls: list[dict[str, Any]] = []
+    met = load._Unread("met", "the whole met the container's memory", memory=True)
+    _two_passes_then(monkeypatch, calls, met)
+    if not parts:
+        two = load._run
+
+        def one_pass_first(args: Any, report: Report, without_bands: bool = False,
+                           **given: Any) -> None:  # fmt: skip
+            if not without_bands and given.get("two_pass") is None:
+                raise met
+            two(args, report, without_bands, **given)
+
+        monkeypatch.setattr(load, "_run", one_pass_first)
+    args = _parts_args(_banded(tmp_path), lift="block")
+    args.parts = parts
+    report = Report("load", ["glass.json"])
+    load.run(args, report)
+    assert calls[-1]["without_bands"] is True
+    lower = report.numbers["lower_bound"]
+    assert lower["parts"] == ["frame"] and lower["weight_kept_g"] == {"frame": 12.5}
+    assert report.why.startswith(
+        "read as a bound, frame with its glass band's stiffness left out and its weight kept, "
+        "the band unread: "
+    )
+    fact = report.facts[0]
+    assert fact.startswith("read as a bound: frame read with its glass band's stiffness left out "
+                           "and its weight kept")  # fmt: skip
+    assert load.LIFT_BOUND in fact and load.BOUND not in fact
+    assert "is an upper bound under the full weight" in load.LIFT_BOUND
+    assert "Each part's strain isn't one" in load.LIFT_BOUND
+
+
+def test_a_one_pass_s_limit_for_the_band_is_the_host_s() -> None:
+    """`ONE_PASS` runs in the image, `host.TIMEOUT` outside it: the same figure."""
+    assert load_parts.ONE_PASS == host.TIMEOUT
+
+
+def test_a_mesh_that_met_the_container_s_memory_is_unread_for_it(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Where gmsh made no mesh and the kernel stopped a process for memory while it ran, the
+    whole is unread for memory, as where CalculiX meets it, so two passes or the band's read can
+    follow (mqucifer/print-shop#375). A mesh that's there, or no count risen, is left to say
+    what it says."""
+    import types
+
+    def model(volumes: int) -> Any:
+        return types.SimpleNamespace(size=3.0, straight=True), types.SimpleNamespace(
+            FemMesh=types.SimpleNamespace(VolumeCount=volumes)
+        )
+
+    monkeypatch.setattr(load, "memory_met", lambda before: 4 * 2**30 if before == 7 else None)
+    self, mesh = model(0)
+    with pytest.raises(load._Unread) as met:
+        load._Model._mesh_met(self, mesh, 7)
+    assert met.value.memory
+    assert met.value.evidence == (
+        "gmsh made no mesh of the joined parts at a mesh of at most 3 mm, its elements "
+        "straight-sided: it met the container's memory, 4 GiB, meshing them, and the kernel "
+        "stopped it there, as the container's own count of what it stopped for memory says"
+    )
+    assert str(met.value).startswith("nothing of the assembly is read, as its mesh is past what")
+    load._Model._mesh_met(self, mesh, 8)
+    self, mesh = model(10)
+    load._Model._mesh_met(self, mesh, 7)
+
+
+@pytest.mark.parametrize("code", [0, 1])
+def test_gmsh_first_to_go_runs_freecad_s_own_command_and_reads_its_mesh_only_where_it_ended(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, code: int
+) -> None:
+    """`cae.gmsh(first=True)` runs gmsh as FreeCAD's own run does, `-v LEVEL - GEO`, in a
+    process of its own the kernel stops first for memory (`first_to_go`), and keeps what it
+    said: the mesh is read back only where it ended well."""
+    import sys
+    import types
+
+    from print_shop.bench import cae
+
+    seen = tmp_path / "args"
+    binary = tmp_path / "gmsh"
+    binary.write_text(f'#!/bin/sh\necho "$@" > {seen}\necho "Error   : stopped" >&2\nexit {code}\n')
+    binary.chmod(0o755)
+    params = types.SimpleNamespace(GetString=lambda key, default: "3")
+    monkeypatch.setitem(
+        sys.modules, "FreeCAD", types.SimpleNamespace(ParamGet=lambda path: params)
+    )
+    read: list[bool] = []
+    tools = types.SimpleNamespace(
+        prepare=lambda: None, gmsh_bin=str(binary), temp_file_geo="shape.geo",
+        update_properties=lambda: read.append(True), get_tmp_file_paths=lambda *given: None,
+    )  # fmt: skip
+    assert cae.gmsh(tools, first=True) is (code == 0)
+    assert seen.read_text().split() == ["-v", "3", "-", "shape.geo"]
+    assert read == ([True] if code == 0 else [])
+    assert tools.returncode == code and "Error   : stopped" in tools.said
+    assert load._gmsh_said(tools) == "stopped"
+
+
+def _bands_probe() -> Any:
+    import importlib.util
+    import sys
+
+    folder = Path(__file__).parent.parent / "scripts"
+    sys.path.insert(0, str(folder))
+    try:
+        path = folder / "load_bands_probe.py"
+        spec = importlib.util.spec_from_file_location("load_bands_probe", path)
+        assert spec is not None and spec.loader is not None
+        probe = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(probe)
+    finally:
+        sys.path.remove(str(folder))
+    return probe
+
+
+def test_the_bands_probe_says_how_it_was_read_and_what_stopped_the_whole_by_kinds_alone() -> None:
+    """`scripts/load_bands_probe.py` is run on a design's own assembly: it says how the reply
+    was read and what stopped the whole as kinds and counts, never a figure or a name. Made-up
+    replies only."""
+    probe = _bands_probe()
+    lifted = {
+        "numbers": {
+            "lower_bound": {
+                "parts": ["frame-a", "frame-b"],
+                "why": "read in two passes, as --parts asks: gmsh made no mesh of the joined "
+                "parts at a mesh of at most 7.25 mm: it met the container's memory, 4 GiB",
+                "tried_s": 412.0, "band_s": 96.5, "weight_kept_g": {"frame-a": 31.7},
+            },
+            "loads": [{"part": "frame-a", "band_mm2": 210.4}, {"part": "block", "grams": 9.0}],
+        }
+    }  # fmt: skip
+    said = probe.summary(lifted)
+    assert said == [
+        "read: each band left out, lifted, each band's weight kept",
+        "what stopped the whole: memory meshing",
+        "parts read without their band: 2",
+        "of them, with the band's weight hung where it met them: 1",
+        "the try took 412.0 s, the band's read 96.5 s",
+    ]
+    assert not any(n in " ".join(said) for n in ("frame-a", "7.25", "31.7", "210.4"))
+    assert probe.kinds(
+        "it met the container's memory, 3 GiB; and in two passes, two passes met the container's "
+        "time, 3600 s"
+    ) == ["memory solving", "time"]
+    assert probe.kinds("the mesh gives block no element of its own") == ["unparted"]
+    assert probe.kinds(
+        "read in two passes, as --parts asks: gmsh meshed the joined parts at a mesh of at most "
+        "7 mm, and its mesh takes about 2.10 GiB read back, where the container's memory has "
+        "0.40 GiB left, by its own count: so it isn't read back"
+    ) == ["memory reading the mesh back"]
+    assert probe.kinds(
+        "the mesh of the joined parts at a mesh of at most 7 mm, 9 elements and 9 nodes, takes "
+        "about 0.70 GiB to set up in load's own process, and the container's memory has 0.10 GiB"
+    ) == ["memory setting the mesh up"]
+    assert probe.kinds(
+        "load's own process met the container's memory, reading the joint a+b"
+    ) == ["memory in load's own process"]
+    assert probe.kinds(
+        "the mesh of the joined parts at a mesh of at most 7 mm, 9 elements and 9 nodes, takes "
+        "about 3.50 GiB to write CalculiX's input with its loads in load's own process"
+    ) == ["memory writing CalculiX's input"]
+    assert probe.kinds(
+        "the mesh ..., takes about 3.50 GiB to read CalculiX's results back in load's own"
+    ) == ["memory reading CalculiX's results"]
+    assert probe.kinds("gmsh made no mesh of the joined parts: it gave no reason") == ["no mesh"]
+    assert probe.summary({"numbers": {"parts": {"a": {}}, "two_passes": {}}}) == [
+        "read: the whole, in two passes"
+    ]
+
+
+# The operator's cold review of mqucifer/print-shop#376
+
+
+def test_a_mesh_gmsh_made_that_can_t_be_read_back_is_no_mesh_as_on_qt_s_way(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """gmsh ended well, but FreeCAD couldn't read its mesh back: on Qt's way that was raised in
+    Qt's own handler, and the mesh was left with no volumes, so the straight-sided retry
+    followed. Run first to go, it's the same: no mesh, and what FreeCAD said kept with gmsh's."""
+    import sys
+    import types
+
+    from print_shop.bench import cae
+
+    binary = tmp_path / "gmsh"
+    binary.write_text("#!/bin/sh\nexit 0\n")
+    binary.chmod(0o755)
+    params = types.SimpleNamespace(GetString=lambda key, default: "3")
+    monkeypatch.setitem(
+        sys.modules, "FreeCAD", types.SimpleNamespace(ParamGet=lambda path: params)
+    )
+
+    def unreadable() -> None:
+        raise RuntimeError("unv: no volumes in file")
+
+    tools = types.SimpleNamespace(
+        prepare=lambda: None, gmsh_bin=str(binary), temp_file_geo="shape.geo",
+        update_properties=unreadable, get_tmp_file_paths=lambda *given: None,
+    )  # fmt: skip
+    assert cae.gmsh(tools, first=True) is False
+    assert tools.returncode == 0
+    assert "Error   : FreeCAD couldn't read gmsh's mesh back: RuntimeError: unv: no volumes" in (
+        tools.said
+    )
+
+
+def _unparted_model(banded: bool, turned: bool = False) -> Any:
+    import types
+
+    from print_shop.bench.assembly import AXES
+
+    assert "z" in AXES
+    parts = [
+        types.SimpleNamespace(name="frame", band="band.step" if banded else None, turn=()),
+        types.SimpleNamespace(name="block", band=None, turn=(("z", 45.0),) if turned else ()),
+        types.SimpleNamespace(name="leg", band=None, turn=()),
+    ]
+    return types.SimpleNamespace(
+        assembly=types.SimpleNamespace(parts=parts),
+        met={frozenset(("frame", "block")): [], frozenset(("block", "leg")): []},
+    )
+
+
+@pytest.mark.parametrize(
+    ("banded", "turned", "empty", "unread"),
+    [
+        (True, False, ["block"], True),
+        (True, False, ["frame"], True),
+        (False, False, ["block"], False),
+        (True, True, ["block"], False),
+        (True, False, ["leg"], False),
+    ],
+)
+def test_two_passes_take_a_mesh_that_doesn_t_part_the_parts_as_unread_only_by_a_band(
+    banded: bool, turned: bool, empty: list[str], unread: bool
+) -> None:
+    """In two passes, a mesh that gives a part no element of its own is the whole unread, for
+    `--parts` to read each band left out, only where it's the leads' doing: each such part is
+    banded or meets a banded part, and none is turned. A turned part's placement
+    (mqucifer/print-shop#334), or faces not found between parts with no band
+    (mqucifer/print-shop#319), stay `NO ANSWER`, as one pass says them."""
+    said = load._Unparted("the mesh gives block no element of its own", empty)
+    found = load._Model._unparted_read(_unparted_model(banded, turned), said)
+    if unread:
+        assert isinstance(found, load._Unread) and not found.memory
+        assert str(found) == str(said)
+    else:
+        assert found is said
+
+
+def test_a_lift_s_band_bound_says_which_joints_statics_fixes_and_no_other_share_is_one(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The cold review: a joint's and its bolts' share is the full weight's only where statics
+    fixes it, everything beyond it hanging from it alone; in a loop of two ways, taking a band's
+    stiffness out moves load between them, and a joint can carry less. So the reply names the
+    joints statics fixes, and says every other share can be more or less, and isn't a bound."""
+    monkeypatch.setenv(load_parts.TIMEOUT, str(host.TWO_PASSES))
+    calls: list[dict[str, Any]] = []
+    met = load._Unread("met", "the whole met the container's memory", memory=True)
+    _two_passes_then(monkeypatch, calls, met)
+    read = load._run
+
+    def with_joints(args: Any, report: Report, without_bands: bool = False, **given: Any) -> None:
+        read(args, report, without_bands, **given)
+        report.numbers["joints"] = {
+            "frame+block": {"force_n": [0, 0, 1.0], "statics_force_n": [0, 0, 1.0]},
+            "frame+arm": {"force_n": [0, 0, 0.4]},
+            "arm+block": {"force_n": [0, 0, 0.4]},
+        }
+
+    monkeypatch.setattr(load, "_run", with_joints)
+    report = Report("load", ["glass.json"])
+    load.run(_parts_args(_banded(tmp_path), lift="block"), report)
+    lower = report.numbers["lower_bound"]
+    assert lower["statics_fixed"] == ["frame+block"]
+    assert lower["shares_not_bound"] == ["arm+block", "frame+arm"]
+    fact = report.facts[0]
+    assert "Statics fixes frame+block: each carries the load beyond it" in fact
+    assert "arm+block and frame+arm can carry more or less than with the band in" in fact
+    assert "each joint's and bolt's share of the load, are upper bounds" not in load.LIFT_BOUND
+
+
+def test_gmsh_s_files_for_the_joined_parts_are_written_on_disk_not_in_the_container_s_memory(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A design run's assembly on mqucifer/print-shop#376: two passes were killed at the
+    straight-sided mesh's start, the container's /tmp, which is its memory, holding gmsh's
+    input. A file there is no process's, so the kernel stopped `load`. Now gmsh's files are
+    written in a folder of their own on /work's disk (`cae.scratch`), and FreeCAD is told it as
+    gmsh's own folder; off the container, where there's no /work, in the system's temporary
+    folder as before. And each part of the mesh is a step of its own, so a trace says which held
+    what."""
+    import sys
+    import types
+
+    from print_shop.bench import cae, progress
+
+    disk = tmp_path / "work"
+    disk.mkdir()
+    monkeypatch.setattr(cae, "DISK", disk)
+    folder = Path(cae.scratch("gmsh-"))
+    assert folder.parent == disk / cae.SCRATCH and folder.name.startswith("gmsh-")
+    monkeypatch.setattr(cae, "DISK", tmp_path / "none")
+    assert Path(cae.scratch("load-")).parent == Path(__import__("tempfile").gettempdir())
+    monkeypatch.setattr(cae, "DISK", disk)
+    binary = tmp_path / "gmsh"
+    binary.write_text("#!/bin/sh\nexit 0\n")
+    binary.chmod(0o755)
+    params = types.SimpleNamespace(GetString=lambda key, default: "3")
+    monkeypatch.setitem(
+        sys.modules, "FreeCAD", types.SimpleNamespace(ParamGet=lambda path: params)
+    )
+    asked: list[tuple[Any, ...]] = []
+    steps: list[str] = []
+    monkeypatch.setattr(
+        progress, "_say", lambda kind, text: steps.append(text) if kind == host.STEP_LINE else None
+    )
+    tools = types.SimpleNamespace(
+        gmsh_bin=str(binary), temp_file_geo="shape.geo", update_properties=lambda: None,
+        get_tmp_file_paths=lambda *given: asked.append(given),
+    )  # fmt: skip
+    tools.prepare = lambda: tools.get_tmp_file_paths()
+    assert cae.gmsh(tools, first=True) is True
+    assert len(asked) == 1 and Path(asked[0][0]).parent == disk / cae.SCRATCH
+    assert asked[0][1] is True, "FreeCAD makes it where it isn't"
+    assert [t for t in steps if not t.startswith("between")][:3] == [
+        "writing gmsh's input, the joined parts' shape, on disk",
+        "gmsh meshing the joined parts, first to go",
+        "reading gmsh's mesh back",
+    ]
+
+
+def test_a_killed_command_s_scratch_folders_go_at_the_next_load_s_start_and_only_they(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The scratch folder is in a run's own work folder (the operator's guards): a dot-folder,
+    each command's own folders removed at its end, and at a load's start only folders its own
+    kinds name and older than `STALE`, a killed command's. A younger one may be a running
+    command's, and anything else there isn't the bench's."""
+    import os
+
+    from print_shop.bench import cae
+
+    monkeypatch.setattr(cae, "DISK", tmp_path)
+    monkeypatch.setattr(cae, "_own", [])
+    assert cae.SCRATCH.startswith(".")
+    root = tmp_path / cae.SCRATCH
+    root.mkdir()
+    now = 1e9
+    for name, age in (("gmsh-old", cae.STALE + 60), ("load-old", cae.STALE + 60),
+                      ("gmsh-young", 60), ("theirs", cae.STALE + 60)):  # fmt: skip
+        (root / name).mkdir()
+        (root / name / "f").write_text("x")
+        os.utime(root / name, (now - age, now - age))
+    cae.clear_stale(now)
+    assert sorted(p.name for p in root.iterdir()) == ["gmsh-young", "theirs"]
+    mine = Path(cae.scratch("gmsh-"))
+    (mine / "shape.brep").write_text("x")
+    cae.clear_own()
+    assert not mine.exists() and root.exists(), "the others' are left, and so is the folder"
+    for name in ("gmsh-young", "theirs"):
+        __import__("shutil").rmtree(root / name)
+    cae.scratch("load-")
+    cae.clear_own()
+    assert not root.exists(), "an empty scratch folder goes too"
+
+
+# `load`'s own process held to the container's room (a design run's assembly on
+# mqucifer/print-shop#376)
+
+
+def _cgroup(tmp_path: Path, most: str, now: int, inactive: int) -> Path:
+    folder = tmp_path / "cgroup"
+    folder.mkdir(exist_ok=True)
+    (folder / "memory.max").write_text(most + "\n")
+    (folder / "memory.current").write_text(f"{now}\n")
+    (folder / "memory.stat").write_text(f"anon 1\nactive_file 999999\ninactive_file {inactive}\n")
+    return folder
+
+
+def test_the_room_load_has_is_the_container_s_own_count_of_what_s_left(tmp_path: Path) -> None:
+    """What `load`'s own process may still take: the container's limit, less what it holds,
+    plus the file pages it holds that the kernel would drop first, less `ROOM_MARGIN`. None off
+    the container, or with no limit."""
+    from print_shop.bench import cae
+
+    gib = 2**30
+    folder = _cgroup(tmp_path, str(4 * gib), 3 * gib, gib // 4)
+    assert cae.room(folder) == 4 * gib - 3 * gib + gib // 4 - cae.ROOM_MARGIN
+    # Held high, where a lower bound can follow, the file pages aren't counted on.
+    assert cae.room(folder, files=False) == 4 * gib - 3 * gib - cae.ROOM_MARGIN
+    assert cae.room(_cgroup(tmp_path, "max", gib, 0)) is None
+    assert cae.room(tmp_path / "none") is None
+
+
+def test_a_mesh_that_won_t_fit_read_back_isn_t_read_and_is_said_for_memory(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A failed allocation in FreeCAD's own mesh reader aborts the process, never a Python
+    error (tried in the image): so before gmsh's mesh is read back, what it takes, `READ_BACK`
+    times its file (2.37 to 2.40 measured), is held against the container's room. Where it
+    won't fit, it isn't read, and it's said for memory, so two passes or the band's read can
+    follow. Where it fits, it's read as before."""
+    import sys
+    import types
+
+    from print_shop.bench import cae
+
+    binary = tmp_path / "gmsh"
+    binary.write_text("#!/bin/sh\nexit 0\n")
+    binary.chmod(0o755)
+    unv = tmp_path / "mesh.unv"
+    unv.write_bytes(b"x" * 1000)
+    params = types.SimpleNamespace(GetString=lambda key, default: "3")
+    monkeypatch.setitem(
+        sys.modules, "FreeCAD", types.SimpleNamespace(ParamGet=lambda path: params)
+    )
+    monkeypatch.setattr(cae, "DISK", tmp_path / "none")
+    asked: list[bool] = []
+
+    def asking(left: float) -> Any:
+        def room(files: bool = True) -> float:
+            asked.append(files)
+            return left
+
+        return room
+
+    for left, reads in ((cae.READ_BACK * 1000 - 1, False), (cae.READ_BACK * 1000 + 1, True)):
+        monkeypatch.setattr(cae, "room", asking(left))
+        read: list[bool] = []
+        tools = types.SimpleNamespace(
+            prepare=lambda: None, gmsh_bin=str(binary), temp_file_geo="shape.geo",
+            temp_file_mesh=str(unv), update_properties=lambda read=read: read.append(True),
+            get_tmp_file_paths=lambda *given: None,
+        )  # fmt: skip
+        assert cae.gmsh(tools, first=True) is reads
+        assert read == ([True] if reads else [])
+        if not reads:
+            assert tools.memory == (cae.READ_BACK * 1000, left, False)
+            assert "Error   : the mesh gmsh made takes about " in tools.said
+    assert asked == [True, True]
+    # With a lower bound to fall to, held high: above the most measured, a half again.
+    monkeypatch.setattr(cae, "room", asking(3000))
+    tools = types.SimpleNamespace(
+        prepare=lambda: None, gmsh_bin=str(binary), temp_file_geo="shape.geo",
+        temp_file_mesh=str(unv), update_properties=lambda: None,
+        get_tmp_file_paths=lambda *given: None,
+    )  # fmt: skip
+    assert cae.READ_BACK_HIGH * 1000 > 3000 > cae.READ_BACK * 1000
+    assert cae.gmsh(tools, first=True, high=True) is False
+    assert tools.memory == (cae.READ_BACK_HIGH * 1000, 3000, True) and asked[-1] is False
+    assert "may not fit" in tools.said
+
+
+def test_a_set_up_that_won_t_fit_is_the_whole_unread_for_memory(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """After the mesh is read back, `load` sets it up in its own process: each node's place
+    and, in two passes, each element's faces. Its need, by the mesh's own counts at the least
+    measured per node and per element, is held against the container's room: where it won't
+    fit, the whole is unread for memory, before anything is allocated. A mesh gmsh's read-back
+    was refused for is unread too."""
+    import types
+
+    from print_shop.bench import cae
+
+    fem = types.SimpleNamespace(NodeCount=1000, VolumeCount=500)
+    need = 1000 * load.SET_UP_NODE + 500 * load.SET_UP_FACES
+    high = 1000 * load.SET_UP_NODE_HIGH + 500 * load.SET_UP_FACES_HIGH
+    cases = [
+        (True, need - 1, False, False), (True, need, True, False),
+        (False, 1000 * load.SET_UP_NODE, True, False),
+        (True, high - 1, False, True), (True, high, True, True),
+    ]  # fmt: skip
+    for two_pass, left, fits, falls in cases:
+        monkeypatch.setattr(cae, "room", lambda files=True, left=left: left)
+        monkeypatch.setattr(load._Model, "_falls_back", lambda self, falls=falls: falls)
+        model: Any = types.SimpleNamespace(
+            size=3.0, straight=False, two_pass=two_pass, solids=[1, 2],
+            _falls_back=lambda falls=falls: falls,
+        )  # fmt: skip
+        if fits:
+            load._Model._set_up_fits(model, fem)
+            continue
+        with pytest.raises(load._Unread) as met:
+            load._Model._set_up_fits(model, fem)
+        assert met.value.memory
+        assert met.value.evidence.startswith(
+            "the mesh of the joined parts at a mesh of at most 3 mm"
+        )
+        assert ("may not fit" in met.value.evidence) is falls
+    monkeypatch.setattr(cae, "room", lambda files=True: None)
+    unasked: Any = types.SimpleNamespace(two_pass=True, solids=[1, 2], _falls_back=lambda: True)
+    load._Model._set_up_fits(unasked, fem)
+    model = types.SimpleNamespace(size=3.0, straight=False)
+    mesh = types.SimpleNamespace(FemMesh=types.SimpleNamespace(VolumeCount=0))
+    tools = types.SimpleNamespace(memory=(3 * 2**30, 2**30, False))
+    with pytest.raises(load._Unread) as refused:
+        load._Model._mesh_met(model, mesh, None, tools)
+    assert refused.value.memory and "takes about 3.00 GiB read back" in refused.value.evidence
+
+
+@pytest.mark.parametrize(
+    ("said", "left", "memory"),
+    [
+        ("Unable to allocate 1.50 GiB for an array with shape (9,) and data type float64",
+         2**29, True),
+        ("Unable to allocate 7.28 TiB for an array with shape (9,) and data type float64",
+         2**30, False),
+        ("Unable to allocate 1.50 GiB for an array with shape (9,) and data type float64",
+         2**31, False),
+        ("", 0, True),
+        ("", 2**31, False),
+        ("", None, False),
+    ],
+)  # fmt: skip
+def test_a_step_that_meets_python_s_memory_is_unread_for_it_only_where_the_room_is_short(
+    monkeypatch: pytest.MonkeyPatch, said: str, left: int | None, memory: bool
+) -> None:
+    """Where `load`'s own Python meets the memory in a step, the whole is unread for it, saying
+    the step, so two passes or the band's read can follow; but only where the container's room
+    is short of it (the operator's review of mqucifer/print-shop#376): what numpy asked for, where
+    it says, is within the container's limit and past what's left, or where it doesn't say,
+    nothing's left. Anything else, as an array of terabytes or off the container, is a plain
+    error, said as one, never taken for the memory."""
+    from print_shop.bench import cae
+
+    monkeypatch.setattr(cae, "room", lambda files=True: left)
+    monkeypatch.setattr(cae, "memory_max", lambda: 4 * 2**30 if left is not None else None)
+    with pytest.raises(NoAnswer) as stopped, load.step("meshing and solving the joined parts"):
+        raise MemoryError(said) if said else MemoryError()
+    assert isinstance(stopped.value, load._Unread) is memory
+    if isinstance(stopped.value, load._Unread):
+        assert stopped.value.memory
+        assert stopped.value.evidence.startswith(
+            "load's own process met the container's memory, meshing and solving the joined parts"
+        ), stopped.value.evidence
+    else:
+        assert str(stopped.value).startswith(
+            "load stopped meshing and solving the joined parts: MemoryError"
+        ), str(stopped.value)
+    with pytest.raises(NoAnswer) as other, load.step("reading"):
+        raise RuntimeError("something else")
+    assert not isinstance(other.value, load._Unread)
+
+
+def test_optimise_clears_its_scratch_at_its_end_and_a_killed_command_s_at_its_start(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """`optimise` solves with `load`'s model, so its mesh and solve files go in the same scratch
+    folder (the operator's review): it clears its own at its end, whatever stopped it, and a
+    killed command's at its start, as `load` does."""
+    import os
+
+    from print_shop.bench import cae, optimise
+
+    monkeypatch.setattr(cae, "DISK", tmp_path)
+    monkeypatch.setattr(cae, "_own", [])
+    root = tmp_path / cae.SCRATCH
+    root.mkdir()
+    (root / "load-old").mkdir()
+    os.utime(root / "load-old", (1.0, 1.0))
+    made: list[Path] = []
+
+    def failing(args: Any, report: Report) -> None:
+        assert not (root / "load-old").exists(), "a killed command's, cleared first"
+        made.append(Path(cae.scratch("load-")))
+        raise NoAnswer("stopped")
+
+    monkeypatch.setattr(optimise, "_optimise", failing)
+    with pytest.raises(NoAnswer):
+        optimise.run(object(), Report("optimise", []))
+    assert made and not made[0].exists() and not root.exists()
+def test_where_a_lower_bound_can_follow_a_mesh_s_need_is_held_high(tmp_path: Path) -> None:
+    """The operator's ruling on the design run's assembly: a step let through that doesn't fit
+    costs the container, and a step refused that would just have fitted costs only a lower
+    bound, said. So where a part names its band and this isn't the band's own read, each step's
+    need is held a half above the most measured; anywhere else, a tenth under the least."""
+    import types
+
+    def model(banded: bool) -> Any:
+        return types.SimpleNamespace(assembly=types.SimpleNamespace(parts=[
+            types.SimpleNamespace(band="band.step" if banded else None),
+            types.SimpleNamespace(band=None),
+        ]))  # fmt: skip
+
+    load._bands.clear()
+    assert load._Model._falls_back(model(True)) is True
+    assert load._Model._falls_back(model(False)) is False
+    load._bands["frame"] = load.Band([], 1.0, 2.0, np.zeros(3))
+    try:
+        assert load._Model._falls_back(model(True)) is False, "the band's read has nothing after"
+    finally:
+        load._bands.clear()
+    assert load.SET_UP_NODE_HIGH >= 1.5 * 430 and load.SET_UP_FACES_HIGH >= 1.5 * 735
+    assert load.SET_UP_NODE <= 0.9 * 374 and load.SET_UP_FACES <= 0.9 * 735
+
+
+def test_the_bands_probe_gives_each_mesh_s_counts_as_it_was_set_up() -> None:
+    """So a set-up that's killed can be held against its need: the probe gives each mesh's
+    elements and nodes as `load` set it up, and the container's memory at its start, from the
+    step `load` says, and no other figure."""
+    probe = _bands_probe()
+    trace = [
+        "bench: step 940.0 meshing and solving the joined parts, at a mesh of at most 7.25 mm",
+        "bench: memory 941.0 current=3000000000 peak=3500000000",
+        "bench: step 948.1 setting the mesh up in load's own process: 812345 elements, "
+        "1234567 nodes",
+        "bench: memory 948.1 current=3736000000 peak=3900000000",
+    ]
+    trace += [
+        "bench: step 950.0 writing CalculiX's input: 812345 elements, 1234567 nodes",
+        "bench: memory 950.0 current=3800000000 peak=3900000000",
+    ]
+    assert probe.set_ups(trace) == [
+        "setting the mesh up in load's own process at 948.1 s: 812345 elements, 1234567 nodes; "
+        "the container held 3.48 GiB at its start",
+        "writing CalculiX's input at 950.0 s: 812345 elements, 1234567 nodes; the container held "
+        "3.54 GiB at its start",
+    ]
+
+
+def _counted(two_pass: bool, falls: bool) -> Any:
+    import types
+
+    return types.SimpleNamespace(
+        size=3.0, straight=True, two_pass=two_pass, solids=[1, 2], _falls_back=lambda: falls
+    )
+
+
+@pytest.mark.parametrize("falls", [False, True])
+def test_writing_calculix_s_input_and_reading_its_results_are_held_to_the_room_first(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, falls: bool
+) -> None:
+    """The design run's assembly on mqucifer/print-shop#376, its set-up checked, was killed
+    writing CalculiX's input in `load`'s own process: FreeCAD's writer took 3.10 to 3.13 KB a
+    node (4.36 an element) on two meshes that solved, and its reader of the results 3.39 to
+    3.52 (4.72 to 4.94). Each is held to the room before it's begun, by the mesh's counts: low,
+    a tenth under the least, where the try is all there is; and where a lower bound can follow,
+    a half above the most. Where it won't fit, the whole is unread for memory."""
+    import types
+
+    from print_shop.bench import cae
+
+    fem = types.SimpleNamespace(NodeCount=1000, VolumeCount=700)
+    for need, what in ((load._Model._write_need, "to write CalculiX's input with its loads"),
+                       (load._Model._read_need, "to read CalculiX's results back")):  # fmt: skip
+        want = need(_counted(True, falls), fem)
+        if falls:
+            assert want == pytest.approx(1.5 * max(
+                1000 * (load.WRITE_NODE_HIGH if "write" in what else load.READ_NODE_HIGH),
+                700 * (load.WRITE_ELEMENT_HIGH if "write" in what else load.READ_ELEMENT_HIGH),
+            ))  # fmt: skip
+        else:
+            assert want == pytest.approx(0.9 * min(
+                1000 * (load.WRITE_NODE if "write" in what else load.READ_NODE),
+                700 * (load.WRITE_ELEMENT if "write" in what else load.READ_ELEMENT),
+            ))  # fmt: skip
+        monkeypatch.setattr(cae, "room", lambda files=True, want=want: want - 1)
+        with pytest.raises(load._Unread) as met:
+            load._Model._fits(_counted(True, falls), fem, want, what)
+        assert met.value.memory and what in met.value.evidence
+        assert ("may not fit" in met.value.evidence) is falls
+        monkeypatch.setattr(cae, "room", lambda files=True, want=want: want)
+        load._Model._fits(_counted(True, falls), fem, want, what)
+
+
+def test_calculix_s_results_are_read_back_only_where_they_fit_and_as_a_step(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Where CalculiX left no results file, as where it was stopped, FreeCAD's reader is asked
+    as before and finds none. Where it left one, its need is held to the room first, and it's
+    read as a step of its own, giving the mesh's counts."""
+    import types
+
+    from print_shop.bench import cae, progress
+
+    steps: list[str] = []
+    monkeypatch.setattr(
+        progress, "_say", lambda kind, text: steps.append(text) if kind == host.STEP_LINE else None
+    )
+    read: list[bool] = []
+    fea = types.SimpleNamespace(
+        inp_file_name=str(tmp_path / "solve.inp"), load_results=lambda: read.append(True)
+    )
+    model: Any = _counted(False, False)
+    model.fem = types.SimpleNamespace(NodeCount=1000, VolumeCount=700)
+    model._read_need = lambda fem: 10**9
+    model._fits = lambda fem, need, what: load._Model._fits(model, fem, need, what)
+    monkeypatch.setattr(cae, "room", lambda files=True: 0)
+    load._Model._results_back(model, fea)
+    assert read == [True] and steps == [], "no file: asked as before"
+    (tmp_path / "solve.frd").write_text("x")
+    with pytest.raises(load._Unread):
+        load._Model._results_back(model, fea)
+    assert read == [True]
+    monkeypatch.setattr(cae, "room", lambda files=True: 10**10)
+    load._Model._results_back(model, fea)
+    assert read == [True, True]
+    assert steps[0] == "reading CalculiX's results back: 700 elements, 1000 nodes"
+
+
+def test_a_solve_past_the_memory_says_how_long_each_of_calculix_s_tries_ran() -> None:
+    """The operator: on a large assembly the direct solver and then the iterative one may each
+    be tried and stopped before the band's read, so the reply gives each try's seconds."""
+    import types
+
+    model: Any = types.SimpleNamespace(
+        fem=types.SimpleNamespace(VolumeCount=500_000, NodeCount=900_000),
+        shape=types.SimpleNamespace(Volume=1e6), size=5.0,
+        tries=[("direct", 412.4), ("iterative", 1290.6)],
+    )  # fmt: skip
+    said = load._Model._too_big(model, 4 * 2**30)
+    assert said.memory
+    ran = "CalculiX's direct solver ran 412 s and its iterative one 1291 s, each stopped there"
+    assert ran in said.evidence, said.evidence
+
+
+def _too_big_model(banded: bool) -> Any:
+    import types
+
+    return types.SimpleNamespace(
+        fem=types.SimpleNamespace(VolumeCount=470_000, NodeCount=827_000),
+        shape=types.SimpleNamespace(Volume=1e6), size=5.0, tries=[("direct", 26.5)],
+        assembly=types.SimpleNamespace(parts=[
+            types.SimpleNamespace(band="band.step" if banded else None),
+            types.SimpleNamespace(band=None),
+        ]),
+    )  # fmt: skip
+
+
+def test_a_read_past_the_memory_never_says_to_name_bands_that_are_named() -> None:
+    """The design run's assembly on mqucifer/print-shop#376: its bands named and left out, the
+    band's own read met the memory, and the reply said to name each glass frame's band. Where
+    they're named, it says so, and, left out already, that the bound is past the memory too."""
+    plain = load._Model._too_big(_too_big_model(False), 4 * 2**30)
+    assert "name each glass frame's `band`" in str(plain)
+    load._bands.clear()
+    named = load._Model._too_big(_too_big_model(True), 4 * 2**30)
+    assert "name each glass frame's `band`" not in str(named)
+    assert "each glass frame's band is named, and it's read next with its band left out" in (
+        str(named)
+    )
+    load._bands["frame"] = load.Band([], 1.0, 2.0, np.zeros(3))
+    try:
+        left_out = load._Model._too_big(_too_big_model(True), 4 * 2**30)
+    finally:
+        load._bands.clear()
+    assert "name each glass frame's `band`" not in str(left_out)
+    assert "with each glass band left out already, it's past the container's memory still" in (
+        str(left_out)
+    )
+    assert "name each glass frame's `band`" not in str(_memory_said("x", True))
+    assert "name each glass frame's `band`" in str(_memory_said("x", False))
+
+
+def _memory_said(evidence: str, banded: bool) -> Any:
+    with pytest.raises(load._Unread) as said:
+        load._memory_unread(evidence, banded)
+    return said.value
+
+
+def test_a_band_s_read_that_can_t_be_read_says_the_bound_itself_wasn_t(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Where the band's own read can't be read, the reply says the lower bound couldn't be read
+    either, why the whole couldn't, and what the band's read met: never as if the whole had."""
+    monkeypatch.setenv(load_parts.TIMEOUT, str(host.TWO_PASSES))
+    calls: list[dict[str, Any]] = []
+    met = load._Unread("met", "the whole met the container's memory", memory=True)
+    _two_passes_then(monkeypatch, calls, met)
+    read = load._run
+
+    def band_too_big(args: Any, report: Report, without_bands: bool = False, **given: Any) -> None:
+        read(args, report, without_bands, **given)
+        if without_bands:
+            raise load._Unread("nothing of the assembly is read: CalculiX met it", "it met it")
+
+    monkeypatch.setattr(load, "_run", band_too_big)
+    with pytest.raises(NoAnswer) as said:
+        load.run(_parts_args(_banded(tmp_path)), Report("load", ["glass.json"]))
+    text = str(said.value)
+    assert text.startswith(
+        "the glass band's lower bound couldn't be read either: the whole couldn't be read "
+        "(read in two passes, as --parts asks: the whole met the container's memory), and with "
+        "frame's glass band left out, nothing of the assembly is read: CalculiX met it"
+    ), text
