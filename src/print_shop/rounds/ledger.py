@@ -1059,6 +1059,14 @@ class DesignLedger:
         with self._open() as db:
             return list(db.execute(sql, args))
 
+    @contextmanager
+    def immediate(self) -> Iterator[sqlite3.Connection]:
+        """One transaction that holds the ledger's write lock from its start: what's read in it
+        can't change before what's written in it (`study.orders`, an order's next attempt)."""
+        with self._open() as db:
+            db.execute("BEGIN IMMEDIATE")
+            yield db
+
     def add(self, table: str, **row: Any) -> None:
         """A row a run's events give, the same each time they're read: a second reading adds
         nothing, so a run's records can be read back at any point."""

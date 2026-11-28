@@ -62,6 +62,7 @@ from print_shop.study.candidate import (
     Shaper,
     poses_said,
 )
+from print_shop.study.limits import Limits, OutOfLimits
 from print_shop.study.published import published
 from print_shop.study.reading import (
     Case,
@@ -213,7 +214,8 @@ class StudyPart:
     loading: Loading
     #: The profile's own settings, as the part prints with them in its pose.
     defaults: Settings
-    material: Material
+    #: The part's plastic as `load` reads it, or None where it knows none (`published`).
+    material: Material | None
     workdir: Path
     #: What the part's lessons are keyed by: its traits and its joints (`study.lessons.keys`).
     keys: tuple[str, ...] = ()
@@ -229,6 +231,8 @@ class StudyPart:
     #: What the host runs at once: each slice holds a core, and each `load` its memory and a
     #: core (`bench.budget`). One at a time unless given.
     slots: Slots = field(default_factory=lambda: Slots(Budget.serial()))
+    #: The Sponsor's limits, binding on it (`study.limits`).
+    limits: Limits = field(default_factory=Limits)
 
 
 @dataclass
@@ -248,6 +252,9 @@ class StudyResult:
     #: The host's budget it read within, and the most jobs that ran at once.
     budget: str = ""
     most_at_once: int = 0
+    #: The Sponsor's limits, and each candidate they ruled out before it was sliced, as asked.
+    limits: str = ""
+    ruled_out: list[str] = field(default_factory=list)
 
     @property
     def recommendation(self) -> Reading | None:
@@ -295,6 +302,10 @@ def read_candidate(part: StudyPart, candidate: Candidate,
     except Exception as exc:  # noqa: BLE001 - Orca failing is the candidate's answer, said
         reading.error = f"Orca couldn't slice it: {type(exc).__name__}: {exc}"[:400]
         return reading
+    if past := part.limits.sliced_past(reading.sliced.time_s, reading.sliced.grams):
+        reading.ruled_out = past
+        if candidate.name != DEFAULTS:
+            return reading
     if reading.sliced.unbuilt:
         # `load` reads a region as asked: where Orca built less, it would read the part stronger
         # than it prints, so the candidate fails as not as sliced, and isn't read.
@@ -329,12 +340,12 @@ def front(readings: list[Reading]) -> list[Reading]:
     """The readings that pass every case and that no other passing one beats on time, grams and
     margin at once: the trade-off as it stands."""
     passing = [r for r in readings if r.passes and r.sliced is not None
-               and r.sliced.time_s is not None and r.sliced.grams is not None
-               and r.margin is not None]
+               and r.sliced.time_s is not None and r.sliced.grams is not None]
 
     def figures_of(r: Reading) -> tuple[float, float, float]:
-        assert r.sliced is not None and r.margin is not None
-        return float(r.sliced.time_s or 0), float(r.sliced.grams or 0), -r.margin
+        # With no load cases there's no margin: time and grams alone.
+        assert r.sliced is not None
+        return float(r.sliced.time_s or 0), float(r.sliced.grams or 0), -(r.margin or 0.0)
 
     found = []
     for r in passing:
@@ -410,6 +421,8 @@ class _State:
     landed: queue.Queue[str] = field(default_factory=queue.Queue)
     cancel: threading.Event = field(default_factory=threading.Event)
     reads: ThreadPoolExecutor | None = None
+    #: Each candidate the Sponsor's limits ruled out before it was sliced, and why.
+    ruled_out: list[str] = field(default_factory=list)
     #: Called in the loop's thread as each reading lands: the table as it fills in.
     on_land: Callable[[], None] | None = None
 
@@ -439,8 +452,14 @@ def _user(part: StudyPart, loop: StudyLoop, base: Reading) -> str:
         f"{part.wall_sequence or 'as the profile says'}. A bead's spacing is "
         f"{wall_thickness(1, float(d.line_width or 0.45), float(d.layer_height or 0.2)):.2f} mm: "
         "a region holds one wall of its own for each two of them across its depth in the part.",
-        "Its load cases, each read by load on the part as printed:",
-        *(f"- {c.said()}" for c in part.cases),
+        *(["Its load cases, each read by load on the part as printed:",
+           *(f"- {c.said()}" for c in part.cases)] if part.cases else [
+            "It has no load cases: it's studied for time, grams and finish only, the wall "
+            "order and the shells as much as the infill. A candidate passes on its slice, and "
+            "the trade-off is time against grams."]),
+        *([f"The Sponsor's limits, binding: {part.limits.said()}. A candidate past what's "
+           "known before slicing is refused; one Orca slices past the time or grams is ruled "
+           "out, and can't be recommended."] if part.limits.given() else []),
         "Its joints, each a region can be put round (`regions: [{\"joints\": [NAME], "
         "\"margin\": MM, \"faces\": true, ...settings}]`):",
         *(f"- {name}: {said}" if name else f"- ({said})" for name, said in joints),
@@ -477,11 +496,15 @@ def run(loop: StudyLoop, part: StudyPart, stop: threading.Event | None = None,
     ]
     model_calls = 0
 
+    def outcome(why: str, **done: Any) -> StudyResult:
+        return StudyResult(why, state.readings, state.calls, model_calls,
+                           round(time.monotonic() - started, 1), loop.model, **done,
+                           budget=part.slots.budget.said(), most_at_once=part.slots.most,
+                           limits=part.limits.said(), ruled_out=list(state.ruled_out))
+
     def so_far() -> None:
         assert progress is not None
-        progress(StudyResult("reading", state.readings, state.calls, model_calls,
-                             round(time.monotonic() - started, 1), loop.model,
-                             budget=part.slots.budget.said(), most_at_once=part.slots.most))
+        progress(outcome("reading"))
 
     if progress is not None:
         state.on_land = so_far
@@ -494,12 +517,15 @@ def run(loop: StudyLoop, part: StudyPart, stop: threading.Event | None = None,
         if state.reads is not None:
             state.reads.shutdown(wait=True, cancel_futures=True)
         for reading in state.readings:
-            if not reading.cases and not reading.error:
+            # Never sliced: a reading whose loads were cut off says so as it's read.
+            if reading.sliced is None and not reading.error:
                 reading.error = CUT_OFF
-        return StudyResult(why, state.readings, state.calls, model_calls,
-                           round(time.monotonic() - started, 1), loop.model, **done,
-                           budget=part.slots.budget.said(), most_at_once=part.slots.most)
+        return outcome(why, **done)
 
+    try:
+        part.limits.check(Candidate(DEFAULTS, part.defaults), part.defaults, part.wall_sequence)
+    except OutOfLimits as exc:
+        base.ruled_out = "; ".join(w for w in (base.ruled_out, f"the profile's own: {exc}") if w)
     if base.error:
         # The part and the profiles are every candidate's: what refuses the defaults, such as a
         # plate that won't take the filament, refuses them all.
@@ -571,15 +597,12 @@ def run(loop: StudyLoop, part: StudyPart, stop: threading.Event | None = None,
         if state.reads is not None:
             state.reads.shutdown(wait=True, cancel_futures=True)
         for reading in state.readings:
-            if not reading.cases and not reading.error:
+            # Never sliced: a reading whose loads were cut off says so as it's read.
+            if reading.sliced is None and not reading.error:
                 reading.error = CUT_OFF
         if progress is not None:
             with contextlib.suppress(Exception):
-                progress(StudyResult(f"stopped by {type(exc).__name__}: {exc}"[:300],
-                                     state.readings, state.calls, model_calls,
-                                     round(time.monotonic() - started, 1), loop.model,
-                                     budget=part.slots.budget.said(),
-                                     most_at_once=part.slots.most))
+                progress(outcome(f"stopped by {type(exc).__name__}: {exc}"[:300]))
         raise
 
 
@@ -624,6 +647,12 @@ def _read(loop: StudyLoop, part: StudyPart, state: _State, args: dict[str, Any])
         return (f"refused: {state.own} candidates of your own is the most. Recommend one of "
                 "those read.")
     candidate = part.shaper.candidate(f"c{state.own + 1}", args)
+    try:
+        part.limits.check(candidate, part.defaults, part.wall_sequence)
+    except OutOfLimits as exc:
+        # Kept for the table: what was asked, and the limit that ruled it out.
+        state.ruled_out.append(f"{candidate.said()}: {exc}")
+        raise
     same = state.by_key.get(candidate.key())
     if same is not None:
         if same.candidate.name in state.pending:
@@ -641,6 +670,7 @@ def _read(loop: StudyLoop, part: StudyPart, state: _State, args: dict[str, Any])
         try:
             found = read_candidate(part, candidate, state.cancel)
             reading.sliced, reading.cases, reading.error = found.sliced, found.cases, found.error
+            reading.ruled_out = found.ruled_out
         finally:
             state.landed.put(name)
 

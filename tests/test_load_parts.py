@@ -203,8 +203,11 @@ def test_a_load_in_two_passes_is_given_the_hour_and_one_pass_keeps_its_limit(
         other = _ran_under(monkeypatch, tmp_path, args)
         assert other["BENCH_TIMEOUT"] == str(host.TIMEOUTS.get(args[0], host.TIMEOUT)), args
         assert host.OFFER not in other, args
-    # `--parts` as a word of another command isn't `load`'s.
-    assert host.OFFER not in _ran_under(monkeypatch, tmp_path, ["clearance", "--parts"])
+    # `--parts` as a word of another command isn't `load`'s: `clearance --parts` isn't given the
+    # hour from the start. It's offered it, as a whole assembly's may take it up
+    # (mqucifer/print-shop#354).
+    other = _ran_under(monkeypatch, tmp_path, ["clearance", "--parts"])
+    assert other["BENCH_TIMEOUT"] == "600" and other[host.OFFER] == "3600"
     script = _ran_under(monkeypatch, tmp_path, ["load", "a.json"], python=True)
     assert script["BENCH_TIMEOUT"] == "600" and host.OFFER not in script
     given = _ran_under(monkeypatch, tmp_path, ["load", "a.json"], timeout=600)

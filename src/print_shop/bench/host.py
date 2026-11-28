@@ -79,6 +79,9 @@ TWO_PASSES = 3600
 #: keeps `MEMORY`, so what each proves of the 3 GiB stands.
 TWO_PASSES_MEMORY = "4g"
 OFFER = "BENCH_TIMEOUT_TWO_PASSES"
+#: The commands offered the longer limit: `load` for two passes, and `clearance` for a whole
+#: assembly whose exact reads project past `TIMEOUT` (`bench/pace.py`, mqucifer/print-shop#354).
+OFFERED = ("load", "clearance")
 TAKEN = "bench: two passes take the longer limit"
 ABLE = "bench: two passes could read it"
 #: What a command says on stderr as it goes (`progress.py`, mqucifer/print-shop#336): each step
@@ -292,8 +295,9 @@ def memory_for(args: list[str]) -> str:
 
 def offered(args: list[str]) -> int | None:
     """The longer limit a bench command may take up as it runs, or None: `TWO_PASSES` for a
-    `load` that may come to two passes, where it isn't already given it."""
-    if command_word(args) == "load" and timeout_for(args) < TWO_PASSES:
+    `load` that may come to two passes, or a `clearance` whose exact reads may run past
+    `TIMEOUT`, where it isn't already given it."""
+    if command_word(args) in OFFERED and timeout_for(args) < TWO_PASSES:
         return TWO_PASSES
     return None
 
@@ -343,7 +347,10 @@ def run(
     done, limit, could = _waited(argv, timeout, longer)
     if done is None:
         subprocess.run(["docker", "kill", name], capture_output=True, check=False)
-        return subprocess.CompletedProcess(argv, 2, past(limit, could), "")
+        stopped = list(STOPPED_SAID)
+        if trace is not None:
+            trace.extend(stopped)
+        return subprocess.CompletedProcess(argv, 2, past(limit, could, stopped), "")
     err, said = progress_lines(done.stderr)
     if trace is not None:
         trace.extend(said)
@@ -376,15 +383,10 @@ def killed(said: list[str], memory: str | None = None) -> str:
     limit it ran under, `MEMORY` unless said."""
     memory = MEMORY if memory is None else memory
     message = f"verdict: NO ANSWER: it was killed, most likely at the {memory} memory limit"
-    steps = [
-        line[len(STEP_LINE) + 1 :].split(" ", 1) for line in said if line.startswith(STEP_LINE)
-    ]
+    message += _where(said)
     counts = [
         line[len(MEMORY_LINE) + 1 :].split() for line in said if line.startswith(MEMORY_LINE)
     ]
-    if steps and len(steps[-1]) == 2:
-        seconds, what = steps[-1]
-        message += f". Where it was: {what}, from {seconds} s in"
     if counts:
         seconds, *fields = counts[-1]
         found = dict(f.split("=", 1) for f in fields if "=" in f)
@@ -396,17 +398,30 @@ def killed(said: list[str], memory: str | None = None) -> str:
     return message + "\n"
 
 
-def past(limit: int, could: bool) -> str:
+def _where(said: list[str]) -> str:
+    """Where a command said it was last, as ". Where it was: ..., from S s in", or nothing."""
+    steps = [
+        line[len(STEP_LINE) + 1 :].split(" ", 1) for line in said if line.startswith(STEP_LINE)
+    ]
+    if not steps or len(steps[-1]) != 2:
+        return ""
+    seconds, what = steps[-1]
+    return f". Where it was: {what}, from {seconds} s in"
+
+
+def past(limit: int, could: bool, said: list[str] | None = None) -> str:
     """The verdict of a command stopped at its limit; and where it was a `load`'s one pass, of
     an assembly two passes could read (`ABLE`), and they weren't started, what would read it
     (mqucifer/print-shop#331)."""
-    said = f"verdict: NO ANSWER: it ran past the {limit} s limit and was stopped"
+    message = f"verdict: NO ANSWER: it ran past the {limit} s limit and was stopped"
     if could:
-        said += (
+        message += (
             ", in one pass. Two passes may read this assembly, and are given the hour, "
             f"{TWO_PASSES} s: run it again with --parts, which asks for them from the start"
         )
-    return said + "\n"
+    # Where it was when it was stopped, where it says as it goes: `clearance` how many pairs it
+    # reads exactly and how many it had read (mqucifer/print-shop#354).
+    return message + _where(said or []) + "\n"
 
 
 #: How often the host looks whether a command has ended, or taken up its longer limit, in s.
@@ -421,12 +436,17 @@ def _waited(
     where it was stopped, whether that was in a one pass that said two passes could read it
     (`ABLE`): under `timeout`, as the host read it at the moment it stopped it, whatever the
     command says while it's being stopped. Those lines are the host's, and aren't passed on."""
+    STOPPED_SAID.clear()
     if longer is None:
         try:
             done = subprocess.run(
                 argv, capture_output=True, text=True, timeout=timeout, check=False
             )
-        except subprocess.TimeoutExpired:
+        except subprocess.TimeoutExpired as stopped:
+            partial = stopped.stderr or ""
+            if isinstance(partial, bytes):
+                partial = partial.decode("utf-8", errors="replace")
+            STOPPED_SAID.extend(progress_lines(partial)[1])
             return None, timeout, False
         return done, timeout, False
     began = time.monotonic()
@@ -474,8 +494,14 @@ def _waited(
         if pipe is not None:
             pipe.close()
     if code is None:
+        STOPPED_SAID.extend(progress_lines("".join(err))[1])
         return None, limit, could
     return subprocess.CompletedProcess(argv, code, "".join(out), "".join(err)), limit, False
+
+
+#: What the last command `_waited` stopped at its limit had said as it went (`STEP_LINE`,
+#: `MEMORY_LINE`), so its reply can say where it was (mqucifer/print-shop#354).
+STOPPED_SAID: list[str] = []
 
 
 def others(image: str) -> list[str]:

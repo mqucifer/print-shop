@@ -43,7 +43,19 @@ REPORTS: dict[str, tuple[str, ...]] = {
         "volume_mesh_mm3",
         "watertight",
     ),
-    "clearance": ("bodies", "lift", "pairs", "placed", "places", "slide"),
+    "clearance": (
+        "bodies",
+        "by_bounds",
+        "exact_s",
+        "lift",
+        "limit",
+        "pairs",
+        "pairs_s",
+        "placed",
+        "places",
+        "plan",
+        "slide",
+    ),
     "readback": (
         "after_mm3",
         "before_mm3",
@@ -776,9 +788,68 @@ SHAPES: dict[str, dict[str, Any]] = {
                     # By the names the need's own `--box NAME=...` and `--facing NAME=...` give.
                     "places": Keyed(PLACE),
                     "verdict": TEXT,
+                    # A pair read by its bounds alone, far apart: `boxes`, its bound and which
+                    # ruled it out, and no `gap_mm` (mqucifer/print-shop#354).
+                    "read_by": TEXT,
+                    "bound_gap_mm": NUMBER,
+                    "bound": TEXT,
+                    # How long each step of an exact read took, in s, and where OCCT's common
+                    # and cut weren't run, as two other methods read the pair apart.
+                    "seconds": Keyed(NUMBER),
+                    "occt_booleans": TEXT,
                 }
             )
         ),
+        # How many pairs were read by their bounds, past which gap, and the least of their bound
+        # gaps, at which pair (mqucifer/print-shop#354).
+        "by_bounds": Row(
+            {
+                "pairs": NUMBER,
+                "by_box": NUMBER,
+                "by_hull": NUMBER,
+                "by_mesh": NUMBER,
+                "beyond_mm": NUMBER,
+                "least_bound_gap_mm": NUMBER,
+                "least": NUMBER,
+            },
+            closed=True,
+        ),
+        # With `--plan`: how the pairs would be read, by which bound and how many exactly, and
+        # how long each part of the reading took, with a few read exactly to time them.
+        "plan": Row(
+            {
+                "pairs": NUMBER,
+                "by_box": NUMBER,
+                "by_hull": NUMBER,
+                "by_mesh": NUMBER,
+                "exact": NUMBER,
+                "load_s": NUMBER,
+                "meshes_s": NUMBER,
+                "bounds_s": NUMBER,
+                "sampled": NUMBER,
+                "sample_s": NUMBER,
+                "sample_steps_s": Keyed(NUMBER),
+                "exact_estimate_s": NUMBER,
+                "limit_s": NUMBER,
+            },
+            closed=True,
+        ),
+        # Each step of an exact read, its seconds summed over the pairs read exactly.
+        "exact_s": Keyed(NUMBER),
+        # The longer limit a reading took up, as its exact reads projected past the host's: the
+        # host's, the one offered, the one it stated, its projection, and after how many pairs.
+        "limit": Row(
+            {
+                "limit_s": NUMBER,
+                "offered_s": NUMBER,
+                "stated_s": NUMBER,
+                "projected_s": NUMBER,
+                "taken_after": NUMBER,
+            },
+            closed=True,
+        ),
+        # How long reading the pairs took, in s.
+        "pairs_s": NUMBER,
         # What each place named is: a box's two corners, or the way its faces face.
         "places": Keyed(Row({"box": CORNERS, "facing": TEXT})),
         # What holds the last file named, slid along its way out (mqucifer/print-shop#76): the

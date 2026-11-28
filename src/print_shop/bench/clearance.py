@@ -44,13 +44,41 @@ it's compared, by `info`'s rule (`shapes.cant_read`): one with a negative volume
 that isn't closed, gives no `CLEAR`, `TOUCHING` or `HELD`. Its pair is `NO ANSWER`, with each
 method's figure beside that, or `INTERFERE` where every method still finds the overlap. That
 ranks under `INTERFERE`, so an overlap found is still the answer.
+
+**A pair read by its bounds** (mqucifer/print-shop#354). Every pair was read by its exact distance,
+about a second a pair, so a whole assembly of alike parts placed by `--placed`, thousands of
+pairs, overran the bench's limit. Past `SAID_WHOLE` pairs, a pair whose bounds lie farther apart
+than any gap the reading judges, its `--min-gap`, its `--max-gap` with places named, its `--lift`
+and touching, is read by them alone: `CLEAR`, with its least bound gap, `bound_gap_mm`, and counted
+in one line. A bound is never more than the true gap, tried cheapest first: the gap between the
+axis-aligned boxes; the gap between the convex hulls along the way from one to the other or along
+either's main axes, which holds a turned part better; and Manifold's least gap between the meshes,
+the coarse one of a STEP, for curved bodies whose boxes and hulls reach far past them, as curved
+slices that each meet one part, or a pin through a hole. Each STEP body is padded by `HULL_PAD`
+for the curve between the chords. The meshes are searched only `MESH_SEARCH` past the gap judged,
+as the search costs as the triangles within it, so their bound is at most that. `--plan` says how
+the pairs would be read and how long, judging nothing, and as it reads, `clearance` says on the
+host's progress lines how many pairs it reads exactly and how many it has read, so a reading
+stopped at its limit says where it was. Each exact read says how long each step took
+(`seconds`); a pair OCCT's distance and the mesh's gap both read apart, with no overlap by the
+mesh, isn't given OCCT's booleans, which then read 0; and a reading whose exact pairs project
+past its limit takes up the longer one the host offers, and states its own (`pace`). A pair the
+bounds can't rule out, or with a part that can't be read, is read exactly, as before, so no
+verdict changes, and a
+pair read by its bounds is never anything but `CLEAR`. It has no `gap_mm`: a need's figure is the
+exact gap, never a bound. It's read exactly with `--exact`, with `--slide` or `--facing`, and where
+`--max-gap` holds each pair's least gap, as a pair far apart is then `TOO LOOSE`. With `--box`
+places, each place must lie clear of one of the pair's boxes, so it catches neither surface.
 """
 
 from __future__ import annotations
 
 import math
+import os
+import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any
 
 import cadquery as cq
@@ -58,9 +86,17 @@ import manifold3d as m3
 import numpy as np
 import shapely
 import trimesh
+from OCP.BRep import BRep_Tool
 from OCP.BRepExtrema import BRepExtrema_DistShapeShape
+from OCP.BRepGProp import BRepGProp
+from OCP.Extrema import Extrema_ExtFlag_MIN
+from OCP.GProp import GProp_GProps
+from OCP.OSD import OSD_ThreadPool
+from OCP.TopLoc import TopLoc_Location
 
+from . import pace, progress
 from . import placed as placed_module
+from .far import HULL_PAD, PAD_TIMES, Bounds, bounds_from, least_apart
 from .limits import ARITHMETIC, over, said, under
 from .placed import say_placed
 from .report import Report
@@ -112,6 +148,10 @@ DIRECTIONS = {
 }
 
 
+#: What a pair read by its bounds says it was read by.
+BY_BOUNDS = "bounds"
+
+
 @dataclass
 class Trust:
     """What of the parts given can't be read, by each part's `id` (mqucifer/print-shop#244)."""
@@ -145,15 +185,286 @@ def _apart(a: Part, b: Part, margin: float = 1e-3) -> bool:
     return bool(np.any(high_a + margin < low_b) or np.any(high_b + margin < low_a))
 
 
-def _occt(a: Part, b: Part) -> dict[str, Any]:
-    """OCCT's overlap twice over and its distance, and the box round `common`'s solid where it
-    has one. A boolean that raises is reported as such."""
+def bounds_of(part: Part) -> Bounds:
+    """A body's bounds: OCCT's box, or an STL's own, and its fine mesh's convex hull, each padded
+    on a STEP for the curve between the chords (`pad_of`)."""
+    low, high = part.bounds()
+    mesh = part.fine()
+    try:
+        points = np.asarray(mesh.convex_hull.vertices, dtype=float)
+    except Exception:  # noqa: BLE001 - where qhull refuses a body, every point of it still bounds it
+        points = np.asarray(mesh.vertices, dtype=float)
+    return bounds_from(low, high, points, pad_of(part))
+
+
+def pad_of(part: Part) -> float:
+    """How far a body's surface may lie outside its fine mesh, in mm: an STL's mesh is its
+    surface, 0; a STEP's, `PAD_TIMES` the most its faces' triangulation says it's off them,
+    and at least `HULL_PAD`. BRepMesh says it per face (`Poly_Triangulation::Deflection`), and
+    it's 2 to 11 times the nominal 0.002 mm on B-spline faces, at or above the deviation sampled
+    on each face. A face with no triangulation can't be bounded: nothing is ruled out by it."""
+    if not part.is_brep:
+        return 0.0
+    part.fine()  # The shape holds the fine mesh's triangulation from here.
+    most = 0.0
+    for face in part.shape.Faces():
+        triangulation = BRep_Tool.Triangulation_s(face.wrapped, TopLoc_Location())
+        if triangulation is None:
+            return math.inf
+        most = max(most, float(triangulation.Deflection()))
+    return max(HULL_PAD, PAD_TIMES * most)
+
+
+def _clear_of(one: Bounds, place: Place) -> bool:
+    """Whether a body's padded box lies wholly outside a place's box, so the place can't catch
+    its surface."""
+    assert place.low is not None and place.high is not None
+    margin = one.pad + 1e-3
+    return bool(np.any(one.high + margin < place.low) or np.any(place.high + margin < one.low))
+
+
+def boxes_judge(args: Any, named: list[Place], pairs: int) -> float | None:
+    """The farthest gap the reading judges, in mm, past which a pair is read by its bounds; or
+    None where every pair is read exactly: with `--exact`, up to `SAID_WHOLE` pairs, with
+    `--slide` or `--facing`, and where `--max-gap` holds each pair's least gap, as a pair far
+    apart is then `TOO LOOSE` (mqucifer/print-shop#354)."""
+    if getattr(args, "exact", False) or pairs <= SAID_WHOLE or getattr(args, "slide", None):
+        return None
+    if any(place.way is not None for place in named):
+        return None
+    if args.max_gap is not None and not named:
+        return None
+    judged = [TOUCHING, args.min_gap or 0.0, args.max_gap or 0.0]
+    lift = getattr(args, "lift", None)
+    if lift is not None:
+        # `_lift_said` reads a gap within the chords of the lift as the lift itself.
+        judged.append(abs(lift) + 2 * FINE[0] + TOUCHING)
+    return max(judged)
+
+
+def by_bounds(
+    a: Part,
+    b: Part,
+    bounds: dict[int, Bounds],
+    beyond: float,
+    named: list[Place],
+    trust: Trust,
+) -> dict[str, Any] | None:
+    """A pair read by its bounds, `CLEAR`, where they lie farther apart than `beyond` and every
+    place named lies clear of one of the pair; else None, and it's read exactly. A part that
+    can't be read is always read exactly, as its pair is `NO ANSWER`."""
+    if trust.why(a, b):
+        return None
+    one, two = bounds[id(a)], bounds[id(b)]
+    outside: dict[str, list[str]] = {}
+    for place in named:
+        missed = [p.name for p, got in ((a, one), (b, two)) if _clear_of(got, place)]
+        if not missed:
+            return None
+        outside[place.name] = missed
+    if math.isinf(one.pad + two.pad):
+        return None  # A face with no triangulation: no bound is sure.
+    by_box, by_hull = least_apart(one, two)
+    gap, by = max((by_box, "box"), (by_hull, "hull"))
+    at_search = False
+    if gap <= beyond:
+        # The meshes, nearest triangle to nearest, where a curved body's box and hull reach far
+        # past it: curved slices that each meet one part (mqucifer/print-shop#354).
+        (gap, at_search), by = by_meshes(a, b, one.pad + two.pad, beyond), "mesh"
+        if gap <= beyond:
+            return None
+    row: dict[str, Any] = {
+        "a": a.name,
+        "b": b.name,
+        "verdict": "CLEAR",
+        "read_by": BY_BOUNDS,
+        # Rounded down, so the figure said is never more than the bound.
+        "bound_gap_mm": math.floor(gap * 1e4) / 1e4,
+        "bound": by,
+        # A mesh's bound searched no farther than this: the pair is at least this far apart.
+        **({"bound_at_search": True} if by == "mesh" and at_search else {}),
+        "untrusted": [],
+        "differs": [],
+    }
+    if named:
+        row["places"] = {
+            name: {
+                "gap_mm": None,
+                "gap_by": None,
+                "gap_second_mm": None,
+                "from": None,
+                "to": None,
+                "verdict": NOT_CAUGHT,
+                "why": (
+                    "no surface of both is in the box: "
+                    + " and ".join(f"{n} lies all outside the box, by its bounds" for n in missed)
+                    + ". Move the box so it holds the faces on both sides of the gap you're reading"
+                ),
+            }
+            for name, missed in outside.items()
+        }
+    return row
+
+
+#: How far past the gap it must beat the meshes' nearest triangles are looked for, in mm: their
+#: search costs as the triangles within it, 2 ms at 2 mm and a minute at 100 on a sphere of 80k.
+MESH_SEARCH = 0.5
+
+
+def by_meshes(a: Part, b: Part, pads: float, beyond: float) -> tuple[float, bool]:
+    """How far apart a pair surely is by Manifold's least gap between their fine meshes, less
+    both bodies' pads, as each surface lies within its pad of its mesh (`pad_of`): no more than
+    the true gap. One body wholly inside the other reads 0, as an overlap does. It's searched for
+    only to `MESH_SEARCH` past `beyond`, so a pair farther than that reads as that, a floor:
+    and whether it did."""
+    search = beyond + pads + MESH_SEARCH
+    found = float(a.manifold(True).min_gap(b.manifold(True), search))
+    return found - pads, found >= search
+
+
+def _stopped(paced: pace.Pace, plan: dict[str, Any], done: int, spent: float) -> str:
+    """Why a reading stopped itself before its limit, and how far it got."""
+    assert paced.limit is not None
+    return (
+        f"it stopped itself before its {paced.limit:.0f} s limit, having read {done} of the "
+        f"{plan['exact']} pairs it reads exactly, {spent / done:.1f} s each: "
+        f"{_plan_words(plan)}. --plan says the split and its time without reading them, and "
+        "--part reads fewer parts"
+    )
+
+
+def _limit_said(report: Report, paced: pace.Pace, under: float | None, exact: int) -> None:
+    """The longer limit a reading took up, as it stated it, and why."""
+    assert paced.took is not None and paced.limit is not None
+    projected, after = paced.took
+    report.numbers["limit"] = {
+        "limit_s": under,
+        "offered_s": paced.offer,
+        "stated_s": paced.limit,
+        "projected_s": round(projected, 1),
+        "taken_after": after,
+    }
+    report.line(
+        f"limit: {under:.0f} s, and the {exact} pairs read exactly projected {projected:.0f} s "
+        f"after {after} of them, so it took up the longer limit offered, {paced.offer:.0f} s, "
+        f"and stated {paced.limit:.0f} s of it, {pace.ROOM:g} times the projection at most"
+    )
+
+
+def _steps_took(rows: list[dict[str, Any] | None]) -> dict[str, float]:
+    """Each step's seconds, summed over the pairs read exactly."""
+    total: dict[str, float] = {}
+    for row in rows:
+        for step, seconds in ((row or {}).get("seconds") or {}).items():
+            total[step] = total.get(step, 0.0) + seconds
+    return {k: round(v, 2) for k, v in sorted(total.items(), key=lambda kv: -kv[1])}
+
+
+#: How many pairs `--plan` reads exactly, to time them.
+PLAN_SAMPLE = 3
+
+
+def _plan(
+    pairs: list[tuple[Part, Part]],
+    found: list[dict[str, Any] | None],
+    exact: list[int],
+    took: dict[str, float],
+) -> dict[str, Any]:
+    """How the pairs are read: by which bound, and how many exactly, with the time each part of
+    the reading took so far, in s (mqucifer/print-shop#354)."""
+    by = {w: sum(1 for r in found if r is not None and r["bound"] == w) for w in BOUNDS}
+    return {
+        "pairs": len(pairs),
+        **{f"by_{w}": n for w, n in by.items()},
+        "exact": len(exact),
+        **{k: round(v, 2) for k, v in took.items()},
+    }
+
+
+#: The bounds a pair is ruled out by, in the order they're tried, and their plurals.
+BOUNDS = {"box": "boxes", "hull": "hulls", "mesh": "meshes"}
+
+
+def _plan_words(plan: dict[str, Any]) -> str:
+    by = ", ".join(f"{plan[f'by_{w}']} by their {many}" for w, many in BOUNDS.items())
+    return f"{plan['pairs']} pairs: {by}, {plan['exact']} to read exactly"
+
+
+def _plan_said(
+    report: Report,
+    plan: dict[str, Any],
+    exact: list[tuple[Part, Part]],
+    read: Callable[[Part, Part], dict[str, Any]],
+) -> None:
+    """`--plan`: how the pairs would be read and how long, with a few read exactly to time
+    them, and no verdict on any (mqucifer/print-shop#354)."""
+    # Spread through the pairs read exactly, not the first: neighbours near the start of a ring
+    # can be cheaper than the curved pairs later on.
+    step = max(1, len(exact) // PLAN_SAMPLE)
+    sample = exact[::step][:PLAN_SAMPLE]
+    clock = time.monotonic()
+    # Under the reading's limit, as the reading is, but never taking up a longer one: a plan
+    # stops timing where it would run past it, and says so.
+    paced = pace.Pace(pace.Pace.from_env().limit, None)
+    rows: list[dict[str, Any] | None] = []
+    stopped = False
+    with progress.step(f"clearance: timing {len(sample)} exact read(s)"):
+        for a, b in sample:
+            rows.append(read(a, b))
+            left = len(sample) - len(rows)
+            if paced.after(progress.since(), len(rows), time.monotonic() - clock, left) == "stop":
+                stopped = True
+                break
+    sample = sample[: len(rows)]
+    took = time.monotonic() - clock
+    plan["sample_steps_s"] = _steps_took(rows)
+    each = took / len(sample) if sample else 0.0
+    plan.update(
+        sampled=len(sample), sample_s=round(took, 2), exact_estimate_s=round(each * len(exact), 1)
+    )
+    # The limit the reading would be under: the host's, or one it would state from the offer.
+    paced = pace.Pace.from_env()
+    projected = plan["load_s"] + plan["meshes_s"] + plan["bounds_s"] + plan["exact_estimate_s"]
+    if paced.limit is not None:
+        over = projected > paced.limit - paced.margin(paced.limit)
+        plan["limit_s"] = paced.stated(projected) if over and paced.offer else paced.limit
+    report.numbers["plan"] = plan
+    before = plan["load_s"] + plan["meshes_s"] + plan["bounds_s"]
+    report.line(
+        f"plan: {_plan_words(plan)}. So far {before:.1f} s: loading {plan['load_s']:.1f}, "
+        f"meshing and checking the bodies {plan['meshes_s']:.1f}, the bounds "
+        f"{plan['bounds_s']:.1f}. {len(sample)} exact read(s) took {took:.1f} s, "
+        f"{each:.1f} s each, so the {len(exact)} would take about "
+        f"{plan['exact_estimate_s']:.0f} s, {before + plan['exact_estimate_s']:.0f} s in all. "
+        "Their steps: "
+        + ", ".join(f"{k} {v:.2f} s" for k, v in plan["sample_steps_s"].items())
+        + (f". It would be under a limit of {plan['limit_s']:.0f} s" if "limit_s" in plan else "")
+    )
+    if stopped:
+        report.note(
+            f"the plan stopped timing after {len(sample)} exact read(s), before its "
+            f"{paced.limit:.0f} s limit: the estimate is from those"
+        )
+    report.verdict(
+        "NO ANSWER",
+        f"a plan, which judges nothing: {_plan_words(plan)}, about "
+        f"{before + plan['exact_estimate_s']:.0f} s in all. Run it without --plan to read them",
+    )
+
+
+def _bounded(pair: dict[str, Any]) -> bool:
+    return pair.get("read_by") == BY_BOUNDS
+
+
+def _occt_volumes(a: Part, b: Part, skip: bool, took: dict[str, float]) -> dict[str, Any]:
+    """OCCT's overlap twice over, `common` and `cut`, and the box round `common`'s solid where it
+    has one; each 0 where `skip`, as the pair is apart by two other methods. A boolean that
+    raises is reported as such."""
     found: dict[str, Any] = {}
-    apart = _apart(a, b)
 
     def common() -> float:
         shared = a.shape.intersect(b.shape)
-        volume = float(shared.Volume())
+        volume = _volume(shared)
         if volume > VOLUME_FLOOR:
             box = shared.BoundingBox()
             found["common_box"] = [
@@ -164,17 +475,72 @@ def _occt(a: Part, b: Part) -> dict[str, Any]:
 
     measures: dict[str, Callable[[], float]] = {
         "common": common,
-        "cut": lambda: float(a.shape.Volume() - a.shape.cut(b.shape).Volume()),
+        "cut": lambda: _volume(a.shape) - _volume(a.shape.cut(b.shape)),
     }
     for name, measure in measures.items():
+        clock = time.monotonic()
         try:
-            found[name] = 0.0 if apart else measure()
+            found[name] = 0.0 if skip else measure()
         except Exception as exc:  # noqa: BLE001 - OCCT's failure is a finding, not a crash
             found[name] = None
             found[f"{name}_error"] = f"{type(exc).__name__}: {exc}"[:200]
-    distance = BRepExtrema_DistShapeShape(a.shape.wrapped, b.shape.wrapped)
-    found["distance"] = float(distance.Value()) if distance.IsDone() else None
+        took[f"occt_{name}"] = time.monotonic() - clock
     return found
+
+
+#: The relative precision OCCT's volumes are integrated to, adaptively. Its default fixed-order
+#: Gauss integration is off by about 1e-5 of the whole on B-spline faces, so `cut`, two large
+#: volumes subtracted, read a flat washer seated on a NURBS plate 0.41 to 1.61 mm³ under nothing,
+#: past the ±0.001 band; at 1e-9 it reads 0.000000, and a real overlap the same as `common`, in a
+#: few ms a body (mqucifer/print-shop#354).
+VOLUME_PRECISION = 1e-9
+
+
+def _volume(shape: Any) -> float:
+    """A shape's volume by OCCT, integrated adaptively to `VOLUME_PRECISION`."""
+    props = GProp_GProps()
+    BRepGProp.VolumeProperties_s(shape.wrapped, props, VOLUME_PRECISION)
+    return float(props.Mass())
+
+
+def cpus(cgroup: Path = Path("/sys/fs/cgroup")) -> int:
+    """The CPUs the container may use, by its cgroup's quota (`cpu.max`, "200000 100000" for 2),
+    or the machine's where it sets none: OCCT counts the machine's, 8 in a 2-CPU container."""
+    try:
+        quota, period = (cgroup / "cpu.max").read_text().split()[:2]
+        if quota != "max":
+            return max(1, math.ceil(int(quota) / int(period)))
+    except (OSError, ValueError):
+        pass
+    return max(1, os.cpu_count() or 1)
+
+
+def set_threads() -> int:
+    """OCCT's thread pool sized to the container's CPUs, as its distance runs on it."""
+    count = cpus()
+    OSD_ThreadPool.DefaultPool_s().Init(count)
+    return count
+
+
+def _distance(one: Any, two: Any) -> BRepExtrema_DistShapeShape:
+    """OCCT's exact least distance between two shapes, its minimum alone, on OCCT's thread pool,
+    sized to the container's CPUs (`set_threads`): about half the time on curved faces with 2,
+    and bit for bit the same figure and points, run after run, as one thread reading both
+    extrema (mqucifer/print-shop#354)."""
+    distance = BRepExtrema_DistShapeShape()
+    distance.SetMultiThread(True)
+    distance.SetFlag(Extrema_ExtFlag_MIN)
+    distance.LoadS1(one)
+    distance.LoadS2(two)
+    distance.Perform()
+    return distance
+
+
+def _occt_distance(a: Part, b: Part) -> float | None:
+    """OCCT's exact least distance between two solids: 0 where they meet, overlap, or one lies
+    wholly inside the other (its inner solution); None where it doesn't finish."""
+    distance = _distance(a.shape.wrapped, b.shape.wrapped)
+    return float(distance.Value()) if distance.IsDone() else None
 
 
 def _sections_overlap(a: Part, b: Part) -> float:
@@ -207,9 +573,13 @@ def measure_pair(
     max_gap: float | None = None,
     trust: Trust | None = None,
 ) -> dict[str, Any]:
-    """Every figure for a pair, whether the methods agree, and the pair's verdict."""
+    """Every figure for a pair, whether the methods agree, and the pair's verdict, with how long
+    each step took, in `seconds` (mqucifer/print-shop#354)."""
+    took: dict[str, float] = {}
+    clock = time.monotonic()
     fine, coarse = a.manifold(True) ^ b.manifold(True), a.manifold(False) ^ b.manifold(False)
     overlap, overlap_coarse = float(fine.volume()), float(coarse.volume())
+    took["overlap_mesh"] = time.monotonic() - clock
     # The chords matter only where the overlap has surface, and at most where the parts curve.
     chords = min(FINE[0] * float(fine.surface_area()), a.chord_band() + b.chord_band())
     trust = trust or Trust()
@@ -229,12 +599,35 @@ def measure_pair(
     #: How far each may be from the mesh's and still agree on the figure.
     tolerance: dict[str, float] = {}
     if a.is_brep and b.is_brep:
-        occt = _occt(a, b)
+        clock = time.monotonic()
+        distance = _occt_distance(a, b)
+        took["occt_distance"] = time.monotonic() - clock
+        # The mesh's gap is searched for only as far as agreeing with OCCT's asks: its search
+        # costs as the triangles within it, and a mesh past that disagrees whatever it reads.
+        search = (distance + gap_band + SEARCH_PAST) if distance is not None else 1.0
+        clock = time.monotonic()
+        gap = float(a.manifold().min_gap(b.manifold(), search))
+        took["gap_mesh"] = time.monotonic() - clock
+        beyond = gap >= search and distance is not None
+        # OCCT's booleans aren't run where two other methods say the pair is apart: OCCT's exact
+        # distance, which reads 0 for one inside the other, and the mesh's gap, past the chords
+        # on both, with no overlap by the mesh, fine or coarse. Each then reads 0, as for a pair
+        # whose boxes are apart (`_apart`), and the reply says so.
+        apart = (
+            distance is not None
+            and distance > gap_band
+            and gap > gap_band
+            and max(overlap, overlap_coarse) <= band
+        )
+        skip = _apart(a, b) or apart
+        occt = _occt_volumes(a, b, skip, took)
         pair.update(
             overlap_occt_common_mm3=occt["common"],
             overlap_occt_cut_mm3=occt["cut"],
-            gap_occt_mm=occt["distance"],
+            gap_occt_mm=distance,
         )
+        if apart and not _apart(a, b):
+            pair["occt_booleans"] = "not run: apart by OCCT's distance and the mesh's"
         if "common_box" in occt:
             pair["overlap_occt_box"] = occt["common_box"]
         for name in ("common", "cut"):
@@ -242,23 +635,29 @@ def measure_pair(
                 differs.append(f"OCCT {name} failed: {occt[f'{name}_error']}")
             else:
                 volumes[f"OCCT {name}"] = occt[name]
-        search = (occt["distance"] or 0.0) + 1.0
-        gap = float(a.manifold().min_gap(b.manifold(), search))
-        if occt["distance"] is None:
+        if distance is None:
             differs.append("OCCT's distance didn't finish")
-        elif abs(occt["distance"] - gap) > gap_band:
-            differs.append(f"OCCT's gap is {occt['distance']:.4f} mm, the mesh's {gap:.4f}")
+        elif beyond:
+            differs.append(f"OCCT's gap is {distance:.4f} mm, the mesh's over {gap:.4f}")
+        elif abs(distance - gap) > gap_band:
+            differs.append(f"OCCT's gap is {distance:.4f} mm, the mesh's {gap:.4f}")
     else:
+        clock = time.monotonic()
         stacked = _sections_overlap(a, b)
+        took["sections"] = time.monotonic() - clock
         # A stack's error is its steps' outlines: a share of the overlap, and a little at least.
         stack_band = max(0.02, 0.05 * size)
         pair["overlap_sections_mm3"] = round(stacked, 4)
         volumes[f"{SECTIONS} sections"] = stacked
         tolerance[f"{SECTIONS} sections"] = stack_band
+        clock = time.monotonic()
         sampled, spacing = _sampled_gap(a, b)
-        low, high = a.bounds(), b.bounds()
-        far = float(np.linalg.norm(np.maximum(low[0] - high[1], high[0] - low[1]))) + 1.0
-        gap = float(a.manifold().min_gap(b.manifold(), far))
+        took["sampled"] = time.monotonic() - clock
+        # Sampled points find a gap as large as the mesh's or larger, so the mesh's is searched
+        # for only that far: the same figure, sooner.
+        clock = time.monotonic()
+        gap = float(a.manifold().min_gap(b.manifold(), sampled + gap_band + SEARCH_PAST))
+        took["gap_mesh"] = time.monotonic() - clock
         pair["gap_sampled_mm"] = round(sampled, 4)
         # Sampled points only ever find a gap as large or larger, by about their spacing.
         if sampled < gap - gap_band or sampled > gap + 2 * spacing + gap_band:
@@ -312,7 +711,12 @@ def measure_pair(
     else:
         pair["verdict"] = "CLEAR"
     pair["differs"] = differs
+    pair["seconds"] = {k: round(v, 3) for k, v in took.items()}
     return pair
+
+
+#: How far past the gap that settles it a mesh's gap is searched for, in mm.
+SEARCH_PAST = 1e-3
 
 
 def _overlap_agreed(
@@ -457,7 +861,7 @@ def _facing_faces(part: Part, toward: np.ndarray) -> list[Any]:
 
 def _gap_of(a: Any, b: Any) -> tuple[float, np.ndarray, np.ndarray] | None:
     """OCCT's exact least distance between two shapes, and the points it's between."""
-    distance = BRepExtrema_DistShapeShape(a.wrapped, b.wrapped)
+    distance = _distance(a.wrapped, b.wrapped)
     if not distance.IsDone() or distance.NbSolution() < 1:
         return None
     ends = [distance.PointOnShape1(1), distance.PointOnShape2(1)]
@@ -638,6 +1042,7 @@ def lifted(part: Part, along: str, mm: float) -> Part:
 
 
 def run(args: Any, report: Report) -> None:
+    set_threads()
     # A part built flat is read where it sits among the others (mqucifer/print-shop#201).
     # A file the assembly names in several parts is read once for each, by its part
     # (mqucifer/print-shop#343).
@@ -664,7 +1069,12 @@ def run(args: Any, report: Report) -> None:
         copies.append((args.files[-1], moved))
         rest = [one for one in placed.get(args.files[-1], []) if one.part != moved.part]
         placed[args.files[-1]] = [*rest, moved]
-    parts = [placed_module.load(path, one) for path, one in copies]
+    # How long each part of the reading takes, in s, for `--plan` (mqucifer/print-shop#354).
+    took: dict[str, float] = {}
+    clock = time.monotonic()
+    with progress.step(f"clearance: loading {len(copies)} part(s)"):
+        parts = [placed_module.load(path, one) for path, one in copies]
+    took["load_s"] = time.monotonic() - clock
     say_placed(report, placed, given, args.files, named_parts, moved)
     if lift is not None:
         moved = parts[-1].name
@@ -675,7 +1085,9 @@ def run(args: Any, report: Report) -> None:
             f"lifted: {moved}, moved {abs(lift):g} mm {way} along {along} before measuring, and "
             "only here: its file is where it was, and every figure below is with it moved"
         )
-    split = [(part, part.pieces()) for part in parts]
+    clock = time.monotonic()
+    with progress.step(f"clearance: splitting {len(parts)} part(s) into bodies"):
+        split = [(part, part.pieces()) for part in parts]
     for part in parts:
         report.notes += part.notes
     items = [piece for _, pieces in split for piece in pieces]
@@ -696,15 +1108,63 @@ def run(args: Any, report: Report) -> None:
     # With a place named, the range holds each place's gap, not the pair's least: a range is the
     # play at one place, and a mated pair has several (mqucifer/print-shop#72).
     low, high = (None, None) if named else (args.min_gap, max_gap)
-    trust = trust_of(split)
-    results = [measure_pair(a, b, low, high, trust) for a, b in pairs]
-    for (a, b), r in zip(pairs, results, strict=True):
+    with progress.step(f"clearance: meshing and checking {len(items)} bodies"):
+        trust = trust_of(split)
+    took["meshes_s"] = time.monotonic() - clock
+    # A pair farther apart than any gap judged is read by its bounds (mqucifer/print-shop#354).
+    started = time.monotonic()
+    beyond = boxes_judge(args, named, len(pairs))
+    found: list[dict[str, Any] | None] = [None] * len(pairs)
+    if beyond is not None:
+        with progress.step(f"clearance: {len(pairs)} pairs, ruling out by their bounds"):
+            bounds = {id(piece): bounds_of(piece) for piece in items}
+            for k, (a, b) in enumerate(pairs):
+                found[k] = by_bounds(a, b, bounds, beyond, named, trust)
+    took["bounds_s"] = time.monotonic() - started
+    to_read = [k for k, row in enumerate(found) if row is None]
+    plan = _plan(pairs, found, to_read, took)
+
+    def read(a: Part, b: Part) -> dict[str, Any]:
+        r = measure_pair(a, b, low, high, trust)
         if named:
             band = r["overlap_band_mm3"]
+            clock = time.monotonic()
             r["places"] = {
                 p.name: measure_place(a, b, p, band, args.min_gap, max_gap, trust) for p in named
             }
+            r["seconds"]["places"] = round(time.monotonic() - clock, 3)
+        return r
+
+    if getattr(args, "plan", False):
+        _plan_said(report, plan, [pairs[k] for k in to_read], read)
+        return
+    said = f"clearance: {_plan_words(plan)}; reading the {len(to_read)} exactly"
+    # Read in an order spread through them, so the time each takes so far is like the rest's,
+    # and the limit is taken up and stated from it (`pace`). The pairs stay in their order.
+    paced = pace.Pace.from_env()
+    under = paced.limit
+    spent = 0.0
+    with progress.step(said):
+        last = time.monotonic()
+        for done, j in enumerate(pace.spread(len(to_read)), 1):
+            k = to_read[j]
+            clock = time.monotonic()
+            found[k] = read(*pairs[k])
+            spent += time.monotonic() - clock
+            what = paced.after(progress.since(), done, spent, len(to_read) - done)
+            if what == "stop":
+                raise NoAnswer(_stopped(paced, plan, done, spent))
+            if what is not None or time.monotonic() - last > progress.EVERY:
+                limit = f", under a limit of {paced.limit:.0f} s" if paced.took else ""
+                progress.again(f"{said}: {done} read{limit}")
+                last = time.monotonic()
+    if paced.took is not None:
+        _limit_said(report, paced, under, len(to_read))
+    results = [row for row in found if row is not None]
     report.numbers["pairs"] = results
+    report.numbers["pairs_s"] = round(time.monotonic() - started, 2)
+    # Where an exact read's time goes, step by step, over every pair read exactly.
+    report.numbers["exact_s"] = _steps_took([found[k] for k in to_read])
     if named:
         report.numbers["places"] = {p.name: p.plain() for p in named}
     slid = None
@@ -726,6 +1186,8 @@ def run(args: Any, report: Report) -> None:
         for name, place in r.get("places", {}).items():
             if not (folded and place["verdict"] == NOT_CAUGHT):
                 _place_said(report, i, r, name, place, args)
+    if beyond is not None:
+        _by_bounds_counted(report, results, beyond)
     if folded:
         _quiet_said(report, results, named, brep)
     if args.min_gap is not None or max_gap is not None:
@@ -746,7 +1208,11 @@ def run(args: Any, report: Report) -> None:
     if lift is not None:
         _lift_said(report, results, report.numbers["lift"])
     elif not named and (args.min_gap is not None or max_gap is not None):
-        seated = [r for r in results if r["verdict"] == "INTERFERE" or r["gap_mm"] <= TOUCHING]
+        seated = [
+            r
+            for r in results
+            if not _bounded(r) and (r["verdict"] == "INTERFERE" or r["gap_mm"] <= TOUCHING)
+        ]
         if seated:
             most = max(g for g in (args.min_gap, max_gap) if g is not None)
             report.note(
@@ -762,8 +1228,11 @@ def run(args: Any, report: Report) -> None:
     read_at = [p for r in results for p in r.get("places", {}).values()]
     verdicts += [p["verdict"] for p in read_at if p["verdict"] != NOT_CAUGHT]
     worst = min(verdicts, key=ORDER.index)
-    counts = {w: sum(r["verdict"] == w for r in results) for w in ORDER}
+    counts = {w: sum(r["verdict"] == w and not _bounded(r) for r in results) for w in ORDER}
     tally = ", ".join(f"{n} {w.lower()}" for w, n in counts.items() if n)
+    bounded_count = sum(map(_bounded, results))
+    if bounded_count:
+        tally += f"{', ' if tally else ''}{bounded_count} clear by their bounds"
     if read_at:
         at = {w: sum(p["verdict"] == w for p in read_at) for w in [*ORDER, NOT_CAUGHT]}
         tally += "; at the places: " + ", ".join(f"{n} {w.lower()}" for w, n in at.items() if n)
@@ -946,8 +1415,15 @@ def _pair_said(
     # By the pair's own methods: STEPs and an STL given together have pairs of both kinds.
     if "overlap_occt_common_mm3" in r:
         common, cut = r["overlap_occt_common_mm3"], r["overlap_occt_cut_mm3"]
+        volumes_said = f"OCCT common {_shown(common)} mm³, cut {_shown(cut)} mm³"
+        if r.get("occt_booleans"):
+            volumes_said = (
+                "OCCT's common and cut not run, as its exact distance, which reads 0 for one "
+                "inside the other, and the mesh's gap both read it apart, with no overlap by the "
+                "mesh"
+            )
         text = (
-            f"{r['a']} | {r['b']}: OCCT common {_shown(common)} mm³, cut {_shown(cut)} mm³; "
+            f"{r['a']} | {r['b']}: {volumes_said}; "
             f"the mesh's gap {r['gap_mesh_mm']:.4f} mm against OCCT's "
             f"{_shown(r['gap_occt_mm'], 4)}, within the chords on both ({2 * FINE[0]:g} mm)"
         )
@@ -966,39 +1442,89 @@ def _pair_said(
 def _quiet_said(
     report: Report, results: list[dict[str, Any]], named: list[Place], brep: bool
 ) -> None:
-    """The pairs with nothing to report, as one counted line and one second check."""
-    quiet = [(i, r) for i, r in enumerate(results) if _quiet(r)]
-    if not quiet:
+    """The pairs with nothing to report, as one counted line and one second check, with the
+    pairs read by their bounds counted at its end (mqucifer/print-shop#354)."""
+    quiet = [(i, r) for i, r in enumerate(results) if _quiet(r) and not _bounded(r)]
+    boxed = [(i, r) for i, r in enumerate(results) if _bounded(r)]
+    if not quiet and not boxed:
         return
-    tally = ", ".join(
-        f"{n} {w.lower()}" for w in QUIET if (n := sum(r["verdict"] == w for _, r in quiet))
-    )
-    i, least = min(quiet, key=lambda q: q[1]["gap_mm"])
-    line = (
-        f"{len(quiet)} other pair(s) with nothing to report ({tally}, no overlap; least gap "
-        f"{least['gap_mm']:.4f} mm, pairs.{i}, {least['a']} | {least['b']})"
-    )
-    # A place that catches no surface of one of a pair says nothing of it, whichever pair it is.
-    shown = {i for i, r in enumerate(results) if not _quiet(r)}
-    for place in named:
-        read = [r["places"][place.name]["verdict"] for k, r in enumerate(results)]
-        quiet_read = [v for k, v in enumerate(read) if k not in shown or v == NOT_CAUGHT]
-        missed = read.count(NOT_CAUGHT)
-        got = [f"{n} {w.lower()}" for w in QUIET if (n := quiet_read.count(w))]
-        line += f"; at {place.name} " + ", ".join(
-            [*got, *[f"{missed} not caught"] * bool(missed)]
+    line, second = "", ""
+    if quiet:
+        tally = ", ".join(
+            f"{n} {w.lower()}" for w in QUIET if (n := sum(r["verdict"] == w for _, r in quiet))
         )
-    report.line(line + ". Each pair is whole in the record")
-    report.second(
-        f"the {len(quiet)} other pair(s): "
-        + (
+        i, least = min(quiet, key=lambda q: q[1]["gap_mm"])
+        line = (
+            f"{len(quiet)} other pair(s) with nothing to report ({tally}, no overlap; least gap "
+            f"{least['gap_mm']:.4f} mm, pairs.{i}, {least['a']} | {least['b']})"
+        )
+        # A place that catches no surface of one of a pair says nothing of it, whichever pair
+        # it is. A pair read by its bounds is caught by none, and counted with them below.
+        shown = {i for i, r in enumerate(results) if not _quiet(r)}
+        for place in named:
+            read = [
+                (k, r["places"][place.name]["verdict"])
+                for k, r in enumerate(results)
+                if not _bounded(r)
+            ]
+            quiet_read = [v for k, v in read if k not in shown or v == NOT_CAUGHT]
+            missed = [v for _, v in read].count(NOT_CAUGHT)
+            got = [f"{n} {w.lower()}" for w in QUIET if (n := quiet_read.count(w))]
+            line += f"; at {place.name} " + ", ".join(
+                [*got, *[f"{missed} not caught"] * bool(missed)]
+            )
+        unrun = sum(bool(r.get("occt_booleans")) for _, r in quiet)
+        second = f"the {len(quiet)} other pair(s): " + (
             "no overlap by OCCT common, by its cut or by the mesh, and the mesh's gaps within "
             f"the chords ({2 * FINE[0]:g} mm) of OCCT's"
+            + (
+                f"; for {unrun} of them OCCT's common and cut weren't run, its exact distance "
+                "and the mesh's gap both reading them apart"
+                if unrun
+                else ""
+            )
             if brep
             else f"no overlap by {SECTIONS} sections or by the mesh, and sampled points agree "
             "with the mesh's gaps"
         )
-    )
+    if boxed:
+        by = report.numbers["by_bounds"]
+        # Each bound is a floor on the true gap; a mesh's searched only so far is that far.
+        searched = results[by["least"]].get("bound_at_search")
+        far_off = (
+            f"{len(boxed)} pair(s) farther apart than any gap judged, read by their bounds, "
+            f"CLEAR: least bound gap at least {by['least_bound_gap_mm']:.4f} mm"
+            + (", as far as its meshes were searched" if searched else "")
+            + f", pairs.{by['least']}"
+            + (", caught by no place" if named else "")
+        )
+        line = f"{line}; and {far_off}" if line else far_off
+        counted = {w: sum(r["bound"] == w for _, r in boxed) for w in BOUNDS}
+        bounds = (
+            f"the {len(boxed)} by their bounds: {counted['box']} by axis-aligned boxes, "
+            f"{counted['hull']} by hulls, {counted['mesh']} by meshes, each never over the true gap"
+        )
+        second = f"{second}; {bounds}" if second else bounds
+    # A pair read by its bounds has only its bound in the record, not every figure.
+    report.line(line + f". Each pair is {'' if boxed else 'whole '}in the record")
+    report.second(second)
+
+
+def _by_bounds_counted(report: Report, results: list[dict[str, Any]], beyond: float) -> None:
+    """The record's count of the pairs read by their bounds, past which gap, and the least of
+    their bound gaps, at which pair (mqucifer/print-shop#354)."""
+    boxed = [(i, r) for i, r in enumerate(results) if _bounded(r)]
+    if not boxed:
+        report.numbers["by_bounds"] = {"pairs": 0, "beyond_mm": beyond}
+        return
+    i, least = min(boxed, key=lambda q: q[1]["bound_gap_mm"])
+    report.numbers["by_bounds"] = {
+        "pairs": len(boxed),
+        **{f"by_{w}": sum(r["bound"] == w for _, r in boxed) for w in BOUNDS},
+        "beyond_mm": beyond,
+        "least_bound_gap_mm": least["bound_gap_mm"],
+        "least": i,
+    }
 
 
 def _place_said(
@@ -1076,7 +1602,7 @@ def _lift_said(report: Report, results: list[dict[str, Any]], lift: dict[str, An
     """What a lifted pair's gap is: the play, or the lift itself where a face that seats meets."""
     moved, mm = lift["file"], abs(lift["mm"])
     for r in results:
-        if moved not in (r["a"].split("#")[0], r["b"].split("#")[0]):
+        if _bounded(r) or moved not in (r["a"].split("#")[0], r["b"].split("#")[0]):
             continue
         if r["verdict"] in ("TOUCHING", "INTERFERE"):
             report.note(
