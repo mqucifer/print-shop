@@ -45,7 +45,7 @@ from .report import NoAnswer
 NOTHING = 1e-3
 
 #: How far a printed part's mesh's core may be from Orca's, in each band of its layers, as a
-#: share of the band's volume (`classify.checked`, mqucifer/print-shop#363): a core too small
+#: share of the band's volume (`classify.exact_checked`, mqucifer/print-shop#363): a core too small
 #: reads the part stronger than printed, the unsafe side, so `SHORT` is the tighter; one too big
 #: reads it weaker.
 SHORT = 0.02

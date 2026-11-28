@@ -9,7 +9,7 @@ import math
 import numpy as np
 import pytest
 
-from print_shop.bench import infill, load, wedges
+from print_shop.bench import classify, infill, load, wedges
 
 #: The unit wedge, its depth 1 along z.
 UNIT = np.array([[[x, y, (z + 1) / 2] for x, y, z in wedges.NODES]])
@@ -143,3 +143,45 @@ def test_a_point_is_covered_where_a_wedge_lies_over_it() -> None:
     tets = points[wired[:, :4]][:, None]
     probe = np.array([[5.0, 5, 5], [0.1, 9.9, 0.1], [10.5, 5, 5], [-0.1, 5, 5]])
     assert wedges.within(probe, tets).tolist() == [True, True, False, False]
+
+
+class Cubed:
+    """A cube's layers along z, 0.2 mm thick, its core 1 mm in from every face, one cell."""
+
+    layers, low, high, height, count = 2, 0.0, 10.0, 0.2, 50
+    regions: list[object] = []
+    unread: set[int] = set()
+    cells: list[object] = [None]
+
+    def cell_of(self, points: np.ndarray) -> np.ndarray:
+        return np.zeros(len(points), dtype=int)
+
+    def _readable(self, layer: int, cell: object) -> list[np.ndarray]:
+        at = (layer + 0.5) * self.height
+        return [np.array([[1.0, 1], [9, 1], [9, 9], [1, 9]])] if 1 < at < 9 else []
+
+
+def test_a_part_s_elements_and_wedges_read_exactly_by_its_layers() -> None:
+    """mqucifer/print-shop#363: a cube of six tetrahedra, its skin a mitred layer of wedges 1 mm
+    deep, its layers' core 1 mm in from each face (`classify.exact`): its elements hold all of
+    it, 1,000 mm³; their core is 8³ exactly; the wedges in them are their own volume, none of
+    it core; and the check finds the mesh's core Orca's, band by band, its skin all there."""
+    points, wired = cube()
+    rows, normals = wedges.faces_of(wired, points, load.MIDS)
+    skin = wedges.layer(points, rows, normals, np.full(12, 1.0), np.zeros(12, dtype=int),
+                        np.ones(12, dtype=bool), lambda p: np.ones(len(p), dtype=bool))
+    found = classify.exact(Cubed(), points[wired[:, :4]], skin.places[:, :6])  # type: ignore[arg-type]
+    assert found.whole.sum() == pytest.approx(1000.0)
+    assert found.core.sum() == pytest.approx(512.0)
+    assert found.in_wedges.sum() == pytest.approx(float(wedges.volumes(skin.places)[0].sum()))
+    assert found.wedges_core.sum() == pytest.approx(0.0, abs=1e-3)
+    assert found.layer_core.sum() == pytest.approx(512.0)
+    share = (found.core + found.in_wedges - found.wedges_core) / found.whole
+    bands = classify.exact_checked(Cubed(), found, share, 2.0)  # type: ignore[arg-type]
+    assert bands.short < 1e-6 and bands.over < 1e-6
+    # A wedge too deep, its core's edge 1.5 mm in, is the mesh's core short of Orca's.
+    deep = wedges.layer(points, rows, normals, np.full(12, 1.5), np.zeros(12, dtype=int),
+                        np.ones(12, dtype=bool), lambda p: np.ones(len(p), dtype=bool))
+    found = classify.exact(Cubed(), points[wired[:, :4]], deep.places[:, :6])  # type: ignore[arg-type]
+    share = (found.core + found.in_wedges - found.wedges_core) / found.whole
+    assert classify.exact_checked(Cubed(), found, share, 2.0).short > 0.05  # type: ignore[arg-type]

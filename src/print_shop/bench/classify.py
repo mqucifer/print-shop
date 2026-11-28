@@ -606,6 +606,9 @@ def band_normals(read: Read, mixed: np.ndarray, centres: np.ndarray, faces: np.n
     clean = np.zeros(len(read.share), dtype=bool)
     for e in np.flatnonzero(mixed):
         points, core = read.points[e], read.core[e]
+        if core.all() or not core.any():
+            # Mixed by its exact share but not at its points: its nearest face's way, below.
+            continue
         mean_core, mean_skin = points[core].mean(axis=0), points[~core].mean(axis=0)
         spread = np.cov(np.vstack([points[core] - mean_core, points[~core] - mean_skin]).T)
         way = np.linalg.solve(spread + 1e-9 * np.eye(3), mean_skin - mean_core)
@@ -707,141 +710,230 @@ class Bands:
         return None
 
 
-def checked(layered: Layered, corners_own: np.ndarray, read: Read, band: float = BAND,
-            less: tuple[np.ndarray, np.ndarray] | None = None,
-            orca: np.ndarray | None = None) -> Bands:
-    """The mesh's core held to Orca's, band by band of the part's layers, `band` thick
-    (mqucifer/print-shop#363): in each band, the mesh's core, each element's share spread
-    evenly over it, less what of it the skin's wedges lie over (`less`, their middles in the
-    part's own axes and their volumes), against Orca's, each element read at its points in
-    their own layers (`orca`, `read`'s own unless given); what's short and over as a share of
-    the part's volume in the band."""
-    axis = layered.layers
-    edges = corners_own[:, 1:] - corners_own[:, :1]
-    volume = np.abs(np.einsum("ni,ni->n", np.cross(edges[:, 0], edges[:, 1]), edges[:, 2])) / 6
-    # Bands of one thickness, the nearest to `band` that fills the part's height: no thin band
-    # at its end, where an element's smearing would read large against little.
-    count = max(1, round((layered.high - layered.low) / band))
-    band = (layered.high - layered.low) / count
-    where = np.clip(np.floor((read.points[:, :, axis] - layered.low) / band), 0,
-                    count - 1).astype(int)  # fmt: skip
-    each = np.repeat(volume / POINTS, POINTS)
-    flat = where.ravel()
-    part = np.bincount(flat, weights=each, minlength=count)
-    truth = read.core if orca is None else orca
-    orca_core = np.bincount(flat, weights=each * truth.ravel(), minlength=count)
-    mesh = np.bincount(flat, weights=each * np.repeat(read.share, POINTS), minlength=count)
-    if less is not None and len(less[1]):
-        at = np.clip(np.floor((less[0][:, axis] - layered.low) / band), 0, count - 1).astype(int)
-        mesh = mesh - np.bincount(at, weights=less[1], minlength=count)
-    full = part > 0
-    ratio = np.where(full, part, 1.0)
-    short = float(np.max(np.where(full, (orca_core - mesh) / ratio, 0.0), initial=0.0))
-    over = float(np.max(np.where(full, (mesh - orca_core) / ratio, 0.0), initial=0.0))
-    return Bands(int(full.sum()), max(short, 0.0), max(over, 0.0), len(layered.unread))
-
-
-#: How many voxels across a core's cell its strain is summed in (`cell_averaged`): odd, so a
-#: cell is centred on its own voxel.
-VOXELS = 5
-#: How near to the fullest cell round it a cell's core must be for it to be read (`Cells`).
+#: How near to the fullest cell round it a cell's core must be for it to be read
+#: (`element_averaged`).
 FULLEST = 0.9
-#: The most voxels a part's box is read in; past it, fewer a cell.
-MOST_VOXELS = 40_000_000
 
 
 @dataclass
 class Averaged:
-    """A core's strain averaged over its own cell (`cell_averaged`): each voxel's that holds
-    core, its middle, and the share of its cell that's core."""
+    """A core's strain averaged over its own cell (`element_averaged`): each place's that's
+    read, its middle, and the share of its cell that's core."""
 
     strain: np.ndarray
     at: np.ndarray
     fill: np.ndarray
 
 
-class Cells:
-    """A core's strain summed into voxels a fifth of its cell (`infill.cell_mm`) across, over a
-    box in the part's own axes, a share at a time (`add`), then averaged over the cell round
-    each voxel (`averaged`), mqucifer/print-shop#363. Its stiffness is homogenised over that
-    cell, so a peak resolved finer than it, as an idealised clamp's corner is on a fine mesh,
-    isn't a figure the core has; a real overload spans many cells. Only core is summed: never
-    skin, never outside the part. Where the core is thinner than a cell, its average is over
-    what core there is, and its fill says how much."""
-
-    def __init__(self, low: np.ndarray, high: np.ndarray, cell: float) -> None:
-        self.cell = float(cell)
-        voxels = VOXELS
-        while voxels > 1:
-            size = self.cell / voxels
-            shape = np.maximum(np.ceil((high - low) / size).astype(int) + 1, 1)
-            if int(np.prod(shape)) <= MOST_VOXELS:
-                break
-            voxels -= 2
-        self.voxels, self.size = voxels, self.cell / voxels
-        self.low = np.asarray(low, dtype=float)
-        self.shape = tuple(int(n) for n in np.maximum(
-            np.ceil((high - low) / self.size).astype(int) + 1, 1))
-        count = int(np.prod(self.shape))
-        self.weight = np.zeros(count)
-        self.strain = np.zeros((count, 9))
-        self.place = np.zeros((count, 3))
-
-    def add(self, points: np.ndarray, strains: np.ndarray, weights: np.ndarray) -> None:
-        """Core `points` in the part's own axes, their `strains` and the volumes they stand for."""
-        index = np.clip(((points - self.low) / self.size).astype(int), 0,
-                        np.array(self.shape) - 1)
-        flat = np.ravel_multi_index(index.T, self.shape)
-        self.weight += np.bincount(flat, weights, len(self.weight))
-        for k in range(9):
-            self.strain[:, k] += np.bincount(flat, weights * strains.reshape(-1, 9)[:, k],
-                                             len(self.weight))
-        for k in range(3):
-            self.place[:, k] += np.bincount(flat, weights * points[:, k], len(self.weight))
-
-    def averaged(self) -> Averaged:
-        """The core's own cells: each voxel's whose cell, the box round it a cell across, holds
-        as much core as any within a cell of it does, to `FULLEST`, its strain averaged over
-        the core in that cell, its own core's middle, and its cell's share that's core. A
-        lattice's cell lies in its core, not centred on its edge: where the core is thick, a
-        cell centred on its edge or its corner is mostly skin's room, and is read in the
-        whole cells beside it instead, which hold all of the core but its outermost voxel;
-        where it's thinner than a cell, every cell is partly core, and each is read over what
-        core it holds."""
-        both = np.concatenate([self.weight[:, None], self.strain], axis=1)
-        summed = _boxed(both.reshape(*self.shape, 10), self.voxels)
-        fill = summed[..., 0] / self.cell**3
-        fullest = _most(fill, self.voxels)
-        read = ((self.weight.reshape(self.shape) > 0)
-                & (fill >= FULLEST * fullest)).reshape(-1)
-        summed = summed.reshape(-1, 10)[read]
-        strain = (summed[:, 1:] / summed[:, :1]).reshape(-1, 3, 3)
-        at = self.place[read] / self.weight[read, None]
-        return Averaged(strain, at, summed[:, 0] / self.cell**3)
+# Exact, layer by layer
 
 
-def _most(values: np.ndarray, width: int) -> np.ndarray:
-    """Each voxel's most over the `width` voxels each way centred on it, the box's own only."""
-    half = width // 2
-    for axis in range(3):
-        pad = [(0, 0)] * values.ndim
-        pad[axis] = (half, half)
-        padded = np.pad(values, pad, constant_values=-np.inf)
-        n = values.shape[axis]
-        values = np.max([np.take(padded, np.arange(k, k + n), axis=axis)
-                         for k in range(width)], axis=0)
-    return values
+@dataclass
+class Exact:
+    """A printed part's elements read exactly by its layers (`exact`, mqucifer/print-shop#363):
+    each element's volume, straight-sided between its corners, and what of it is core, lies in
+    a wedge of its skin, and lies in a wedge and is core, in mm³; each cell's volume and core;
+    and each layer's core by Orca's own rings, its wedges' volume, and each element's volume
+    in it, for the check (`exact_checked`)."""
+
+    whole: np.ndarray
+    core: np.ndarray
+    in_wedges: np.ndarray
+    wedges_core: np.ndarray
+    cell_whole: dict[int, float]
+    cell_core: dict[int, float]
+    #: Each layer's core by Orca's rings, where the layer is one cell; else its elements'.
+    layer_core: np.ndarray
+    layer_wedges: np.ndarray
+    #: Each element's volume in each layer, as (element, layer, mm³) rows.
+    spans: np.ndarray
+    #: Whether a region cut a layer across its plane, where each element's part in it is its
+    #: section's middle's cell.
+    in_plane: bool
 
 
-def _boxed(values: np.ndarray, width: int) -> np.ndarray:
-    """Each voxel's sum over the `width` voxels each way centred on it, zero past the box."""
-    half = width // 2
-    for axis in range(3):
-        pad = [(0, 0)] * values.ndim
-        pad[axis] = (half + 1, half)
-        summed = np.cumsum(np.pad(values, pad), axis=axis)
-        n = values.shape[axis]
-        upper = np.take(summed, np.arange(width, width + n), axis=axis)
-        lower = np.take(summed, np.arange(0, n), axis=axis)
-        values = upper - lower
-    return values
+def exact(layered: Layered, corners: np.ndarray, prisms: np.ndarray) -> Exact:
+    """Each element of a printed part, by its straight-sided `corners` `[e, 4, 3]` in the part's
+    own axes, read exactly by its layers (`areas`): in each layer it spans, its section where
+    it spans the layer, inside that layer's core rings for its section's middle's cell, and
+    inside each of the skin's wedges, by their straight-sided `prisms` `[w, 6, 3]`, and inside
+    both; each by how far it spans the layer. Each layer's own core is its rings' area where
+    no region but a band of layers cuts it, else its elements' sum."""
+    from . import areas
+
+    axis, low, height = layered.layers, layered.low, layered.height
+    first, second = (a for a in range(3) if a != axis)
+    whole, core = np.zeros(len(corners)), np.zeros(len(corners))
+    in_wedges, wedges_core = np.zeros(len(corners)), np.zeros(len(corners))
+    cell_whole: dict[int, float] = {}
+    cell_core: dict[int, float] = {}
+    layer_core = np.zeros(layered.count)
+    layer_wedges = np.zeros(layered.count)
+    spans: list[tuple[int, int, float]] = []
+    in_plane = any(not isinstance(r.shape, Layers) for r, _ in layered.regions)
+    e_low, e_high = corners[..., axis].min(axis=1), corners[..., axis].max(axis=1)
+    w_low = prisms[..., axis].min(axis=1) if len(prisms) else np.zeros(0)
+    w_high = prisms[..., axis].max(axis=1) if len(prisms) else np.zeros(0)
+    pair_e, pair_w = areas.overlapping(corners.min(axis=1), corners.max(axis=1),
+                                       prisms.min(axis=1), prisms.max(axis=1)) if len(
+        prisms) else (np.zeros(0, dtype=int), np.zeros(0, dtype=int))  # fmt: skip
+    rings_of: dict[tuple[int, int], list[np.ndarray]] = {}
+
+    def rings(k: int, c: int) -> list[np.ndarray]:
+        if (k, c) not in rings_of:
+            rings_of[(k, c)] = layered._readable(k, layered.cells[c]) or []
+        return rings_of[(k, c)]
+
+    for k in range(layered.count):
+        bottom = low + k * height
+        top = min(low + (k + 1) * height, layered.high)
+        if top <= bottom:
+            continue
+        mine = np.flatnonzero((e_low < top) & (e_high > bottom))
+        if len(mine):
+            under, over = np.maximum(e_low[mine], bottom), np.minimum(e_high[mine], top)
+            at, span = (under + over) / 2, over - under
+            poly, count = areas.sections(corners[mine], areas.TET_EDGES, axis, at)
+            size = areas.area(poly, count)
+            middle = np.zeros((len(mine), 3))
+            middle[:, [first, second]] = (poly * (np.arange(poly.shape[1])[None] <
+                                          count[:, None])[..., None]).sum(axis=1) / np.maximum(
+                count, 1)[:, None]  # fmt: skip
+            middle[:, axis] = at
+            cells = layered.cell_of(middle)
+            held = np.zeros(len(mine))
+            for c in np.unique(cells):
+                its = cells == c
+                held[its] = areas.inside_rings(poly[its], count[its], rings(k, int(c)))
+                cell_whole[int(c)] = cell_whole.get(int(c), 0.0) + float((size * span)[its].sum())
+                cell_core[int(c)] = cell_core.get(int(c), 0.0) + float((held * span)[its].sum())
+            whole[mine] += size * span
+            core[mine] += held * span
+            spans += [(int(e), k, float(v)) for e, v in zip(mine, size * span, strict=True)]
+            alone = len(np.unique(cells)) == 1 and not in_plane
+            layer_core[k] = (areas.rings_area(rings(k, int(cells[0]))) * (top - bottom)
+                             if alone else float((held * span).sum()))  # fmt: skip
+        live_w: np.ndarray = (np.flatnonzero((w_low < top) & (w_high > bottom)) if len(prisms)
+                              else np.zeros(0, dtype=int))  # fmt: skip
+        if len(live_w):
+            under, over = np.maximum(w_low[live_w], bottom), np.minimum(w_high[live_w], top)
+            poly, count = areas.sections(prisms[live_w], areas.PRISM_EDGES, axis,
+                                         (under + over) / 2)  # fmt: skip
+            layer_wedges[k] = float((areas.area(poly, count) * (over - under)).sum())
+        live: np.ndarray = np.flatnonzero(
+            (np.maximum(e_low[pair_e], w_low[pair_w]) < top)
+            & (np.minimum(e_high[pair_e], w_high[pair_w]) > bottom)) if len(pair_e) else np.zeros(
+            0, dtype=int)  # fmt: skip
+        if len(live):
+            e, w = pair_e[live], pair_w[live]
+            under = np.maximum.reduce([e_low[e], w_low[w], np.full(len(e), bottom)])
+            over = np.minimum.reduce([e_high[e], w_high[w], np.full(len(e), top)])
+            at, span = (under + over) / 2, over - under
+            se, ce = areas.sections(corners[e], areas.TET_EDGES, axis, at)
+            sw, cw = areas.sections(prisms[w], areas.PRISM_EDGES, axis, at)
+            both, cb = areas.clip(se, ce, sw, cw)
+            shared = areas.area(both, cb)
+            middle = np.zeros((len(e), 3))
+            middle[:, [first, second]] = (se * (np.arange(se.shape[1])[None] < ce[:, None])[
+                ..., None]).sum(axis=1) / np.maximum(ce, 1)[:, None]  # fmt: skip
+            middle[:, axis] = at
+            cells = layered.cell_of(middle)
+            cored = np.zeros(len(e))
+            for c in np.unique(cells):
+                its = cells == c
+                cored[its] = areas.inside_rings(both[its], cb[its], rings(k, int(c)))
+            np.add.at(in_wedges, e, shared * span)
+            np.add.at(wedges_core, e, cored * span)
+    return Exact(whole, core, in_wedges, wedges_core, cell_whole, cell_core, layer_core,
+                 layer_wedges, np.array(spans).reshape(-1, 3), in_plane)
+
+
+def exact_checked(layered: Layered, found: Exact, share: np.ndarray, band: float = BAND,
+                  ) -> Bands:
+    """The mesh's core held to Orca's, band by band of the part's layers, `band` thick, exactly
+    (mqucifer/print-shop#363): in each band, each element's `share` of its core spread over
+    its volume in each of its layers, less the skin's wedges' volume there, against Orca's own
+    core there, its rings' area; what's short and over as a share of the band's volume. Its
+    whole skin: the wedges, and what of each element is skin by its share."""
+    count = max(1, round((layered.high - layered.low) / band))
+    each = max(1, math.ceil(layered.count / count))
+    rows = found.spans
+    element, layer, volume = rows[:, 0].astype(int), rows[:, 1].astype(int), rows[:, 2]
+    bands = np.minimum(layer // each, count - 1)
+    whole = np.bincount(bands, weights=volume, minlength=count)
+    mesh = np.bincount(bands, weights=volume * share[element], minlength=count)
+    where = np.minimum(np.arange(layered.count) // each, count - 1)
+    mesh -= np.bincount(where, weights=found.layer_wedges, minlength=count)
+    orca = np.bincount(where, weights=found.layer_core, minlength=count)
+    full = whole > 0
+    ratio = np.where(full, whole, 1.0)
+    short = float(np.max(np.where(full, (orca - mesh) / ratio, 0.0), initial=0.0))
+    over = float(np.max(np.where(full, (mesh - orca) / ratio, 0.0), initial=0.0))
+    return Bands(int(full.sum()), max(short, 0.0), max(over, 0.0), len(layered.unread))
+
+
+def element_averaged(middles: np.ndarray, strains: np.ndarray, weights: np.ndarray,
+                     cell: float) -> Averaged:
+    """A core's strain averaged over its own cell, element by element (mqucifer/print-shop#363):
+    each element's core's mean strain, at its core's middle, weighted by its core's volume, and
+    averaged over the elements whose middles lie within its cell, a cube `cell` across centred
+    on it; its fill the share of that cube their core holds. Its stiffness is its cell's mean,
+    so it's read no finer than that; and a thick core is read in its fullest cells, each that
+    holds `FULLEST` of the most any within a cell of it holds, as a lattice's cell lies in its
+    core and not centred on its edge. Per element, not per voxel, so it holds what the mesh
+    does, whatever the part's size."""
+    held = np.flatnonzero(weights > 0)
+    if not len(held):
+        return Averaged(np.zeros((0, 3, 3)), np.zeros((0, 3)), np.zeros(0))
+    where, strain, weight = middles[held], strains[held], weights[held]
+    # Voxels half a cell across: the 27 round one hold every place within its cell, and
+    # little more.
+    key = np.floor(where / (cell / 2)).astype(int)
+    key -= key.min(axis=0)
+    shape = key.max(axis=0) + 3
+    flat = np.ravel_multi_index((key + 1).T, shape)
+    order = np.argsort(flat, kind="stable")
+    sorted_flat = flat[order]
+    offsets = [np.array([dx, dy, dz]) for dx in (-1, 0, 1) for dy in (-1, 0, 1)
+               for dz in (-1, 0, 1)]  # fmt: skip
+
+    def pairs(rows: np.ndarray) -> list[tuple[np.ndarray, np.ndarray]]:
+        """Each of `rows` with each place within its cell, by the 27 voxels round it."""
+        found = []
+        for offset in offsets:
+            other = np.ravel_multi_index((key[rows] + 1 + offset).T, shape)
+            low = np.searchsorted(sorted_flat, other, side="left")
+            many = np.searchsorted(sorted_flat, other, side="right") - low
+            if not many.any():
+                continue
+            mine = np.repeat(rows, many)
+            step = np.arange(len(mine)) - np.repeat(np.cumsum(many) - many, many)
+            theirs = order[np.repeat(low, many) + step]
+            apart = where[theirs] - where[mine]
+            inside = np.all((apart >= -cell / 2) & (apart < cell / 2), axis=1)
+            found.append((mine[inside], theirs[inside]))
+        return found
+
+    # A few thousand places at a time, so their pairs fit the memory however fine the mesh.
+    per_voxel = max(1, int(np.bincount(flat).max()))
+    chunk = max(1, 2_000_000 // (27 * per_voxel))
+    summed = np.zeros(len(where))
+    weighted = np.zeros((len(where), 3, 3))
+    for start in range(0, len(where), chunk):
+        rows = np.arange(start, min(start + chunk, len(where)))
+        for mine, theirs in pairs(rows):
+            summed += np.bincount(mine, weights=weight[theirs], minlength=len(where))
+            for i in range(3):
+                for j in range(3):
+                    weighted[:, i, j] += np.bincount(
+                        mine, weights=weight[theirs] * strain[theirs, i, j],
+                        minlength=len(where))  # fmt: skip
+    averaged = weighted / summed[:, None, None]
+    fill = summed / cell**3
+    fullest = np.zeros(len(where))
+    for start in range(0, len(where), chunk):
+        rows = np.arange(start, min(start + chunk, len(where)))
+        for mine, theirs in pairs(rows):
+            np.maximum.at(fullest, mine, fill[theirs])
+    read = fill >= FULLEST * fullest
+    return Averaged(averaged[read], where[read], fill[read])

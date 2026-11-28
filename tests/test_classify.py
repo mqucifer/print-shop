@@ -201,38 +201,29 @@ def grid_points(low: tuple[float, ...], high: tuple[float, ...], step: float) ->
 
 
 def test_a_core_s_strain_is_averaged_over_its_own_cell_and_only_its_core() -> None:
-    """mqucifer/print-shop#363: a core's strain is read no finer than its own cell
-    (`classify.Cells`): a strain the same throughout is read as it is, every voxel's cell
-    full of core in the middle; a spike at one point is spread over its cell, at the core's
-    corner as in its middle, as a lattice's cell lies in its core, not centred on its edge;
-    and the cell is clipped to the core, so a core thinner than its cell is read over what
-    core there is, its fill saying so."""
-    cell, step = 4.0, 0.2
-    points = grid_points((0, 0, 0), (20, 20, 12), step)
-    weights = np.full(len(points), step**3)
-    even = np.tile(np.diag([1e-3, -4e-4, 2e-4]), (len(points), 1, 1))
-    cells = classify.Cells(np.zeros(3), np.array([20.0, 20, 12]), cell)
-    cells.add(points, even, weights)
-    read = cells.averaged()
+    """mqucifer/print-shop#363: a core's strain is read no finer than its own cell, place by
+    place of its elements (`classify.element_averaged`): a strain the same throughout is read
+    as it is, every place's cell full of core in the middle; a spike at one place is spread
+    over its cell, by its weight's share, in the core's middle and at its corner alike, as a
+    lattice's cell lies in its core, not centred on its edge; and a core thinner than its cell
+    is read over what core there is, its fill saying so."""
+    cell, step = 4.0, 1.0
+    where = grid_points((0, 0, 0), (20, 20, 12), step)
+    weights = np.full(len(where), step**3)
+    even = np.tile(np.diag([1e-3, -4e-4, 2e-4]), (len(where), 1, 1))
+    read = classify.element_averaged(where, even, weights, cell)
     assert np.allclose(read.strain, even[0])
+    assert read.fill.min() >= classify.FULLEST and read.fill.max() <= 1 + 1e-9
     middle = np.all(np.abs(read.at - [10, 10, 6]) < 1, axis=1)
     assert np.allclose(read.fill[middle], 1.0)
-    # A thick core is read in whole cells, none centred on its edge or its corner.
-    assert read.fill.min() >= classify.FULLEST and read.fill.max() <= 1 + 1e-9
-    # A spike of 1% at one point, in strain otherwise 0, is its cell's mean, its volume's share,
-    # in the core's middle and at its very corner alike.
-    for where in ([10.1, 10.1, 6.1], [0.1, 0.1, 0.1]):
-        spiked = np.zeros((len(points), 3, 3))
-        spiked[np.argmin(np.linalg.norm(points - where, axis=1))] = np.diag([1e-2, 0, 0])
-        cells = classify.Cells(np.zeros(3), np.array([20.0, 20, 12]), cell)
-        cells.add(points, spiked, weights)
-        peak = cells.averaged().strain[:, 0, 0].max()
-        assert peak == pytest.approx(1e-2 * step**3 / cell**3, rel=0.01), where
-    # A core 1 mm thick, a quarter of its cell: its average is its own, its fill a quarter.
+    for spot in ([10.5, 10.5, 6.5], [0.5, 0.5, 0.5]):
+        spiked = np.zeros((len(where), 3, 3))
+        spiked[np.argmin(np.linalg.norm(where - spot, axis=1))] = np.diag([1e-2, 0, 0])
+        peak = classify.element_averaged(where, spiked, weights, cell).strain[:, 0, 0].max()
+        assert peak == pytest.approx(1e-2 * step**3 / cell**3, rel=0.01), spot
     thin = grid_points((0, 0, 0), (20, 1, 12), step)
-    cells = classify.Cells(np.zeros(3), np.array([20.0, 20, 12]), cell)
-    cells.add(thin, np.tile(even[0], (len(thin), 1, 1)), np.full(len(thin), step**3))
-    read = cells.averaged()
+    read = classify.element_averaged(thin, np.tile(even[0], (len(thin), 1, 1)),
+                                     np.full(len(thin), step**3), cell)  # fmt: skip
     assert np.allclose(read.strain, even[0])
     assert read.fill.max() == pytest.approx(1 / 4, abs=0.06)
     assert np.all(read.at[:, 1] < 1)
@@ -245,3 +236,4 @@ def test_a_core_s_cell_is_its_lines_spacing_over_the_density_each_layer_holds() 
     assert infill.cell_mm("rectilinear", 20, 0.407) == pytest.approx(2.035)
     assert infill.cell_mm("triangles", 20, 0.407) == pytest.approx(6.105)
     assert infill.cell_mm("grid", 60, 0.407) == pytest.approx(4.07 / 3)
+

@@ -334,9 +334,8 @@ def test_a_band_of_layers_is_read_in_the_part_s_own_axes_and_a_box_wins_over_it(
     assert cells["the part"]["settings"]["infill"] == 20
     # The band holds the beam's lower 5 mm beyond the box, its bottom shells and walls left out.
     side = as_printed.wall_thickness(2, 0.45, 0.2)
-    # Read at 64 points of each 5 mm element, its edges sampled so (mqucifer/print-shop#363).
     assert cells["band"]["core_mm3"] == pytest.approx(
-        (120 - side - 30) * (20 - 2 * side) * (5 - 0.6), rel=0.06)
+        (120 - side - 30) * (20 - 2 * side) * (5 - 0.6), rel=0.01)
 
 
 def test_a_printed_part_s_joint_carries_what_statics_says(cae: Any) -> None:
@@ -436,6 +435,10 @@ def test_a_print_load_can_t_read_says_why_and_nothing_is_solved(
 
 #: The bowed bars of `make_fixtures.bowed` (mqucifer/print-shop#356).
 BOWED = ("bowed", "bowed-up", "bowed-notched")
+#: The bar bowed along its layers' core by its layers, in mm³: 24 million points 0.1 mm apart
+#: over its box, each read in its own layer (`classify.Layered.core`), inside the part by its
+#: section there (mqucifer/print-shop#363).
+BOWED_UP_CORE = 17567.3
 
 
 @pytest.mark.parametrize("name", BOWED)
@@ -458,10 +461,9 @@ def test_a_bowed_bar_reads_as_printed_between_solid_and_its_core_alone(
     assert cell["core_mm3"] > 0, cell
     held_to_its_layers(cell)
     if name == "bowed-up":
-        side = as_printed.wall_thickness(2, 0.45, 0.2)
-        # Sampled at 64 points of each of its elements, about a millimetre apart at its size.
-        assert cell["core_mm3"] == pytest.approx((120 - 2 * side) * (20 - 2 * side) * 8.4,
-                                                 rel=0.03)  # fmt: skip
+        # Its layers' own core, read on a 0.1 mm grid of points each in its own layer: less
+        # than the straight bar's, 18,267 mm³, as its sloped faces' shells are grown into it.
+        assert cell["core_mm3"] == pytest.approx(BOWED_UP_CORE, rel=0.01)
     found = infill.core(Settings(pattern="grid", infill=20, infill_angle=0), MATERIALS["petg"])
     up, first, second = np.eye(3)[2], np.eye(3)[0], np.eye(3)[1]
     along = infill.pulled(found.stiffness(up, first, second), first)
@@ -509,10 +511,9 @@ def test_a_web_too_thin_for_infill_reads_solid_and_its_bosses_skin_and_core(cae:
         held_to_its_layers(cell)
         read[name] = cell
     assert read["web"]["core_mm3"] == pytest.approx(2 * boss, rel=0.02)
-    # The wide web's 0.37 mm of core between the bosses' own, through its height less shells,
-    # most of it found by 64 points of each 5 mm element.
+    # The wide web's 0.37 mm of core between the bosses' own, through its height less shells.
     strip = (2.0 - 2 * side) * (40.0 - 2 * (6.0 - side)) * (20.0 - 1.6)
-    assert read["web-wide"]["core_mm3"] > 2 * boss + 0.7 * strip
+    assert read["web-wide"]["core_mm3"] > 2 * boss + 0.9 * strip
 
 
 def test_a_tile_of_planes_and_cylinders_reads_as_printed(cae: Any) -> None:

@@ -584,6 +584,8 @@ class _Model:
         self.core_strains: list[np.ndarray] = []
         #: Which of each element's `classify.POINTS` points are core, as its layers have it.
         self.core_points = np.zeros((0, classify.POINTS), dtype=bool)
+        #: Each element's core, exactly by its layers (`classify.exact`), in mm³.
+        self.element_core_mm3 = np.zeros(0)
         #: Each core's solid in the joined shape, by its index there, with its part's name, its
         #: cell and the cell's figures (`infill.core`): filled by `join`.
         self.core_solids: list[tuple[int, str, Any, Any]] = []
@@ -724,6 +726,7 @@ class _Model:
         tensors: list[np.ndarray] = []
         recovered: list[np.ndarray] = []
         core_points = np.zeros((len(elements), classify.POINTS), dtype=bool)
+        core_mm3 = np.zeros(len(elements))
         material = self.assembly.parts[0].material
         skin = isotropic(material.modulus_mpa, material.poisson)
         self.printed_cells = {}
@@ -749,8 +752,16 @@ class _Model:
             in_wedge = wedges.covered(true.points @ turn.T + at, skin_layer)
             covered = in_wedge & ~true.core
             material = true.core | covered
-            read = classify.Read(true.cells, material.mean(axis=1), true.points, material,
-                                 true.point_cells)
+            # Each element's core, and what of it a wedge lies over, exactly by its layers'
+            # rings (`classify.exact`): its share of the core's stiffness, and the check's.
+            prisms = ((skin_layer.places[:, :6] - at) @ turn if len(skin_layer.places)
+                      else np.zeros((0, 6, 3)))  # fmt: skip
+            with step("reading each element's core and its skin's wedges exactly by its layers"):
+                found = classify.exact(layered, own, prisms)
+            whole = np.maximum(found.whole, 1e-12)
+            core_mm3[mine] = found.core
+            held = np.clip((found.core + found.in_wedges - found.wedges_core) / whole, 0, 1)
+            read = classify.Read(true.cells, held, true.points, material, true.point_cells)
             step_of = classify.step_of(read.share)
             steps[mine] = step_of
             core_points[mine] = true.core
@@ -792,21 +803,12 @@ class _Model:
                             tensor = classify.reuss(skin, core, share)
                         tensors.append(tensor)
                         recovered.append(classify.core_strain(kind, skin, core, share, given))
-            edges = own[:, 1:] - own[:, :1]
-            volume = np.abs(np.einsum("ni,ni->n", np.cross(edges[:, 0], edges[:, 1]),
-                                      edges[:, 2])) / 6  # fmt: skip
             wedge_volume, _ = wedges.volumes(skin_layer.places)
-            # What of the solid a wedge lies over, at the same points Orca's core is read at:
-            # where that's core by its layers, a wedge is deeper than its skin.
-            point_volume = np.repeat(volume / classify.POINTS, classify.POINTS).reshape(
-                -1, classify.POINTS)
-            bands = classify.checked(layered, own, read, classify.band_for(self.size),
-                                     less=(true.points.reshape(-1, 3),
-                                           (in_wedge * point_volume).ravel()),
-                                     orca=true.core)
-            # Each region's own volume and core, at each point's own cell, not its element's: the
-            # mesh is coarser than a band of layers or a box's edge.
-            point_cells = true.point_cells
+            bands = classify.exact_checked(layered, found, held, classify.band_for(self.size))
+            # Its elements straight-sided between their corners, as their sections are taken,
+            # against the mesh's own, curved onto the part's faces.
+            curved = float(self._curved_volumes([elements[i] for i in mine]).sum())
+            straight_short = 100 * (curved - float(found.whole.sum())) / curved if curved else 0
             said = []
             for c in np.unique(read.cells):
                 cell = layered.cells[int(c)]
@@ -819,12 +821,14 @@ class _Model:
                     "walls_mm": round(cell.walls_mm, 3),
                     "top_mm": round(cell.top_mm, 3),
                     "bottom_mm": round(cell.bottom_mm, 3),
-                    "volume_mm3": round(float(point_volume[point_cells == c].sum()), 1),
-                    "core_mm3": round(float((true.core * point_volume)[point_cells == c].sum()), 1),
+                    "volume_mm3": round(found.cell_whole.get(int(c), 0.0), 1),
+                    "core_mm3": round(found.cell_core.get(int(c), 0.0), 1),
                     "wedges": int((skin_layer.cells == c).sum()),
                     "wedges_mm3": round(float(wedge_volume[skin_layer.cells == c].sum()), 1),
-                    "covered_mm3": round(float((covered * point_volume)[point_cells == c].sum()),
-                                         1),  # fmt: skip
+                    "covered_mm3": round(float((found.in_wedges - found.wedges_core)[
+                        in_cell].sum()), 1),  # fmt: skip
+                    "straight_short_pct": round(straight_short, 3),
+                    "cells_in_plane": found.in_plane,
                     # The scale its core's strain is read at (`_core_read`).
                     "cell_mm": round(infill.cell_mm(
                         str(cell.settings.pattern), float(cell.settings.infill or 0),
@@ -856,6 +860,7 @@ class _Model:
         self.core_tensors = tensors
         self.core_strains = recovered
         self.core_points = core_points
+        self.element_core_mm3 = core_mm3
         self._number_wedges(order, points, skin)
 
     def _number_wedges(self, order: list[int], points: np.ndarray, skin: np.ndarray) -> None:
@@ -890,6 +895,22 @@ class _Model:
         self.wedge_part = np.concatenate(parts)
         self.wedge_tensor = np.array(tensors)
         self.wedge_set = cells
+
+    def _curved_volumes(self, elements: list[int]) -> np.ndarray:
+        """Each second-order tetrahedron's own volume, its sides as the mesh curves them, by its
+        four integration points."""
+        given = np.array([[self.nodes[n] for n in self.fem.getElementNodes(e)] for e in elements])
+        corners = np.array([[-1.0, -1, -1], [1, 0, 0], [0, 1, 0], [0, 0, 1]])
+        volume = np.zeros(len(given))
+        for point in POINTS:
+            share = np.array([1 - sum(point), *point])
+            slopes = np.zeros((10, 3))
+            for i in range(4):
+                slopes[i] = (4 * share[i] - 1) * corners[i]
+            for m, (i, j) in enumerate(MIDS, 4):
+                slopes[m] = 4 * (share[i] * corners[j] + share[j] * corners[i])
+            volume += np.abs(np.linalg.det(np.einsum("ak,nai->nik", slopes, given))) / 24
+        return volume
 
     def _skin_layer(self, k: int, layered: classify.Layered, points: np.ndarray,
                     row: dict[int, int], elements: list[int], to_own: Any) -> wedges.Layer:
@@ -2156,47 +2177,63 @@ class _Model:
     def _core_read(self, part: PartAt, cell: Any, figures: Any, numbers: list[int],
                    way: np.ndarray, first: np.ndarray, second: np.ndarray) -> dict[str, Any]:
         """A cell's core against its limits (`infill.Core.read`), its strain averaged over its
-        own cell (`classify.Cells`, mqucifer/print-shop#363): its stiffness is its cell's mean,
-        so it's read at that scale, never finer. Each of its elements' own strain at their
-        `classify.POINTS` points, from each node's movement to CalculiX's seven figures where
-        it printed them; a mixed element's only at its points that are core, as its layers
-        have it, never at a node in its skin, and its core's own there, by the blend its
-        stiffness is. Its peak at the elements beside it, unjudged, for what it's worth."""
+        own cell (`classify.element_averaged`, mqucifer/print-shop#363): its stiffness is its
+        cell's mean, so it's read at that scale, never finer. Each element's core's mean strain
+        at its `classify.POINTS` points that are core, as its layers have them, never at a node
+        in its skin, from each node's movement to CalculiX's seven figures where it printed
+        them, its core's own there by the blend its stiffness is; weighted by its core's exact
+        volume (`classify.exact`). Its peak at its points beside it, unjudged."""
         moved = self.printed if self.printed is not None else self.moved
         turn, at = part.matrix(), np.array(part.at, dtype=float)
-        own = (self.points[self.part_rows[part.name]] - at) @ turn
         spacing = as_printed.wall_thickness(1, cell.settings.line_width,
                                             cell.settings.layer_height)
         size = infill.cell_mm(figures.pattern, figures.density_pct, spacing)
-        cells = classify.Cells(own.min(axis=0), own.max(axis=0), size)
         peak_across = peak_stretch = 0.0
+        middles, means, weights = [], [], []
         for number in numbers:
             hit = np.flatnonzero(self.element_core == number)
-            mixed = self.core_solids[number][0] < classify.STEPS
             for chunk in range(0, len(hit), CHUNK):
                 some = hit[chunk : chunk + CHUNK]
                 its = self._wired()[some]
                 strain, places = element_strains(self.points[its], moved[its], CORE_POINTS)
                 if self.core_strains:
                     strain = np.einsum("ijkl,npkl->npij", self.core_strains[number], strain)
-                corners = self.points[its][:, :4]
-                volume = np.abs(np.linalg.det(corners[:, 1:] - corners[:, :1])) / 6
-                weight = np.repeat(volume / classify.POINTS, classify.POINTS).reshape(
-                    -1, classify.POINTS)
-                kept = (self.core_points[some] if mixed
-                        else np.ones(weight.shape, dtype=bool))
-                strain, places, weight = strain[kept], places[kept], weight[kept]
-                if not len(weight):
+                # Only its points that are core, as its layers have it: under a wedge, an
+                # element all core in its stiffness has skin points too.
+                kept = self.core_points[some]
+                count = kept.sum(axis=1)
+                if not count.any():
                     continue
-                across = np.einsum("i,nij,j->n", way, strain, way)
+                inside = strain[kept]
+                across = np.einsum("i,nij,j->n", way, inside, way)
                 peak_across = max(peak_across, float(across.max()))
-                peak_stretch = max(peak_stretch, float(np.abs(np.linalg.eigvalsh(strain)).max()))
-                cells.add((places - at) @ turn, strain, weight)
-        averaged = cells.averaged()
+                peak_stretch = max(peak_stretch, float(np.abs(np.linalg.eigvalsh(inside)).max()))
+                # Each of its 8 sub-tetrahedra's core, its 8 points that are (`fine_middles`):
+                # half the element across, so a cell smaller than it still averages over more
+                # than one; each weighted by its share of the element's exact core.
+                groups = kept.reshape(len(some), 8, 8)
+                many = groups.sum(axis=2)
+                total = np.maximum(count, 1)[:, None]
+                part_strain = strain.reshape(len(some), 8, 8, 3, 3)
+                part_places = places.reshape(len(some), 8, 8, 3)
+                live = many > 0
+                safe = np.maximum(many, 1)
+                means.append(((part_strain * groups[..., None, None]).sum(axis=2)
+                              / safe[..., None, None])[live])  # fmt: skip
+                middles.append(((part_places * groups[..., None]).sum(axis=2)
+                                / safe[..., None])[live])  # fmt: skip
+                weights.append((self.element_core_mm3[some][:, None] * many / total)[live])
+        if not weights:
+            averaged = classify.Averaged(np.zeros((1, 3, 3)), np.zeros((1, 3)), np.zeros(1))
+        else:
+            averaged = classify.element_averaged(
+                (np.concatenate(middles) - at) @ turn, np.concatenate(means),
+                np.concatenate(weights), size)  # fmt: skip
+            averaged.at = averaged.at @ turn.T + at
         read: dict[str, Any] = dict(figures.read(averaged.strain, way, first, second))
         for key, fill in (("across_at", "across_cell_fill"), ("stretch_at", "stretch_cell_fill")):
             row = read.pop(key)
-            read[key] = _list(averaged.at[row] @ turn.T + at, 3)
+            read[key] = _list(averaged.at[row], 3)
             read[fill] = round(float(averaged.fill[row]), 3)
         read["cell_mm"] = round(size, 3)
         read["at_elements_across_layers_pct"] = 100 * max(peak_across, 0.0)
@@ -3558,8 +3595,11 @@ def _as_printed(assembly: Assembly, report: Report, printed: dict[str, list[dict
                 f"{cell['faces_inverted']} whose wedge would be too sharp or turned over, each "
                 f"read by its layers instead, and {cell['wedges_thinned']} made shallower to "
                 f"stand, the rest of their skin read by its layers; and its mesh read element "
-                f"by element as Orca's "
-                f"layers lay it, where no wedge lies: "
+                f"by element exactly by its layers' rings, each element straight-sided between "
+                f"its corners, {cell['straight_short_pct']:.2f}% under the curved mesh's volume"
+                + ("; a region cutting a layer across its plane, each element's part of it by "
+                   "its section's middle" if cell.get("cells_in_plane") else "")
+                + f", where no wedge lies: "
                 f"{cell['skin_elements']} all skin, {cell['core_elements']} all core, "
                 f"{cell['laminate_elements']} a laminate of the two along the nearest face, "
                 f"{cell['column_elements']} side by side along an edge where two bands meet "
