@@ -14,6 +14,9 @@ import gc
 import os
 import shutil
 import subprocess
+import tempfile
+import time
+from pathlib import Path
 from typing import Any
 
 from .report import NoAnswer
@@ -46,6 +49,66 @@ def give_back() -> None:
         ctypes.CDLL("libc.so.6").malloc_trim(0)
 
 
+#: The container's working folder, on disk, where its /tmp is memory (mqucifer/print-shop#376).
+DISK = Path("/work")
+#: A dot-folder there for the files gmsh and CalculiX read and write for `load`'s joined parts,
+#: so a run's tools pass it by as not the run's own. Each mesh and solve has a folder of its own
+#: in it, named by `SCRATCH_KINDS`, removed as it's read and at the command's end
+#: (`clear_own`), and one a killed command left is removed at the next `load`'s start, once
+#: it's older than `STALE` s (`clear_stale`): no command runs past the hour two passes are given
+#: and its margin, so nothing that old is a running command's. Each file is held to the bench's
+#: own `fsize` limit, as every file a command writes is.
+SCRATCH = ".bench-scratch"
+SCRATCH_KINDS = ("gmsh-", "load-")
+STALE = 2 * 3600
+#: The folders this command made there.
+_own: list[str] = []
+
+
+def scratch(prefix: str) -> str:
+    """A new folder for a mesh's or a solve's files, `prefix` one of `SCRATCH_KINDS`: in the
+    scratch folder on disk, where /tmp is the container's memory, so what's written there never
+    stops a process for memory (a design run's assembly on mqucifer/print-shop#376: the joined
+    parts' shape, written for gmsh into /tmp, is no process's, and the kernel stopped `load`).
+    Where there's no disk folder, as off the container, in the system's temporary folder."""
+    assert prefix in SCRATCH_KINDS, prefix
+    root = DISK / SCRATCH
+    try:
+        root.mkdir(exist_ok=True)
+        made = tempfile.mkdtemp(prefix=prefix, dir=root)
+    except OSError:
+        return tempfile.mkdtemp(prefix=prefix)
+    _own.append(made)
+    return made
+
+
+def clear_stale(now: float | None = None) -> None:
+    """At a command's start: each folder in the scratch folder that its kinds name, older than
+    `STALE`, removed, a killed command's; nothing else there is touched."""
+    root = DISK / SCRATCH
+    now = time.time() if now is None else now
+    with contextlib.suppress(OSError):
+        for folder in root.iterdir():
+            if folder.is_dir() and folder.name.startswith(SCRATCH_KINDS):
+                with contextlib.suppress(OSError):
+                    if now - folder.stat().st_mtime > STALE:
+                        shutil.rmtree(folder, ignore_errors=True)
+    _drop_empty(root)
+
+
+def clear_own() -> None:
+    """At a command's end, whatever stopped it: every folder it made in the scratch folder, and
+    the scratch folder itself where it's then empty."""
+    while _own:
+        shutil.rmtree(_own.pop(), ignore_errors=True)
+    _drop_empty(DISK / SCRATCH)
+
+
+def _drop_empty(root: Path) -> None:
+    with contextlib.suppress(OSError):
+        root.rmdir()
+
+
 def gmsh(tools: Any, first: bool = False) -> Any:
     """gmsh's mesh, as FreeCAD's `GmshTools.create_mesh` makes it, with what this process has
     freed given back first (`give_back`). With `first`, gmsh is started as CalculiX is, the
@@ -53,27 +116,47 @@ def gmsh(tools: Any, first: bool = False) -> Any:
     mqucifer/print-shop#375): FreeCAD starts it by Qt, which can't be told so, so it's run here
     as FreeCAD's own run does, the same program, the same input and the same mesh read back.
     Where it ends with an error, or is stopped, no mesh is read and what it said is kept as
-    `tools.said`, with its exit code as `tools.returncode`."""
+    `tools.said`, with its exit code as `tools.returncode`. Its files, the parts' shape it's
+    given and the mesh it makes, are written on disk (`scratch`), and each part of it is a step
+    of its own (`progress`), so a trace says which held what."""
     give_back()
     if not first:
         return tools.create_mesh()
     import FreeCAD
 
-    tools.prepare()
+    from . import progress
+
+    folder = scratch("gmsh-")
+    found = tools.get_tmp_file_paths
+    tools.get_tmp_file_paths = lambda *given: found(folder, True)
+    with progress.step("writing gmsh's input, the joined parts' shape, on disk"):
+        tools.prepare()
     level = FreeCAD.ParamGet("User parameter:BaseApp/Preferences/Mod/Fem/Gmsh").GetString(
         "LogVerbosity", "3"
     )
-    done = subprocess.run(
-        [tools.gmsh_bin, "-v", level, "-", tools.temp_file_geo],
-        capture_output=True,
-        check=False,
-        preexec_fn=first_to_go,
-    )
+    with progress.step("gmsh meshing the joined parts, first to go"):
+        done = subprocess.run(
+            [tools.gmsh_bin, "-v", level, "-", tools.temp_file_geo],
+            capture_output=True,
+            check=False,
+            preexec_fn=first_to_go,
+        )
     tools.said = (done.stdout + done.stderr).decode(errors="replace")
     tools.returncode = done.returncode
     if done.returncode != 0:
         return False
-    tools.update_properties()
+    try:
+        with progress.step("reading gmsh's mesh back"):
+            tools.update_properties()
+    except Exception as unread:  # noqa: BLE001 - as Qt's handler, which only printed it
+        # FreeCAD's own run reads the mesh back in Qt's handler, where what's raised is
+        # printed and the mesh left with no volumes, so its reader goes on as for no mesh
+        # (the operator's review, mqucifer/print-shop#376). So it does here, saying why.
+        tools.said += (
+            f"\nError   : FreeCAD couldn't read gmsh's mesh back: {type(unread).__name__}: "
+            f"{unread}\n"
+        )
+        return False
     return True
 
 

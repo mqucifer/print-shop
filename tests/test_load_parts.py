@@ -1161,8 +1161,8 @@ def test_a_lift_on_a_glass_band_that_can_t_be_read_whole_keeps_the_band_s_weight
     """mqucifer/print-shop#375: a lift on a frame whose whole can't be read was refused, as read
     without its band the frame would hang by less than its weight. Now the band's weight is
     kept, hung where it met the frame, with its stiffness left out: the reply leads with that,
-    says the movement and each joint's and bolt's share are upper bounds under the full weight,
-    never a part's strain, that the band is unread, and gives the weight kept. In two passes
+    says the movement taken together is an upper bound under the full weight, never a part's
+    strain, that the band is unread, and gives the weight kept. In two passes
     asked for, and after the one pass's."""
     monkeypatch.setenv(load_parts.TIMEOUT, str(host.TWO_PASSES))
     calls: list[dict[str, Any]] = []
@@ -1193,7 +1193,7 @@ def test_a_lift_on_a_glass_band_that_can_t_be_read_whole_keeps_the_band_s_weight
     assert fact.startswith("read as a bound: frame read with its glass band's stiffness left out "
                            "and its weight kept")  # fmt: skip
     assert load.LIFT_BOUND in fact and load.BOUND not in fact
-    assert "are upper bounds under the full weight" in load.LIFT_BOUND
+    assert "is an upper bound under the full weight" in load.LIFT_BOUND
     assert "Each part's strain isn't one" in load.LIFT_BOUND
 
 
@@ -1255,7 +1255,7 @@ def test_gmsh_first_to_go_runs_freecad_s_own_command_and_reads_its_mesh_only_whe
     read: list[bool] = []
     tools = types.SimpleNamespace(
         prepare=lambda: None, gmsh_bin=str(binary), temp_file_geo="shape.geo",
-        update_properties=lambda: read.append(True),
+        update_properties=lambda: read.append(True), get_tmp_file_paths=lambda *given: None,
     )  # fmt: skip
     assert cae.gmsh(tools, first=True) is (code == 0)
     assert seen.read_text().split() == ["-v", "3", "-", "shape.geo"]
@@ -1315,3 +1315,201 @@ def test_the_bands_probe_says_how_it_was_read_and_what_stopped_the_whole_by_kind
     assert probe.summary({"numbers": {"parts": {"a": {}}, "two_passes": {}}}) == [
         "read: the whole, in two passes"
     ]
+
+
+# The operator's cold review of mqucifer/print-shop#376
+
+
+def test_a_mesh_gmsh_made_that_can_t_be_read_back_is_no_mesh_as_on_qt_s_way(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """gmsh ended well, but FreeCAD couldn't read its mesh back: on Qt's way that was raised in
+    Qt's own handler, and the mesh was left with no volumes, so the straight-sided retry
+    followed. Run first to go, it's the same: no mesh, and what FreeCAD said kept with gmsh's."""
+    import sys
+    import types
+
+    from print_shop.bench import cae
+
+    binary = tmp_path / "gmsh"
+    binary.write_text("#!/bin/sh\nexit 0\n")
+    binary.chmod(0o755)
+    params = types.SimpleNamespace(GetString=lambda key, default: "3")
+    monkeypatch.setitem(
+        sys.modules, "FreeCAD", types.SimpleNamespace(ParamGet=lambda path: params)
+    )
+
+    def unreadable() -> None:
+        raise RuntimeError("unv: no volumes in file")
+
+    tools = types.SimpleNamespace(
+        prepare=lambda: None, gmsh_bin=str(binary), temp_file_geo="shape.geo",
+        update_properties=unreadable, get_tmp_file_paths=lambda *given: None,
+    )  # fmt: skip
+    assert cae.gmsh(tools, first=True) is False
+    assert tools.returncode == 0
+    assert "Error   : FreeCAD couldn't read gmsh's mesh back: RuntimeError: unv: no volumes" in (
+        tools.said
+    )
+
+
+def _unparted_model(banded: bool, turned: bool = False) -> Any:
+    import types
+
+    from print_shop.bench.assembly import AXES
+
+    assert "z" in AXES
+    parts = [
+        types.SimpleNamespace(name="frame", band="band.step" if banded else None, turn=()),
+        types.SimpleNamespace(name="block", band=None, turn=(("z", 45.0),) if turned else ()),
+        types.SimpleNamespace(name="leg", band=None, turn=()),
+    ]
+    return types.SimpleNamespace(
+        assembly=types.SimpleNamespace(parts=parts),
+        met={frozenset(("frame", "block")): [], frozenset(("block", "leg")): []},
+    )
+
+
+@pytest.mark.parametrize(
+    ("banded", "turned", "empty", "unread"),
+    [
+        (True, False, ["block"], True),
+        (True, False, ["frame"], True),
+        (False, False, ["block"], False),
+        (True, True, ["block"], False),
+        (True, False, ["leg"], False),
+    ],
+)
+def test_two_passes_take_a_mesh_that_doesn_t_part_the_parts_as_unread_only_by_a_band(
+    banded: bool, turned: bool, empty: list[str], unread: bool
+) -> None:
+    """In two passes, a mesh that gives a part no element of its own is the whole unread, for
+    `--parts` to read each band left out, only where it's the leads' doing: each such part is
+    banded or meets a banded part, and none is turned. A turned part's placement
+    (mqucifer/print-shop#334), or faces not found between parts with no band
+    (mqucifer/print-shop#319), stay `NO ANSWER`, as one pass says them."""
+    said = load._Unparted("the mesh gives block no element of its own", empty)
+    found = load._Model._unparted_read(_unparted_model(banded, turned), said)
+    if unread:
+        assert isinstance(found, load._Unread) and not found.memory
+        assert str(found) == str(said)
+    else:
+        assert found is said
+
+
+def test_a_lift_s_band_bound_says_which_joints_statics_fixes_and_no_other_share_is_one(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The cold review: a joint's and its bolts' share is the full weight's only where statics
+    fixes it, everything beyond it hanging from it alone; in a loop of two ways, taking a band's
+    stiffness out moves load between them, and a joint can carry less. So the reply names the
+    joints statics fixes, and says every other share can be more or less, and isn't a bound."""
+    monkeypatch.setenv(load_parts.TIMEOUT, str(host.TWO_PASSES))
+    calls: list[dict[str, Any]] = []
+    met = load._Unread("met", "the whole met the container's memory", memory=True)
+    _two_passes_then(monkeypatch, calls, met)
+    read = load._run
+
+    def with_joints(args: Any, report: Report, without_bands: bool = False, **given: Any) -> None:
+        read(args, report, without_bands, **given)
+        report.numbers["joints"] = {
+            "frame+block": {"force_n": [0, 0, 1.0], "statics_force_n": [0, 0, 1.0]},
+            "frame+arm": {"force_n": [0, 0, 0.4]},
+            "arm+block": {"force_n": [0, 0, 0.4]},
+        }
+
+    monkeypatch.setattr(load, "_run", with_joints)
+    report = Report("load", ["glass.json"])
+    load.run(_parts_args(_banded(tmp_path), lift="block"), report)
+    lower = report.numbers["lower_bound"]
+    assert lower["statics_fixed"] == ["frame+block"]
+    assert lower["shares_not_bound"] == ["arm+block", "frame+arm"]
+    fact = report.facts[0]
+    assert "Statics fixes frame+block: each carries the load beyond it" in fact
+    assert "arm+block and frame+arm can carry more or less than with the band in" in fact
+    assert "each joint's and bolt's share of the load, are upper bounds" not in load.LIFT_BOUND
+
+
+def test_gmsh_s_files_for_the_joined_parts_are_written_on_disk_not_in_the_container_s_memory(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A design run's assembly on mqucifer/print-shop#376: two passes were killed at the
+    straight-sided mesh's start, the container's /tmp, which is its memory, holding gmsh's
+    input. A file there is no process's, so the kernel stopped `load`. Now gmsh's files are
+    written in a folder of their own on /work's disk (`cae.scratch`), and FreeCAD is told it as
+    gmsh's own folder; off the container, where there's no /work, in the system's temporary
+    folder as before. And each part of the mesh is a step of its own, so a trace says which held
+    what."""
+    import sys
+    import types
+
+    from print_shop.bench import cae, progress
+
+    disk = tmp_path / "work"
+    disk.mkdir()
+    monkeypatch.setattr(cae, "DISK", disk)
+    folder = Path(cae.scratch("gmsh-"))
+    assert folder.parent == disk / cae.SCRATCH and folder.name.startswith("gmsh-")
+    monkeypatch.setattr(cae, "DISK", tmp_path / "none")
+    assert Path(cae.scratch("load-")).parent == Path(__import__("tempfile").gettempdir())
+    monkeypatch.setattr(cae, "DISK", disk)
+    binary = tmp_path / "gmsh"
+    binary.write_text("#!/bin/sh\nexit 0\n")
+    binary.chmod(0o755)
+    params = types.SimpleNamespace(GetString=lambda key, default: "3")
+    monkeypatch.setitem(
+        sys.modules, "FreeCAD", types.SimpleNamespace(ParamGet=lambda path: params)
+    )
+    asked: list[tuple[Any, ...]] = []
+    steps: list[str] = []
+    monkeypatch.setattr(
+        progress, "_say", lambda kind, text: steps.append(text) if kind == host.STEP_LINE else None
+    )
+    tools = types.SimpleNamespace(
+        gmsh_bin=str(binary), temp_file_geo="shape.geo", update_properties=lambda: None,
+        get_tmp_file_paths=lambda *given: asked.append(given),
+    )  # fmt: skip
+    tools.prepare = lambda: tools.get_tmp_file_paths()
+    assert cae.gmsh(tools, first=True) is True
+    assert len(asked) == 1 and Path(asked[0][0]).parent == disk / cae.SCRATCH
+    assert asked[0][1] is True, "FreeCAD makes it where it isn't"
+    assert [t for t in steps if not t.startswith("between")][:3] == [
+        "writing gmsh's input, the joined parts' shape, on disk",
+        "gmsh meshing the joined parts, first to go",
+        "reading gmsh's mesh back",
+    ]
+
+
+def test_a_killed_command_s_scratch_folders_go_at_the_next_load_s_start_and_only_they(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The scratch folder is in a run's own work folder (the operator's guards): a dot-folder,
+    each command's own folders removed at its end, and at a load's start only folders its own
+    kinds name and older than `STALE`, a killed command's. A younger one may be a running
+    command's, and anything else there isn't the bench's."""
+    import os
+
+    from print_shop.bench import cae
+
+    monkeypatch.setattr(cae, "DISK", tmp_path)
+    monkeypatch.setattr(cae, "_own", [])
+    assert cae.SCRATCH.startswith(".")
+    root = tmp_path / cae.SCRATCH
+    root.mkdir()
+    now = 1e9
+    for name, age in (("gmsh-old", cae.STALE + 60), ("load-old", cae.STALE + 60),
+                      ("gmsh-young", 60), ("theirs", cae.STALE + 60)):  # fmt: skip
+        (root / name).mkdir()
+        (root / name / "f").write_text("x")
+        os.utime(root / name, (now - age, now - age))
+    cae.clear_stale(now)
+    assert sorted(p.name for p in root.iterdir()) == ["gmsh-young", "theirs"]
+    mine = Path(cae.scratch("gmsh-"))
+    (mine / "shape.brep").write_text("x")
+    cae.clear_own()
+    assert not mine.exists() and root.exists(), "the others' are left, and so is the folder"
+    for name in ("gmsh-young", "theirs"):
+        __import__("shutil").rmtree(root / name)
+    cae.scratch("load-")
+    cae.clear_own()
+    assert not root.exists(), "an empty scratch folder goes too"

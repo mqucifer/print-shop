@@ -2566,7 +2566,7 @@ def test_parts_where_two_passes_meet_the_memory_meshing_reads_a_glass_band_s_bou
     (`cae_cases/mesh_memory_forced.py`). The container is left standing, as gmsh is the first
     to go, the whole is unread for its memory, and the frame is read with its band left out, as
     the one pass's two passes are followed. Under the weight it's a lower bound; lifted, the
-    band's weight is kept, and the movement and each joint's share are upper bounds."""
+    band's weight is kept, and the movement taken together is an upper bound."""
     args = ["load", f"{small_glass.name}/joined.json", *_case(case, BANDS_AT), "--parts"]
     forced = _forced(cae, "mesh_memory_forced.py", args, timeout=host.TWO_PASSES)
     assert forced["verdict"] == "OK", forced["text"]
@@ -2590,7 +2590,7 @@ def test_parts_where_two_passes_meet_the_memory_meshing_reads_a_glass_band_s_bou
         "read as a bound, frame with its glass band's stiffness left out and its weight kept, "
         "the band unread: "
     ), forced["why"]
-    assert "are upper bounds under the full weight" in forced["text"]
+    assert "is an upper bound under the full weight" in forced["text"]
     assert lower["weight_kept_g"]["frame"] > 0
 
 
@@ -2660,10 +2660,16 @@ def test_a_lift_on_a_glass_frame_without_its_band_keeps_its_weight_and_strains_n
     frame_whole = next(one for one in read["loads"] if one["part"] == "frame")
     assert frame["grams"] == pytest.approx(frame_whole["grams"], rel=1e-6)
     assert frame["band_mm2"] > 0 and 0 < frame["band_grams"] < frame["grams"]
-    # The joint carries the weight below it, by statics, and its bolts no less.
+    # Statics fixes the one joint, everything beyond it hanging from it alone: it carries the
+    # full weight's load, as whole, and each of its bolts the same share of it.
+    assert lower["statics_fixed"] == ["frame+block"] and lower["shares_not_bound"] == []
     joint, joint_whole = kept["joints"]["frame+block"], read["joints"]["frame+block"]
     assert np.allclose(joint["force_n"], joint_whole["force_n"], atol=1e-3 * read["force_n"])
-    assert joint["bolt_pull_n"] >= joint_whole["bolt_pull_n"]
+    bolts = [b["pull_n"] for b in joint["bolts"]]
+    bolts_whole = [b["pull_n"] for b in joint_whole["bolts"]]
+    assert len(bolts) == len(bolts_whole) == 3
+    for one, other in zip(bolts, bolts_whole, strict=True):
+        assert one == pytest.approx(other, rel=0.01), (bolts, bolts_whole)
     # Further along the way it hangs, at its middle and at the most.
     assert frame["moves_mm"] > frame_whole["moves_mm"]
     assert kept["most_moves_mm"] > read["most_moves_mm"]
@@ -2672,3 +2678,39 @@ def test_a_lift_on_a_glass_frame_without_its_band_keeps_its_weight_and_strains_n
         assert kept["parts"]["frame"][key] > rest[key], key
     # Read whole, the frame's worst is in its band, unread here.
     assert read["parts"]["frame"]["across_layers_pct"] > rest["across_layers_pct"]
+
+
+@pytest.mark.assembly
+@pytest.mark.bands
+def test_a_lift_on_a_banded_frame_hung_two_ways_says_no_share_in_the_loop_is_a_bound(
+    cae: Any,
+) -> None:
+    """The operator's review of mqucifer/print-shop#376: a banded frame hung from a lifted
+    block two ways at once, directly and through a post and an arm (`cae_cases/band_loop.py`).
+    Statics fixes none of its joints. Read whole, and with the band's stiffness left out and its
+    weight kept (`band_forced.py`): the same weight hangs, but taking the band's stiffness out
+    moves load between the two ways, and a joint carries less than whole. So the reply names
+    every joint in the loop as one whose share can be more or less, and calls none a bound."""
+    shutil.copy(CASES / "band_loop.py", cae.work / "band_loop.py")
+    made = host.run(["band_loop.py", "loop"], cae.work, python=True, image=host.CAE_IMAGE)
+    assert made.returncode == 0, made.stdout + made.stderr
+    args = ["load", "loop/loop.json", "--lift", "block"]
+    whole = cae(*args)
+    assert whole.verdict == "UNREAD", whole.text  # bonded: what's read is each joint's force
+    assert "lower_bound" not in whole.numbers
+    without = _forced(cae, "band_forced.py", args)
+    assert without["verdict"] == "UNREAD", without["text"]
+    kept, read = without["numbers"], whole.numbers
+    lower = kept["lower_bound"]
+    names = ["arm+block", "frame+block", "post+arm", "post+frame"]
+    assert lower["statics_fixed"] == [] and lower["shares_not_bound"] == names
+    assert all("statics_force_n" not in read["joints"][n] for n in names)
+    assert "can carry more or less than with the band in" in without["text"]
+    assert kept["force_n"] == pytest.approx(read["force_n"], rel=1e-6), "every gram hangs"
+    change = {
+        n: float(np.linalg.norm(kept["joints"][n]["force_n"]))
+        - float(np.linalg.norm(read["joints"][n]["force_n"]))
+        for n in names
+    }
+    # A joint in the loop carries less without the band: so a share there isn't a bound.
+    assert min(change.values()) < -0.01 * read["force_n"], change

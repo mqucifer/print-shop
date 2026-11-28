@@ -116,7 +116,6 @@ import os
 import re
 import subprocess
 import sys
-import tempfile
 import time
 from collections.abc import Iterator
 from pathlib import Path
@@ -126,6 +125,7 @@ import numpy as np
 
 from . import (
     as_printed,
+    cae,
     close_faces,
     dovetail,
     infill,
@@ -981,13 +981,12 @@ class _Model:
             corners = np.array([[row[n] for n in fem.getElementNodes(e)[:4]] for e in fem.Volumes])
             try:
                 self._owned(corners, row, np.array([self.nodes[n] for n in order]))
-            except NoAnswer as unparted:
-                # The whole unread, as two passes read it: `load --parts` then reads each glass
-                # band left out, as the one pass does after two passes (mqucifer/print-shop#375).
-                raise _Unread(str(unparted)) from unparted
+            except _Unparted as unparted:
+                raise self._unparted_read(unparted) from unparted
         fea = ccxtools.FemToolsCcx(analysis, solver)
         fea.update_objects()
-        fea.setup_working_dir(tempfile.mkdtemp(prefix="load-"))
+        # On disk, where /tmp is the container's memory (`cae.scratch`, mqucifer/print-shop#376).
+        fea.setup_working_dir(cae.scratch("load-"))
         fea.setup_ccx()
         wrong = self._prerequisites(fea.check_prerequisites())
         if wrong:
@@ -1043,6 +1042,24 @@ class _Model:
             self.printed = _printed(os.path.splitext(fea.inp_file_name)[0] + ".dat", self.row)
         tidy_solve(fea)
         self._balance()
+
+    def _unparted_read(self, unparted: _Unparted) -> NoAnswer:
+        """What two passes say of a mesh that gives parts no element of their own: the whole
+        unread, for `load --parts` to read each glass band left out as the one pass's two
+        passes do (mqucifer/print-shop#375), only where it's the leads' doing, each such part
+        banded or meeting a banded part, and none of them turned. A turned part's placement
+        (mqucifer/print-shop#334), or the faces two parts with no band meet by not found on the
+        mesh (mqucifer/print-shop#319), is said as it is, as one pass says it (the operator's
+        review)."""
+        parts = {p.name: p for p in self.assembly.parts}
+        banded = {name for name, p in parts.items() if p.band is not None}
+        by_band = all(
+            name in banded or any(name in pair and pair & banded for pair in self.met)
+            for name in unparted.empty
+        )
+        if by_band and not any(parts[name].turn for name in unparted.empty):
+            return _Unread(str(unparted))
+        return unparted
 
     def _mesh_met(self, mesh: Any, kills: int | None) -> None:
         """Where gmsh made no mesh and the kernel stopped a process in the container for memory
@@ -1685,11 +1702,12 @@ class _Model:
                 for p in parts
                 if p.name in empty and p.turn
             )
-            raise NoAnswer(
+            raise _Unparted(
                 f"the mesh gives {', '.join(empty)} no element of its own, at a mesh of at most "
                 f"{self.size:g} mm{STRAIGHT if self.straight else ''}: the mesh's triangles on "
                 f"the faces where it meets {', '.join(meets) or 'the other parts'} weren't "
-                f"found, so it isn't parted from them, and nothing of it is read{turned}"
+                f"found, so it isn't parted from them, and nothing of it is read{turned}",
+                empty,
             )
         return owned
 
@@ -2408,6 +2426,15 @@ class _Unread(NoAnswer):
         self.memory = memory
 
 
+class _Unparted(NoAnswer):
+    """A mesh that gives parts no element of their own (mqucifer/print-shop#319): `empty`, their
+    names."""
+
+    def __init__(self, said: str, empty: list[str]) -> None:
+        super().__init__(said)
+        self.empty = empty
+
+
 class _Slow(_Unread):
     """The one pass wouldn't end inside the container's time, where two passes, under the hour
     the host offered, can read the assembly (mqucifer/print-shop#331). `whole` is how long the
@@ -2826,9 +2853,12 @@ def run(args: Any, report: Report) -> None:
     # The container's memory said as it goes, for the host to say where it was killed
     # (mqucifer/print-shop#336).
     progress.watch()
+    # A killed command's mesh and solve files, left on disk, go (mqucifer/print-shop#376).
+    cae.clear_stale()
     try:
         _read(args, report)
     finally:
+        cae.clear_own()
         _clock["now"] = None
         _joined.clear()
         _kept.clear()
@@ -2978,10 +3008,12 @@ def _band_read(
     be read (mqucifer/print-shop#295), `why`, said first, with `done`, what was tried. The read
     has the container's time left: where that's less than `tried`, what the band's read is
     taken to take, s, it says so. Under a weight it's a lower bound (`BOUND`). Lifted, each band's
-    weight is kept, hung from where it met its part (`_Model._band_weight`), and the movement and
-    each joint's and bolt's share are upper bounds, never a part's strain (`LIFT_BOUND`,
-    mqucifer/print-shop#375). Either way the verdict's line says the band is unread. `tried_s`
-    is what's said the try took, `tried` unless given."""
+    weight is kept, hung from where it met its part (`_Model._band_weight`), the movement taken
+    together is an upper bound, never a part's strain (`LIFT_BOUND`, mqucifer/print-shop#375),
+    and a joint's and its bolts' share is the full weight's only where statics fixes it: every
+    other share is said not to be a bound (the operator's review). Either way the verdict's
+    line says the band is unread. `tried_s` is what's said the try took, `tried` unless
+    given."""
     report.again()
     from . import load_parts
 
@@ -2994,13 +3026,30 @@ def _band_read(
     _run(args, report, without_bands=True)
     names = ", ".join(banded)
     lifted = args.lift is not None
+    joints = report.numbers.get("joints", {})
+    fixed = sorted(n for n, j in joints.items() if "statics_force_n" in j)
+    loose = sorted(n for n, j in joints.items() if "statics_force_n" not in j)
     if lifted:
         report.facts.insert(
             0,
             f"read as a bound: {names} read with its glass band's stiffness left out and its "
             "weight kept, the leads and lips its `band` names hung from the faces where they "
             f"met the rest of it, as the whole couldn't be read: {why}. The band's stiffness is "
-            f"never made up, and the band itself is unread. {LIFT_BOUND}",
+            f"never made up, and the band itself is unread. {LIFT_BOUND}"
+            + (
+                f". Statics fixes {', '.join(fixed)}: each carries the load beyond it, which "
+                "hangs from it alone, the full weight's as with the band in, and so its bolts "
+                "share the same"
+                if fixed
+                else ""
+            )
+            + (
+                f". {' and '.join(loose)} can carry more or less than with the band in, as the "
+                "band's stiffness moves load between the ways it goes round a loop, and so can "
+                "their bolts: no share of theirs is a bound"
+                if loose
+                else ""
+            ),
         )
         report.why = (
             f"read as a bound, {names} with its glass band's stiffness left out and its weight "
@@ -3025,14 +3074,17 @@ def _band_read(
         # How long the try took, and the band's read (mqucifer/print-shop#301).
         "tried_s": round(tried if tried_s is None else tried_s, 1),
         "band_s": round(time.time() - band_began, 1),
-        # Lifted, each band's weight kept, in g (mqucifer/print-shop#375).
+        # Lifted, each band's weight kept, in g (mqucifer/print-shop#375), and the joints whose
+        # load statics fixes, and those whose share isn't a bound (the operator's review).
         **(
             {
                 "weight_kept_g": {
                     one["part"]: one["band_grams"]
                     for one in report.numbers.get("loads", [])
                     if "band_grams" in one
-                }
+                },
+                "statics_fixed": fixed,
+                "shares_not_bound": loose,
             }
             if lifted
             else {}
@@ -3050,11 +3102,11 @@ BOUND = (
 #: And lifted, with each band's weight kept (mqucifer/print-shop#375).
 LIFT_BOUND = (
     "Lifted, every part hangs by its whole weight still, the band's in it, with less of the "
-    "part to carry it: how far each part moves, and each joint's and bolt's share of the load, "
-    "are upper bounds under the full weight, the safe side. Each part's strain isn't one: a "
-    "banded part's is read on the rest of it alone, and its band, where its worst may be, is "
-    "unread; and any part's, at a corner where parts meet, reads by the mesh there, which "
-    "differs with the band left out"
+    "part to carry it: how far what hangs moves along its weight, taken together, is an upper "
+    "bound under the full weight, the safe side. Each part's strain isn't one: a banded part's "
+    "is read on the rest of it alone, and its band, where its worst may be, is unread; and any "
+    "part's, at a corner where parts meet, reads by the mesh there, which differs with the band "
+    "left out"
 )
 
 
