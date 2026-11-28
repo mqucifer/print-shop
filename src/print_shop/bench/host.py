@@ -34,13 +34,14 @@ TMP_SIZE = "1g"
 #: The disk limit, in GB: the image at its largest, and the free space never to go under.
 IMAGE_LIMIT_GB = 4.0
 FLOOR_GB = 5.0
-#: The second image: FreeCAD 1.1.3, gmsh and CalculiX from conda-forge, each package by its
-#: name, version, build and MD5 in `cae-image/lock-*.txt`. To make the lists again, in any
-#: micromamba container with a network: `micromamba create -p /tmp/x --platform linux-aarch64 -c
-#: conda-forge --override-channels freecad=1.1.3 calculix=2.23 gmsh=4.15.2 --dry-run --json`,
-#: and from each `actions.LINK` entry in order, its `subdir`, `name`, `v` and its `version`,
-#: `build`, the file type its `fn` ends in, and `md5`; `linux-64` for CI.
-CAE_IMAGE = "print-shop/cae:0.2"
+#: The second image: FreeCAD 1.1.3, gmsh, CalculiX and Shapely (GEOS) from conda-forge, each
+#: package by its name, version, build and MD5 in `cae-image/lock-*.txt`. To make the lists
+#: again, in any micromamba container with a network: `micromamba create -p /tmp/x --platform
+#: linux-aarch64 -c conda-forge --override-channels freecad=1.1.3 calculix=2.23 gmsh=4.15.2
+#: --dry-run --json`, and from each `actions.LINK` entry in order, its `subdir`, `name`, `v` and
+#: its `version`, `build`, the file type its `fn` ends in, and `md5`; `linux-64` for CI. Shapely
+#: 2.2.0 and GEOS 3.14.1 were added to both by hand (mqucifer/print-shop#363).
+CAE_IMAGE = "print-shop/cae:0.3"
 CAE_LIMIT_GB = 4.0
 #: The commands that run in it. Every other runs in `IMAGE`.
 CAE_COMMANDS = ("fit-on", "bend", "load", "optimise")

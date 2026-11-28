@@ -321,6 +321,15 @@ def layer(points: np.ndarray, rows: np.ndarray, normals: np.ndarray, depth: np.n
         inverted += int(turned.sum())
         keep[mine[bad]] = False
     assert built is not None
+    if bad.any():
+        # Its last round's that still don't stand: left out, and counted.
+        good = ~bad
+        outside += int((leaves & ~turned).sum())
+        inverted += int(turned.sum())
+        built.wedges, built.places = built.wedges[good], built.places[good]
+        built.cells, built.depth = built.cells[good], built.depth[good]
+        built.middles, built.normals = built.middles[good], built.normals[good]
+        built.reach = built.reach[good]
     built.triangles = len(rows)
     built.thin = int((~over_core).sum())
     built.outside, built.inverted = outside, inverted

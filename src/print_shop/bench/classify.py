@@ -35,7 +35,7 @@ from typing import Any
 
 import numpy as np
 
-from . import as_printed
+from . import as_printed, slices
 from .printed import Cylinder, Layers, Mesh, Printed, Region, Settings
 from .report import NoAnswer
 
@@ -117,7 +117,9 @@ class Layered:
     #: Each layer's sparse area by the sections it's read from (`sparse`), and each section's
     #: profile (`profile`).
     _same: dict[tuple[Any, ...], list[np.ndarray] | None] = field(default_factory=dict)
-    _profiles: dict[tuple[Any, ...], tuple[Any, ...]] = field(default_factory=dict)
+    _mesh: slices.Mesh | None = None
+    _held_sections: dict[int, Any] = field(default_factory=dict)
+    _islands: tuple[tuple[slices.Mesh, float], ...] | None = None
 
     def __post_init__(self) -> None:
         settings = self.printed.settings
@@ -248,58 +250,74 @@ class Layered:
         at = self.low + (layer + 0.5) * self.height
         walls, top, bottom = self._key(cell)
         # A layer's sparse area is its section's, less what its shells take, by its sections
-        # `top` above and `bottom` below (`as_printed.layer_core`), and less its islands': where
-        # each of those is the same as a layer already read, so is its sparse area, as on a
-        # part that's prismatic between its features, read once (`profile`).
+        # `top` above and `bottom` below, and less its islands': where each of those is the same
+        # as a layer already read, so is its sparse area, as on a part that's prismatic between
+        # its features, read once (`profile`).
+        islands = self.islands()
         shape = (self._key(cell), self.profile(at), self.profile(at + top * self.up),
                  self.profile(at - bottom * self.up),
-                 tuple(self.profile(at, solid) for region, solid in self.regions
-                       if region.settings.walls is not None
-                       and not isinstance(region.shape, Layers)))  # fmt: skip
+                 tuple(slices.profile(mesh, at) for mesh, _ in islands))  # fmt: skip
         if shape in self._same:
             self._sparse[key] = self._same[shape]
             if self._same[shape] is None:
                 self.unread.add(layer)
             return self._same[shape]
         try:
-            found = as_printed.layer_core(
-                self.part, self.layers, at, walls, top, bottom, self.up,
+            # From the part's mesh as Orca slices it, by GEOS (`slices.layer_rings`).
+            rings: list[np.ndarray] | None = slices.layer_rings(
+                self.mesh(), at, walls, top, bottom, self.up,
                 as_printed.open_radius(self.line, self.height),
                 as_printed.MARGIN * as_printed.wall_thickness(1, self.line, self.height),
-            )  # fmt: skip
-            faces = [] if found is None or found[0] is None else list(found[0].Faces)
-            if faces:
-                faces = self._less_islands(faces, at)
-        except Exception:  # noqa: BLE001 - a layer OCCT can't read is read from its neighbour's
+                islands)  # fmt: skip
+        except Exception:  # noqa: BLE001 - a layer GEOS can't read is read from its neighbour's
             self.unread.add(layer)
-            self._sparse[key] = None
-            return None
-        first, second = (a for a in range(3) if a != self.layers)
-        rings = _rings(faces, first, second)
+            rings = None
         self._sparse[key] = rings
         self._same[shape] = rings
         return rings
 
-    def profile(self, at: float, shape: Any = None) -> tuple[Any, ...]:
-        """The part's section at `at` along its layers, or `shape`'s, as what tells it from
-        another: each of its wires' length and box, to a micrometre. Two the same are one
-        section, the one moved along the layers; none, an empty tuple."""
-        solid = self.part if shape is None else shape
-        cache = (id(solid), round(at, 9))
-        if cache not in self._profiles:
-            # From its section as `as_printed` makes it, once for each height.
-            section = as_printed._section(solid, self.layers, float(at))
-            wires = [] if section is None else list(section.Wires)
-            first, second = (a for a in range(3) if a != self.layers)
-            found = []
-            for wire in wires:
-                box = wire.BoundBox
-                low = (box.XMin, box.YMin, box.ZMin)
-                high = (box.XMax, box.YMax, box.ZMax)
-                found.append((round(wire.Length, 6), round(low[first], 6), round(low[second], 6),
-                              round(high[first], 6), round(high[second], 6)))  # fmt: skip
-            self._profiles[cache] = tuple(sorted(found))
-        return self._profiles[cache]
+    def mesh(self) -> slices.Mesh:
+        """The part's triangle mesh in its own axes, as Orca slices it (`slices.Mesh.of`)."""
+        if self._mesh is None:
+            self._mesh = slices.Mesh.of(self.part, self.layers)
+        return self._mesh
+
+    def holds(self, points: np.ndarray) -> np.ndarray:
+        """Whether each of `points`, in the part's own axes, is inside the part: inside its
+        section, as Orca slices its mesh, in the layer it's in (`slices.Mesh.section`)."""
+        import shapely
+
+        first, second = (a for a in range(3) if a != self.layers)
+        along = points[:, self.layers]
+        layer = self.layer_of(along)
+        within = (along >= self.low) & (along <= self.high)
+        found = np.zeros(len(points), dtype=bool)
+        for k in np.unique(layer[within]):
+            mine = within & (layer == k)
+            section = self.mesh().section(self.low + (int(k) + 0.5) * self.height)
+            if section.is_empty:
+                continue
+            # On its outline is inside: a wedge's node where a held face meets its neighbour
+            # lies on that face's plane, as no wedge on the held face moves it in.
+            if k not in self._held_sections:
+                self._held_sections[int(k)] = section.buffer(HOLDS_MM)
+            found[mine] = shapely.contains_xy(self._held_sections[int(k)], points[mine, first],
+                                              points[mine, second])  # fmt: skip
+        return found
+
+    def islands(self) -> tuple[tuple[slices.Mesh, float], ...]:
+        """Each island region's mesh, a region with walls of its own but a band of layers, and
+        the ring of walls each side of its faces."""
+        if self._islands is None:
+            self._islands = tuple(
+                (slices.Mesh.of(solid, self.layers), self.ring) for region, solid in self.regions
+                if region.settings.walls is not None and not isinstance(region.shape, Layers))
+        return self._islands
+
+    def profile(self, at: float) -> tuple[Any, ...]:
+        """The part's section at `at` along its layers, as what tells it from another: its
+        area, length and box to a micrometre (`slices.profile`)."""
+        return slices.profile(self.mesh(), at)
 
     def _less_islands(self, faces: list[Any], at: float) -> list[Any]:
         """A layer's sparse area less an island's ring of walls each side of its region's faces
@@ -353,23 +371,10 @@ class Layered:
         more from upright to the layers, its top and bottom shells and a margin either side;
         and of each band of layers' edges."""
         reach = max(1, math.ceil((self.top_most + self.bottom_most) / self.height)) + 2
-        spans: list[tuple[float, float]] = []
         lean = math.sin(math.radians(SHELL_DEGREES))
-        for face in self.part.Faces:
-            u0, u1, v0, v1 = face.ParameterRange
-            steep = False
-            for u in np.linspace(u0, u1, 5):
-                for v in np.linspace(v0, v1, 5):
-                    try:
-                        normal = face.normalAt(float(u), float(v))
-                    except Exception:  # noqa: BLE001 - a face that has no normal there
-                        continue
-                    if abs((normal.x, normal.y, normal.z)[self.layers]) >= lean:
-                        steep = True
-            if steep:
-                box = face.BoundBox
-                spans.append(((box.XMin, box.YMin, box.ZMin)[self.layers],
-                              (box.XMax, box.YMax, box.ZMax)[self.layers]))  # fmt: skip
+        # Each of the mesh's triangles that leans so far, by its span along the layers.
+        spans: list[tuple[float, float]] = [(float(a), float(b))
+                                            for a, b in self.mesh().steep(lean)]  # fmt: skip
         for region, _ in self.regions:
             if isinstance(region.shape, Layers):
                 spans += [(region.shape.low, region.shape.low), (region.shape.high,
@@ -397,6 +402,8 @@ class Layered:
 #: whose section moves with its height, as a bowed leg's, has no two layers alike, and each
 #: layer's OCCT offsets and booleans were most of its reading.
 STRIDE_MM = 1.0
+#: How far outside a layer's section a point is still in it (`Layered.holds`), in mm.
+HOLDS_MM = 1e-4
 #: How far a face leans from upright to the layers before its shells are read layer by layer.
 SHELL_DEGREES = 30.0
 

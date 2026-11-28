@@ -1006,12 +1006,11 @@ class _Model:
             ways, layered.layers, layered.up,
             np.array([of[c].walls_mm for c in cells]), np.array([of[c].top_mm for c in cells]),
             np.array([of[c].bottom_mm for c in cells]))
-        # Inside the part: in one of its own elements, straight-sided, so a point a hair inside
-        # a curved face may read outside it, the safe side, its wedge made shallower.
-        tets = points[wired[:, :4]][:, None]
-
+        # Inside the part: inside its section, as Orca slices its mesh, in the layer it's in
+        # (`Layered.holds`): a curved face's own, not its straight elements' chords, which on a
+        # coarse mesh left a node a hair inside it out, and its wedge made shallower.
         def inside(given: np.ndarray) -> np.ndarray:
-            return wedges.within(np.asarray(given, dtype=float), tets)
+            return layered.holds(to_own(np.asarray(given, dtype=float)))
 
         # Room behind its skin for the skin of the face across from it, and Orca's opening of
         # the core between, or the two faces' wedges would overlap: a web or a fin thinner

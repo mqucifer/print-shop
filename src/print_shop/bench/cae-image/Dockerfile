@@ -7,7 +7,7 @@
 #
 # Every package is conda-forge's, by name, version, build and MD5 (`lock-arm64.txt` on the Mac,
 # `lock-amd64.txt` in CI), so a build installs that list and solves nothing: FreeCAD 1.1.3, CalculiX 2.23, gmsh 4.15.2,
-# OCCT 7.9.3 and Python 3.14 among them. The base is micromamba 2.0.7, by its digest.
+# OCCT 7.9.3, Shapely 2.2.0 with GEOS 3.14.1 and Python 3.14 among them. The base is micromamba 2.0.7, by its digest.
 #
 # Not 2.0.5 or 2.0.6 (mqucifer/print-shop#307): their libcurl, 8.11.1, closes each eventfd of
 # its threaded resolver twice (curl/curl#15725), so the second close can take a descriptor
@@ -31,6 +31,7 @@ RUN { echo @EXPLICIT; sed -n "/^github /!s|^\([a-z0-9-]*\) \([^ ]*\) v\([^ ]*\) 
     && rm -rf /opt/conda/pkgs /opt/conda/include \
     && find /opt/conda/lib -name '*.a' -delete \
     && /opt/conda/bin/python -c "import sys; sys.path.append('/opt/conda/lib'); import FreeCAD, Part, ObjectsFem; print('FreeCAD', '.'.join(FreeCAD.Version()[:3]))" \
+    && /opt/conda/bin/python -c "import shapely; print('shapely', shapely.__version__, shapely.geos_version_string)" \
     && /opt/conda/bin/gmsh --version \
     && { /opt/conda/bin/ccx -v || true; } | grep 'Version 2.23'
 
@@ -63,4 +64,4 @@ ENTRYPOINT []
 CMD ["/opt/conda/bin/python", "-V"]
 # The image's version, as `print_shop.bench.host.CAE_IMAGE` names it. Its code is mounted, not
 # copied in.
-LABEL org.opencontainers.image.version="0.2"
+LABEL org.opencontainers.image.version="0.3"

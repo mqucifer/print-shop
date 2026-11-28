@@ -4,6 +4,9 @@
 # URL from them, so a build installs these and solves nothing. A version is written after a
 # `v`: bare, a four-part one reads as an IP address to `scripts/check_addresses.py`.
 # `host.py` says how the list is made again.
+# geos 3.14.1 and shapely 2.2.0 added by hand on 2026-11-28 for each layer's polygons
+# (mqucifer/print-shop#363), their builds and MD5s from api.anaconda.org's conda-forge files:
+# shapely needs numpy >=1.25, libgcc >=15 and geos 3.14.1, which the solve's list has.
 noarch libboost-headers v1.90.0 h707e725_3 conda 728d99be2ec827372c0eacea4c1baa10
 noarch python_abi v3.14 9_cp314 conda 350d89b50d7de805abf2e63e29dee451
 noarch font-ttf-dejavu-sans-mono v2.37 hab24e00_0 tar.bz2 0c96522c6bdaed4b1566d11387caaf45
@@ -310,6 +313,8 @@ linux-64 vtk v9.6.2 py314hd5da0b9_7 conda 67b5516caaa004295bbb99b8fc1e4de9
 linux-64 smesh v9.9.0.0 hd3a5b64_25 conda f64a57cb0d1edb5c7830f30bdcab524f
 linux-64 pcl v1.15.1 h1259f1f_14 conda e147c64c0a4f74740eb23b5d9cb5731a
 linux-64 freecad v1.1.3 py314h4329733_0 conda 3c463a1ac175ec7adc2af80d1a0277b1
+linux-64 geos v3.14.1 h55b0958_0 conda 5f856b72ca9cd5b5b4a1c43551804622
+linux-64 shapely v2.2.0 py314h472a4e5_1 conda 43858d166a05ae1828d133f6654ed18e
 # BESO (mqucifer/print-shop#286), for `optimise`: fandaL/beso's files at one commit, each by its
 # SHA-256, which the Dockerfile fetches from raw.githubusercontent.com into /opt/beso and checks.
 # A line is `github`, the repository, the commit after a `v`, the file, `sha256` and the sum.

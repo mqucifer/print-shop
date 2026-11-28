@@ -564,3 +564,30 @@ def test_parts_beside_a_printed_one_keep_elements_of_their_own(cae: Any) -> None
         assert pinned.numbers["parts"][f"pin{k}"]["nodes"] > 0, pinned.numbers["parts"]
         assert not pinned.numbers["parts"][f"pin{k}"].get("printed")
     held_to_its_layers(pinned.numbers["printed"]["tile"][0])
+
+
+#: How far each layer's core read from the part's mesh may be from OCCT's on its B-rep: their
+#: edges' mean distance apart, in mm, the mesh's chord being 0.003 mm, and their areas, in %
+#: (mqucifer/print-shop#363).
+SLICED_APART_MM = 0.005
+SLICED_AREA_PCT = 0.1
+
+
+def test_each_layer_read_from_the_mesh_orca_slices_is_the_b_rep_s_within_its_chord(
+    cae: Any,
+) -> None:
+    """The Sponsor's decision (mqucifer/print-shop#363): each layer is read from the triangle
+    mesh Orca slices, at its own 0.003 mm chord and 0.5 rad, by GEOS, not OCCT on the B-rep
+    (`slices`). On the beam, its halves, the tile, chamfered or not, and the bowed bars, at 12
+    of its layers each, its core is OCCT's on the B-rep within `SLICED_APART_MM` of edge and
+    `SLICED_AREA_PCT` of area (`cae_cases/layers_bound.py`)."""
+    work: Path = cae.work
+    shutil.copy(CASES / "layers_bound.py", work / "layers_bound.py")
+    done = host.run(["layers_bound.py"], work, python=True, image=host.CAE_IMAGE)
+    assert done.returncode == 0, done.stdout + done.stderr
+    found = json.loads(done.stdout.strip().splitlines()[-1])
+    assert set(found) >= {"beam", "tile", "tile-chamfered", "bowed", "bowed-up", "bowed-notched"}
+    for name, read in found.items():
+        assert read["layers"] == 12, (name, read)
+        assert read["apart_mm"] <= SLICED_APART_MM, (name, read)
+        assert read["area_pct"] <= SLICED_AREA_PCT, (name, read)

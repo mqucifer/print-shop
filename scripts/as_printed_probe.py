@@ -4,7 +4,10 @@
 Run from the folder the assembly is in, with the words `load` would be given:
 
     uv run python <print-shop>/scripts/as_printed_probe.py ASSEMBLY.json --weight KG --at X,Y,Z
-        [any other of load's words]
+        [any other of load's words] [--limit SECONDS]
+
+`--limit` runs it under that many seconds instead of `load`'s own, as an hour's for a part
+whose whole time is to be known.
 
 It runs `load` as the bench does, in its second image under `load`'s own limits
 (`host.memory_for`, `host.timeout_for`), and says of it only counts, verdicts and seconds:
@@ -103,14 +106,19 @@ def main(argv: list[str]) -> int:
         print(host.missing(host.CAE_IMAGE))
         return 3
     work = Path.cwd()
+    limit = None
+    if "--limit" in argv:
+        given = argv.index("--limit")
+        limit = int(argv[given + 1])
+        argv = argv[:given] + argv[given + 2 :]
     args = ["load", *argv]
     printed = host.reads_printed(args, work)
     print(f"read as printed: {'yes' if printed else 'no'}; limits "
-          f"{host.memory_for(args)} and {host.timeout_for(args)} s", flush=True)
+          f"{host.memory_for(args)} and {limit or host.timeout_for(args)} s", flush=True)
     names = [str(p.get("name")) for p in json.loads((work / argv[0]).read_text()).get("parts", [])]
     began = time.time()
     trace: list[str] = []
-    done = host.run(args, work, trace=trace)
+    done = host.run(args, work, timeout=limit, trace=trace)
     seconds = time.time() - began
     text = done.stdout
     peak = re.search(r"memory\.peak (\d+)", text)
@@ -152,11 +160,19 @@ def main(argv: list[str]) -> int:
     numbers = record.get("numbers", {})
     for name, part in numbers.get("parts", {}).items():
         k = names.index(name) + 1 if name in names else 0
+        if part.get("printed"):
+            print(f"part {k}, skin: across its layers {part.get('across_layers_pct', 0):.3f}% of "
+                  f"{part.get('across_limit_pct')}% ({part.get('coarse_across_layers_pct', 0):.3f}"
+                  f"% on the coarser mesh), stretch {part.get('stretch_pct', 0):.3f}% of "
+                  f"{part.get('stretch_limit_pct', 0):.3g}% "
+                  f"({part.get('coarse_stretch_pct', 0):.3f}% on the coarser mesh)", flush=True)
         for number, core in enumerate(part.get("cores", []), 1):
             print(f"part {k}, core {number}: across its layers "
-                  f"{core.get('across_layers_pct', 0):.3f}% of {core.get('across_limit_pct')}%, "
+                  f"{core.get('across_layers_pct', 0):.3f}% of {core.get('across_limit_pct')}% "
+                  f"({core.get('coarse_across_layers_pct', 0):.3f}% on the coarser mesh), "
                   f"stretch {core.get('stretch_pct', 0):.3f}% of "
-                  f"{core.get('stretch_limit_pct', 0):.3g}%, its cell "
+                  f"{core.get('stretch_limit_pct', 0):.3g}% "
+                  f"({core.get('coarse_stretch_pct', 0):.3f}% on the coarser mesh), its cell "
                   f"{core.get('across_cell_fill')} and {core.get('stretch_cell_fill')} core; "
                   f"at its elements {core.get('at_elements_across_layers_pct', 0):.3f}% and "
                   f"{core.get('at_elements_stretch_pct', 0):.3f}%", flush=True)
