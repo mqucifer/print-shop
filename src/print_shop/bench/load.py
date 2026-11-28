@@ -2565,11 +2565,23 @@ class _Model:
         return ordered
 
     def _skin_read_at(self, places: np.ndarray) -> np.ndarray:
-        """Which of the skin's `places` are read: none within `skin_unread`'s boxes."""
-        kept = np.ones(len(places), dtype=bool)
+        """Which of the skin's `places` are read: none within `skin_unread`'s boxes and a held
+        face's zone at once, each held face's box grown by its zone; all of them where that
+        would leave none, as `skin_kept` takes the first read's there."""
+        if not self.skin_unread:
+            return np.ones(len(places), dtype=bool)
+        zone = max((self.held_mesh() or (0.0, 0.0))[1], HELD_ZONE)
+        near_held = np.zeros(len(places), dtype=bool)
+        for face in [*self.fixed, *sum(self.standing.values(), [])]:
+            box = face.BoundBox
+            low = np.array([box.XMin, box.YMin, box.ZMin]) - zone
+            high = np.array([box.XMax, box.YMax, box.ZMax]) + zone
+            near_held |= np.all((places >= low) & (places <= high), axis=1)
+        boxed = np.zeros(len(places), dtype=bool)
         for middle, half in self.skin_unread:
-            kept &= ~np.all(np.abs(places - middle) <= half, axis=1)
-        return kept
+            boxed |= np.all(np.abs(places - middle) <= half, axis=1)
+        kept = ~(boxed & near_held)
+        return kept if kept.any() else np.ones(len(places), dtype=bool)
 
     def _read_rows(self, part: PartAt, rows: np.ndarray) -> dict[str, Any]:
         """The worst pull across its layers and largest stretch any way, of a part's `rows`."""
@@ -2602,9 +2614,6 @@ class _Model:
                 at.append(where.reshape(-1, 3))
             places, tensors = np.concatenate(at), np.concatenate(strain)
             kept = self._skin_read_at(places)
-            if not kept.any():
-                raise NoAnswer(f"the part {part.name}'s skin is all in held faces' zones meshed "
-                               "finer, and none of it is read")
             found = self._read_tensors(part, tensors[kept], places[kept])
             found["nodes"] = len(np.unique(wired))
             read.append(found)

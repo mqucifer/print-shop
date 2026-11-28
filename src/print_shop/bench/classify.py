@@ -1138,6 +1138,23 @@ def stands_for(leans: np.ndarray, layer: int, read: int, height: float) -> bool:
     return moved < STRIDE_MOVE_MM
 
 
+#: How many places, by their weights, a core's window must hold for a line to be fitted in it
+#: (`element_averaged`): three times a line in three ways' four figures.
+FIT_PLACES = 12
+#: And how far past its window's own largest strain a read may go, by its norm: a linear field
+#: read at its edge goes a little past its nearest place, no further.
+FIT_BEYOND = 1.2
+
+
+def _bounded(strain: np.ndarray, largest: np.ndarray) -> np.ndarray:
+    """Each of `strain` scaled down, where its norm is past `FIT_BEYOND` of its window's own
+    `largest`, to that: a fit never makes a strain its places don't have."""
+    norm = np.sqrt((strain**2).sum(axis=(1, 2)))
+    cap = FIT_BEYOND * largest
+    scale = np.where(norm > cap, cap / np.maximum(norm, 1e-300), 1.0)
+    return strain * scale[:, None, None]
+
+
 def element_averaged(middles: np.ndarray, strains: np.ndarray, weights: np.ndarray,
                      cell: float, up: int | None = None,
                      core_at: Callable[[np.ndarray], np.ndarray] | None = None,
@@ -1197,6 +1214,8 @@ def element_averaged(middles: np.ndarray, strains: np.ndarray, weights: np.ndarr
     gram = np.zeros((n, 4, 4))
     right = np.zeros((n, 4, 9))
     squares = np.zeros(n)
+    weight_squares = np.zeros(n)
+    largest = np.zeros(n)
     per_voxel = max(1, int(np.bincount(flat).max()))
     chunk = max(1, 2_000_000 // (27 * per_voxel))
     for start in range(0, n, chunk):
@@ -1206,6 +1225,8 @@ def element_averaged(middles: np.ndarray, strains: np.ndarray, weights: np.ndarr
             basis = np.concatenate([np.ones((len(w), 1)), where[theirs] - where[mine]], axis=1)
             values = strain[theirs].reshape(-1, 9)
             squares += np.bincount(mine, weights=w * (values**2).sum(axis=1), minlength=n)
+            weight_squares += np.bincount(mine, weights=w * w, minlength=n)
+            np.maximum.at(largest, mine, np.sqrt((values**2).sum(axis=1)))
             for i in range(4):
                 for j in range(i, 4):
                     gram[:, i, j] += np.bincount(mine, weights=w * basis[:, i] * basis[:, j],
@@ -1220,8 +1241,13 @@ def element_averaged(middles: np.ndarray, strains: np.ndarray, weights: np.ndarr
     total = np.maximum(summed, 1e-300)
     mean = gram[:, 0, 1:] / total[:, None]
     variance = np.diagonal(gram, axis1=1, axis2=2)[:, 1:] / total[:, None] - mean**2
-    # A way the places don't spread along, by more than a layer's step or a hair, has no slope.
-    flat_way = variance <= max(step, 1e-6) ** 2
+    # A way the places don't spread along, by a tenth of the window, has no slope: a line
+    # through a few places barely apart explains them, and read half a window off, runs away.
+    flat_way = variance <= (np.asarray(size) / 10) ** 2
+    # Nor one with too few places to fit a line in three ways from: `FIT_PLACES`, by their
+    # weights, (Σw)²/Σw², as a line through a few explains them however it's tilted.
+    few = summed**2 < FIT_PLACES * np.maximum(weight_squares, 1e-300)
+    flat_way |= few[:, None]
     for k in range(3):
         rows = np.flatnonzero(flat_way[:, k])
         gram[rows, k + 1, :] = 0.0
@@ -1238,7 +1264,7 @@ def element_averaged(middles: np.ndarray, strains: np.ndarray, weights: np.ndarr
         left <= (1 - FIT_HOLDS) * np.maximum(spread_of, 1e-300))
     fit[~holds, 0, :] = average[~holds]
     fit[~holds, 1:, :] = 0.0
-    at_place = fit[:, 0, :].reshape(n, 3, 3)
+    at_place = _bounded(fit[:, 0, :].reshape(n, 3, 3), largest)
     slopes = fit[:, 1:, :].reshape(n, 3, 3, 3)
     fill = summed / float(np.prod(size))
     strains_at, places, rows_at, fills = [at_place], [where], [np.arange(n)], [fill]
@@ -1247,9 +1273,13 @@ def element_averaged(middles: np.ndarray, strains: np.ndarray, weights: np.ndarr
             own_step = step if axis == up and step > 0 else cell / 8
             for way in (1.0, -1.0):
                 edge = _edge_of(where, axis, core_at, own_step, float(size[axis]) / 2, way)
-                near = np.flatnonzero(np.isfinite(edge))
-                strains_at.append(at_place[near] + edge[near][:, None, None]
-                                  * slopes[near, axis])  # fmt: skip
+                # Read at an edge from a place within twice its window's spread of it there,
+                # never further: the place nearest the edge reads it.
+                spread_at = np.sqrt(np.maximum(variance[:, axis], 0.0))
+                near = np.flatnonzero(np.isfinite(edge) & ~flat_way[:, axis]
+                                      & (np.abs(edge) <= 2 * spread_at))  # fmt: skip
+                strains_at.append(_bounded(at_place[near] + edge[near][:, None, None]
+                                           * slopes[near, axis], largest[near]))  # fmt: skip
                 moved = where[near].copy()
                 moved[:, axis] += edge[near]
                 places.append(moved)
