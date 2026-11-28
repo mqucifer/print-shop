@@ -341,32 +341,25 @@ def volumes(places: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
     return volume, places.mean(axis=1)
 
 
-def covered(points: np.ndarray, centres: np.ndarray, skin: Layer) -> np.ndarray:
-    """Which of elements' `points`, `[element, point, 3]`, lie in a wedge of `skin`: in one of
-    its straight-sided prism's three tetrahedra, its outer face moved out past any bulge of a
-    curved face. Each point is tried against the wedges whose prisms reach the voxel it's in,
-    the voxels about two wedges across, so a large element's points each find their own.
-    `centres` is kept for the caller's sake."""
-    found = np.zeros(points.shape[:2], dtype=bool)
-    if not len(skin.middles) or not len(points):
-        return found
-    corners = skin.places[:, :6].copy()
-    # Its outer corners moved out by its depth: a curved face bulges past its chord, and the
-    # skin between is the wedge's too. Nothing of the part lies out past its own face.
-    corners[:, :3] += (skin.depth[:, None] * skin.normals)[:, None, :]
-    tets = np.stack([corners[:, list(t)] for t in _PRISM], axis=1)  # [W, 3, 4, 3]
-    edges = (tets[:, :, 1:] - tets[:, :, :1]).transpose(0, 1, 3, 2)  # [W, 3, 3, 3]
+def within(queries: np.ndarray, tets: np.ndarray) -> np.ndarray:
+    """Which of `queries`, `[n, 3]`, lie in any of `tets`, `[shape, tetrahedron, 4, 3]`: each
+    shape's straight-sided tetrahedra, each query tried against the shapes whose boxes reach
+    the voxel it's in, the voxels about two shapes across."""
+    hit = np.zeros(len(queries), dtype=bool)
+    if not len(tets) or not len(queries):
+        return hit
+    edges = (tets[:, :, 1:] - tets[:, :, :1]).transpose(0, 1, 3, 2)
     singular = np.abs(np.linalg.det(edges)) < 1e-12
     inverse = np.linalg.inv(np.where(singular[..., None, None], np.eye(3), edges))
-    low, high = corners.min(axis=1), corners.max(axis=1)
-    size = 2 * float(np.median((high - low).max(axis=1)))
+    flat = tets.reshape(len(tets), -1, 3)
+    low, high = flat.min(axis=1), flat.max(axis=1)
+    size = max(2 * float(np.median((high - low).max(axis=1))), 1e-6)
     origin = low.min(axis=0)
     shape = np.floor((high.max(axis=0) - origin) / size).astype(int) + 1
     first = np.floor((low - origin) / size).astype(int)
     last = np.floor((high - origin) / size).astype(int)
-    # Each voxel's wedges, as (voxel, wedge) pairs sorted by voxel.
     pairs = []
-    for w in range(len(corners)):
+    for w in range(len(tets)):
         span = [np.arange(first[w, a], last[w, a] + 1) for a in range(3)]
         cells = np.stack(np.meshgrid(*span, indexing="ij"), axis=-1).reshape(-1, 3)
         pairs.append(np.column_stack([np.ravel_multi_index(cells.T, shape),
@@ -379,25 +372,37 @@ def covered(points: np.ndarray, centres: np.ndarray, skin: Layer) -> np.ndarray:
     for k in range(most):
         has = counts > k
         table[has, k] = pair[starts[has] + k, 1]
-    flat = points.reshape(-1, 3)
-    hit = np.zeros(len(flat), dtype=bool)
-    for start in range(0, len(flat), 4096):
-        some = flat[start : start + 4096]
+    step = max(1, 2_000_000 // max(1, most * tets.shape[1] * 9))
+    for start in range(0, len(queries), step):
+        some = queries[start : start + step]
         at = np.floor((some - origin) / size).astype(int)
-        inside_box = np.all((at >= 0) & (at < shape), axis=1)
+        in_box = np.all((at >= 0) & (at < shape), axis=1)
         key = np.ravel_multi_index(np.clip(at, 0, shape - 1).T, shape)
-        where = np.searchsorted(voxels, key)
-        known = inside_box & (where < len(voxels))
-        known[known] &= voxels[where[known]] == key[known]
+        where = np.minimum(np.searchsorted(voxels, key), len(voxels) - 1)
+        known = in_box & (voxels[where] == key)
         if not known.any():
             continue
         rows = np.flatnonzero(known)
-        near = table[where[rows]]  # [n, most]
+        near = table[where[rows]]
         valid = near >= 0
         safe = np.where(valid, near, 0)
-        towards = some[rows][:, None, None, :] - tets[safe][:, :, :, 0]  # [n, m, 3, 3]
+        towards = some[rows][:, None, None, :] - tets[safe][:, :, :, 0]
         share = np.einsum("nmtij,nmtj->nmti", inverse[safe], towards)
         inside = ((share >= -1e-9).all(axis=3) & (share.sum(axis=3) <= 1 + 1e-9)
                   & ~singular[safe] & valid[:, :, None])  # fmt: skip
         hit[start + rows] = inside.any(axis=(1, 2))
-    return hit.reshape(points.shape[:2])
+    return hit
+
+
+def covered(points: np.ndarray, skin: Layer) -> np.ndarray:
+    """Which of elements' `points`, `[element, point, 3]`, lie in a wedge of `skin`: in one of
+    its straight-sided prism's three tetrahedra (`within`), its outer face moved out past any
+    bulge of a curved face."""
+    if not len(skin.middles) or not len(points):
+        return np.zeros(points.shape[:2], dtype=bool)
+    corners = skin.places[:, :6].copy()
+    # Its outer corners moved out by its depth: a curved face bulges past its chord, and the
+    # skin between is the wedge's too. Nothing of the part lies out past its own face.
+    corners[:, :3] += (skin.depth[:, None] * skin.normals)[:, None, :]
+    tets = np.stack([corners[:, list(t)] for t in _PRISM], axis=1)
+    return within(points.reshape(-1, 3), tets).reshape(points.shape[:2])

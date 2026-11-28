@@ -138,4 +138,8 @@ def test_a_point_is_covered_where_a_wedge_lies_over_it() -> None:
                         np.ones(12, dtype=bool), lambda p: np.ones(len(p), dtype=bool))
     # The face z = 0 looks down: a point 0.3 above it is under its skin, 0.7 above isn't.
     under = np.array([[[4.0, 6, 0.3], [4.0, 6, 0.7]]])
-    assert wedges.covered(under, np.array([[5.0, 5, 2]]), skin).tolist() == [[True, False]]
+    assert wedges.covered(under, skin).tolist() == [[True, False]]
+    # And the cube's own six tetrahedra hold a point inside it, and none outside.
+    tets = points[wired[:, :4]][:, None]
+    probe = np.array([[5.0, 5, 5], [0.1, 9.9, 0.1], [10.5, 5, 5], [-0.1, 5, 5]])
+    assert wedges.within(probe, tets).tolist() == [True, True, False, False]

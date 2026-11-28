@@ -744,8 +744,7 @@ class _Model:
             skin_layer = self._skin_layer(k, layered, points, row, [elements[i] for i in mine],
                                           to_own)  # fmt: skip
             self.skin_layers[part.name] = skin_layer
-            in_wedge = wedges.covered(true.points @ turn.T + at, corners.mean(axis=1),
-                                      skin_layer)  # fmt: skip
+            in_wedge = wedges.covered(true.points @ turn.T + at, skin_layer)
             covered = in_wedge & ~true.core
             material = true.core | covered
             read = classify.Read(true.cells, material.mean(axis=1), true.points, material)
@@ -894,9 +893,7 @@ class _Model:
                     row: dict[int, int], elements: list[int], to_own: Any) -> wedges.Layer:
         """A printed part's skin as wedges on its faces (`wedges.layer`, mqucifer/print-shop#363):
         each of its boundary triangles as deep as its cell's skin is there, where its layers
-        have core behind it, its inner nodes held within the part's own solid."""
-        import FreeCAD as App
-
+        have core behind it, its inner nodes held within the part's own elements."""
         part = self.assembly.parts[k]
         given = np.array([self.fem.getElementNodes(e) for e in elements])
         wired = np.vectorize(row.__getitem__)(given)
@@ -910,11 +907,12 @@ class _Model:
             ways, layered.layers, layered.up,
             np.array([of[c].walls_mm for c in cells]), np.array([of[c].top_mm for c in cells]),
             np.array([of[c].bottom_mm for c in cells]))
-        solid = self.solids[k]
+        # Inside the part: in one of its own elements, straight-sided, so a point a hair inside
+        # a curved face may read outside it, the safe side, its wedge made shallower.
+        tets = points[wired[:, :4]][:, None]
 
         def inside(given: np.ndarray) -> np.ndarray:
-            return np.array([solid.isInside(App.Vector(*p), 1e-6, True) for p in given],
-                            dtype=bool)  # fmt: skip
+            return wedges.within(np.asarray(given, dtype=float), tets)
 
         # Room behind its skin for the skin of the face across from it, and Orca's opening of
         # the core between, or the two faces' wedges would overlap: a web or a fin thinner
@@ -1398,7 +1396,8 @@ class _Model:
         the mesh's; and each set's material, the skin's stiffness less its cell's core."""
         if not len(self.wedge_numbers):
             return ""
-        new = sorted(n for n in self.nodes if n > max(self.fem.Nodes))
+        last = max(self.fem.Nodes)
+        new = sorted(n for n in self.nodes if n > last)
         text = "*NODE, NSET=Nall\n" + "".join(
             f"{n}, {self.nodes[n][0]:.9g}, {self.nodes[n][1]:.9g}, {self.nodes[n][2]:.9g}\n"
             for n in new)
