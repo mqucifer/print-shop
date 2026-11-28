@@ -2256,12 +2256,23 @@ class _Unread(NoAnswer):
     solves. A part that names its glass band is read again without it (mqucifer/print-shop#295).
     `evidence` is what it met, without what to do."""
 
-    def __init__(self, said: str, evidence: str | None = None, memory: bool = False) -> None:
+    def __init__(
+        self,
+        said: str,
+        evidence: str | None = None,
+        memory: bool = False,
+        need: float | None = None,
+        room: float | None = None,
+    ) -> None:
         super().__init__(said)
         self.evidence = said if evidence is None else evidence
         #: Whether it met the container's memory, which two passes read within
         #: (mqucifer/print-shop#301).
         self.memory = memory
+        if memory:
+            # Kept, with the need and room in bytes where a check said them, so that where the
+            # answer isn't the whole read the host can offer it more (mqucifer/print-shop#380).
+            progress.met(need, room)
 
 
 class _Slow(_Unread):
@@ -2679,8 +2690,18 @@ def run(args: Any, report: Report) -> None:
     # The container's memory said as it goes, for the host to say where it was killed
     # (mqucifer/print-shop#336).
     progress.watch()
+    progress.forget_met()
     try:
         _read(args, report)
+    except NoAnswer:
+        # Where its read met the container's memory on the way, the host may read it again on
+        # a host with more (mqucifer/print-shop#380).
+        progress.say_met()
+        raise
+    else:
+        if "lower_bound" in report.numbers:
+            # Read as a bound, where the whole met the memory: the whole may read with more.
+            progress.say_met()
     finally:
         _clock["now"] = None
         _joined.clear()

@@ -20,6 +20,12 @@ so a study reads each candidate's cases on one host (`bench.pool`), and this che
 rests on. Each host reads a case the same every time, to the last digit; across hosts the
 verdict, its why and its notes are the same, and every figure but in its last digits
 (`LAST_DIGITS`), each such one printed.
+
+And a `load` that meets a small local limit (mqucifer/print-shop#380): `load/one.json` read here
+in a container of `SMALL`, which the kernel stops it at, is offered the host's `LOAD_MEMORY`
+through a pool, as a study's would be. Read there, it's the same reading as a plain read there in
+a load's own 3g, every digit, and as here's in 3g but in its last digits; its record names the
+host, its limit and what it met here.
 """
 
 from __future__ import annotations
@@ -43,6 +49,10 @@ from print_shop.study.reading import _files
 OPT_IN = "PRINT_SHOP_TEST_REMOTE"
 #: What its jobs may hold there at once: two `load`s of 3g.
 MEMORY = 6 * 1024
+#: The larger memory a `load` that met its container's is offered there: more than a load's own
+#: 4g, within `MEMORY` (mqucifer/print-shop#380). And the small local limit it's planted to meet.
+LOAD_MEMORY = 6 * 1024
+SMALL = "96m"
 CASES = Path(__file__).parent / "cae_cases"
 LOAD = ["--weight", "5", "--at", "115,10,10"]
 #: How far apart two hosts' figures may be, relative to them: their last few binary digits of
@@ -66,7 +76,7 @@ def opted_in_host() -> RemoteHost | None:
     from print_shop.bench.budget import megabytes
 
     return RemoteHost("remote", target, cores_of(said["CORES"]), MEMORY,
-                      megabytes(said["FLOOR"]))
+                      megabytes(said["FLOOR"]), LOAD_MEMORY)
 
 
 pytestmark = [
@@ -218,3 +228,43 @@ def _apart(mine: Any, theirs: Any, where: str = "") -> list[tuple[str, Any, Any]
         return [found for k, (a, b) in enumerate(zip(mine, theirs, strict=True))
                 for found in _apart(a, b, f"{where}[{k}]")]
     return [] if mine == theirs else [(where, mine, theirs)]
+
+
+def test_a_load_that_meets_a_small_local_limit_reads_there_with_more_as_the_same_read(
+    tmp_path: Path, fixtures: Path, there: Remote,
+) -> None:
+    print(f"\n{there.host.said()}: MemFree {there.memory_free_mb() / 1024:.1f} GiB before")
+    alone = _job(fixtures, tmp_path / "here")
+    here = _record(alone, run_here(alone))
+    assert here["verdict"] == "OK", here.get("why")
+    plain = _job(fixtures, tmp_path / "there")
+    name = there.reserve(3 * 1024)
+    plain_there = _record(plain, there.run(plain, there.host.cores[:2], name))
+    assert plain_there["ran"]["host"] == there.name
+
+    small = _job(fixtures, tmp_path / "small")
+    small = BenchJob(small.args, small.folder, small.files, SMALL, small.timeout)
+    pool = Pool(Slots(Budget(3 * 1024, 2)), [there])
+    with pool.take(96, 2, kind="load one.json small"):
+        assert pool.where() == "here"
+        done = pool.run(small)
+    print(pool.said())
+    print(f"MemFree {there.memory_free_mb() / 1024:.1f} GiB after")
+    assert done.host == there.name, pool.said()
+    offered = _record(small, done)
+    met = offered["ran"]["offered"]
+    print(f"met here: {met}; read on {there.name} in {offered['ran']['memory_max']} bytes, at "
+          f"most {offered['ran']['memory_peak']} held, in {offered['seconds']} s")
+    assert met["host"] == "here" and met["killed"] and met["limit"] == 96 * 2**20
+    assert offered["ran"]["memory_max"] == str(LOAD_MEMORY * 2**20)
+    assert offered["ran"]["image_id"] == here["ran"]["image_id"]
+    assert offered["ran"]["code"] == here["ran"]["code"]
+    assert "offered: read on remote in its 6.0 GiB" in done.stdout
+    assert _figures(offered["numbers"]) == _figures(plain_there["numbers"]), "one host, every digit"
+    assert (offered["verdict"], offered["why"], offered["notes"]) == (
+        here["verdict"], here["why"], here["notes"])
+    apart = _apart(_figures(here["numbers"]), _figures(offered["numbers"]))
+    for where, mine, theirs in apart:
+        print(f"  {where}: {mine!r} here, {theirs!r} there")
+    assert all(_close(mine, theirs) for _, mine, theirs in apart), apart
+    assert there.ours_left() == [] and there.left == [] and not there.held()

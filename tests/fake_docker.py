@@ -13,6 +13,11 @@ is refused as Docker refuses it; `ROOT/silent` makes a bench command say nothing
 `ROOT/slow_in` slows the files going in, by that many seconds; and `ROOT/others` lists other
 processes' bench containers, a name and a memory label to a line, as `docker ps` gives them.
 
+A `load` of an assembly file that plants `need_mb` meets its container's memory where its
+`--memory` is less (mqucifer/print-shop#380): it says so as `load` does (`bench: met ...` on its
+stderr) and saves a NO ANSWER; under more, it reads as any other. Its record says the memory it
+ran in and what its container was told it met where it ran first (`BENCH_OFFERED`).
+
 Standard library only, and nothing of the tests' own: it runs as a program of its own.
 """
 
@@ -35,7 +40,26 @@ VALUED = {"--name", "--label", "--pull", "--network", "--cpus", "--cpuset-cpus",
 PLENTY = "MemTotal: 127000000 kB\nMemFree: 40000000 kB\nMemAvailable: 90000000 kB\n"
 
 
-def bench(args: list[str], work: Path, env: dict[str, str]) -> tuple[int, str]:
+def _mib(size: str) -> int:
+    units = {"m": 1, "g": 1024}
+    return int(float(size[:-1]) * units[size[-1].lower()]) if size[-1:].isalpha() else int(
+        size) // 2**20
+
+
+def met(args: list[str], work: Path, memory: str | None) -> str | None:
+    """The `bench: met` line a planted `load` says where its `need_mb` is past its container's
+    `memory`, or None."""
+    raw = json.loads((work / args[1]).read_text())
+    need = raw.get("need_mb")
+    if need is None or memory is None or _mib(memory) >= int(need):
+        return None
+    limit = _mib(memory) * 2**20
+    return (f"bench: met 12.0 limit={limit} peak={limit - 2**20} need={int(need) * 2**20} "
+            f"room={limit - 300 * 2**20} at meshing pass 1's whole, at a mesh of at most 5 mm")
+
+
+def bench(args: list[str], work: Path, env: dict[str, str],
+          memory: str | None = None) -> tuple[int, str]:
     """`load`, made up from what was sent: the skin pulled across its layers at 1.6% over its
     walls and its core, as `tests/test_settings_study.fake_loading` reads it, from the part's
     `print` in the assembly file; 2 where a file it names wasn't sent."""
@@ -71,15 +95,21 @@ def bench(args: list[str], work: Path, env: dict[str, str]) -> tuple[int, str]:
             "moves_mm": 3.0 / walls,
         },
         "notes": ["the infill's figures are published tests"],
-        "ran": {"host": env.get("BENCH_HOST"), "image_id": env.get("BENCH_IMAGE_ID")},
+        "ran": {"host": env.get("BENCH_HOST"), "image_id": env.get("BENCH_IMAGE_ID"),
+                "memory_max": None if memory is None else str(_mib(memory) * 2**20),
+                "offered": env.get("BENCH_OFFERED")},
     }
+    if met(args, work, memory) is not None:
+        record.update(verdict="NO ANSWER", why="nothing of the assembly is read: it met the "
+                      "container's memory", numbers={})
+        over = False
     out = work / "bench-out"
     out.mkdir(exist_ok=True)
     stem = f"load-{time.time_ns()}"
     (out / f"{stem}.json").write_text(json.dumps(record))
     (out / f"{stem}.txt").write_text(f"verdict: {record['verdict']}\n")
     said = f"verdict: {record['verdict']}\nsaved: bench-out/{stem}.txt and .json\n"
-    return (1 if over else 0), said
+    return (2 if record["verdict"] == "NO ANSWER" else 1 if over else 0), said
 
 
 def _log(root: Path, entry: dict[str, Any]) -> None:
@@ -207,9 +237,13 @@ def _run(argv: list[str], root: Path) -> int:
                 if (root / "killed" / name).exists():
                     return 137
                 time.sleep(0.05)
-        code, said = bench(args, mounts["/work"], env)
+        memory = options.get("--memory", [None])[0]
+        code, said = bench(args, mounts["/work"], env, memory)
         if not (root / "silent").exists():
             print(said, end="")
+            line = met(args, mounts["/work"], memory)
+            if line is not None:
+                print(line, file=sys.stderr)
         return code
     finally:
         (running / name).unlink(missing_ok=True)

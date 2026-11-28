@@ -89,6 +89,12 @@ ABLE = "bench: two passes could read it"
 #: and where the command is killed, says where it was and the most the container had held.
 STEP_LINE = "bench: step"
 MEMORY_LINE = "bench: memory"
+#: And as it ends, where its read met the container's memory on the way to an answer that isn't
+#: the whole read (`progress.say_met`, mqucifer/print-shop#380): kept with the others, for a
+#: host with more memory to be offered it (`job.Met`). A command the kernel killed is said so
+#: by the host, `MET_KILLED` in place of its seconds.
+MET_LINE = "bench: met"
+MET_KILLED = "killed"
 HERE = Path(__file__).resolve().parent
 REPOSITORY = HERE.parent.parent.parent
 #: The container's own mount of this package: read-only, so nothing in it can change the bench.
@@ -328,6 +334,7 @@ def run(
     by_id: bool = False,
     margin: int | None = None,
     pull: bool = True,
+    memory: str | None = None,
 ) -> subprocess.CompletedProcess[str]:
     """Run a bench command, or a script with `python=True`, in a container over `work`. A command
     runs in its own image; a script in the first, or in `image`, where `CAE_IMAGE`'s Python has
@@ -338,7 +345,9 @@ def run(
     can stop it (`job.stop_here`). `docker`, `mounts` and `cpuset` run it on another host, as
     `container` says; `more_env` is more of its environment there, as the host's name, and
     `labels` and `by_id` as `container` says. A `margin` gives it a deadline of its own, in its
-    container: that many seconds past the longest it may run."""
+    container: that many seconds past the longest it may run. `memory` is its container's
+    memory, where it's given more than its own (`memory_for`): a `load` offered a host with more
+    (mqucifer/print-shop#380)."""
     name = name or f"print-bench-{uuid.uuid4().hex[:12]}"
     longer = None
     if timeout is None:
@@ -356,7 +365,7 @@ def run(
     env = {"BENCH_TIMEOUT": str(timeout), **(more_env or {})}
     if longer is not None:
         env[OFFER] = str(longer)
-    memory = MEMORY if python else memory_for(args)
+    memory = memory or (MEMORY if python else memory_for(args))
     argv = container(
         work,
         command,
@@ -387,6 +396,8 @@ def run(
         trace.extend(said)
     if done.returncode == KILLED:
         # A process that's killed takes its buffered output with it, so this may be all there is.
+        if trace is not None:
+            trace.append(killed_met(said, memory))
         return subprocess.CompletedProcess(argv, 2, done.stdout + killed(said, memory), err)
     return subprocess.CompletedProcess(argv, done.returncode, done.stdout, err)
 
@@ -396,11 +407,27 @@ def progress_lines(stderr: str) -> tuple[str, list[str]]:
     lines."""
     kept, said = [], []
     for line in stderr.splitlines(keepends=True):
-        if line.startswith((STEP_LINE + " ", MEMORY_LINE + " ")):
+        if line.startswith((STEP_LINE + " ", MEMORY_LINE + " ", MET_LINE + " ")):
             said.append(line.rstrip("\n"))
         else:
             kept.append(line)
     return "".join(kept), said
+
+
+def killed_met(said: list[str], memory: str) -> str:
+    """The `MET_LINE` the host says of a command the kernel killed, most likely at its memory
+    (`killed`): its limit, the most it held when it last said, and the step it was in."""
+    from .budget import megabytes
+
+    counts = [line[len(MEMORY_LINE) + 1 :].split() for line in said
+              if line.startswith(MEMORY_LINE + " ")]
+    found = dict(f.split("=", 1) for f in (counts[-1][1:] if counts else []) if "=" in f)
+    peak = found.get("peak", "-")
+    steps = [line[len(STEP_LINE) + 1 :].split(" ", 1) for line in said
+             if line.startswith(STEP_LINE + " ")]
+    at = steps[-1][1] if steps and len(steps[-1]) == 2 else "where it last said"
+    return (f"{MET_LINE} {MET_KILLED} limit={megabytes(memory) * 1024**2} "
+            f"peak={peak if peak.isdigit() else '-'} need=- room=- at {at}")
 
 
 def _gib(count: str) -> str:

@@ -233,6 +233,28 @@ def _lessons(args: argparse.Namespace, ledger: DesignLedger) -> str:
     return f"lesson {lesson}: {found['status']}, by {found['status_by']}"
 
 
+def _offering(run: Run) -> None:
+    """Where the settings name a remote host that states a larger memory for a `load`, a
+    round's `load` whose read meets its container's memory is offered it (`bench.pool.Offers`,
+    mqucifer/print-shop#380). Where none does, its answer stands, as before. Settings that state
+    a host wrongly are said, and the run reads here alone."""
+    from print_shop.bench.pool import Offers  # noqa: PLC0415
+    from print_shop.env import SETTINGS_PATH, load_env  # noqa: PLC0415
+
+    try:
+        offers = Offers(load_env(SETTINGS_PATH))
+    except ValueError as exc:
+        print(f"no load is offered a remote host: {exc}", file=sys.stderr, flush=True)
+        return
+    if offers:
+        run.box.offers = offers
+        print(
+            "a load that meets its container's memory is offered "
+            + "; ".join(h.said() for h in offers.hosts),
+            flush=True,
+        )
+
+
 def _studies(folder: Path, root: Path, args: argparse.Namespace) -> str:
     """The settings studies an approval queues by itself, where the run has a load need
     (mqucifer/print-shop#359), and the worker that runs them. It follows the approval and can't
@@ -604,6 +626,7 @@ def main() -> int:
                 # locked can be stopped and done again (mqucifer/print-shop#66).
                 for line in told:
                     print(line, flush=True)
+            _offering(run)
             ending = run.drive()
             print(what_next(run, ending))
     except (

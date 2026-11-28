@@ -33,10 +33,18 @@ at that limit, of an assembly two passes could read (`host.ABLE`), is told to as
 container had held, from what `load` says as it goes, as from `host.run` (`host.killed`,
 mqucifer/print-shop#336). A `load --parts` runs in the larger memory `host.memory_for` gives it,
 as from `host.run`.
+
+A `load` whose read met the container's memory on the way to an answer that isn't the whole read
+(`host.MET_LINE`), or that the kernel killed, is offered a remote host whose settings state a
+larger memory for it, where `offers` is given (`bench.pool.Offers`, mqucifer/print-shop#380): the
+same command over the same files, its reply then that host's, naming it, its limit and the need
+and room on both. Where none states more, or none takes it, the answer here stands, and the reply
+says why.
 """
 
 from __future__ import annotations
 
+import dataclasses
 import json
 import os
 import subprocess
@@ -51,6 +59,7 @@ from typing import Any
 
 from print_shop.bench import answers, host
 from print_shop.bench.cli import CALLS
+from print_shop.bench.job import BenchJob, JobResult, Met, load_files
 from print_shop.bench.report import EXIT
 from print_shop.rounds import paths
 
@@ -72,7 +81,9 @@ BENCHED_BYTES = 4_000_000
 
 #: What `load` says as it goes (`host.STEP_LINE`, `host.MEMORY_LINE`): set aside as it's read,
 #: never counted against `KEEP`, and the longest such line held back to be told, in bytes.
-PROGRESS = (f"{host.STEP_LINE} ".encode(), f"{host.MEMORY_LINE} ".encode())
+PROGRESS = (
+    f"{host.STEP_LINE} ".encode(), f"{host.MEMORY_LINE} ".encode(), f"{host.MET_LINE} ".encode()
+)
 PROGRESS_LONGEST = 4096
 
 
@@ -149,6 +160,9 @@ class Ran:
     #: The bench commands a script ran itself, in order: each its `argv`, its exit `code`, and
     #: its saved `record`, or None where that couldn't be read.
     benched: list[dict[str, Any]] = field(default_factory=list)
+    #: Where a bench command's read met its container's memory, as it said, or None
+    #: (mqucifer/print-shop#380).
+    met: Met | None = None
 
 
 class Box:
@@ -164,6 +178,9 @@ class Box:
         #: a part built flat is placed where it's read against a given part
         #: (`placing.py`, mqucifer/print-shop#201). None runs each as it's given.
         self.placing: Callable[[list[str], Path], list[str]] | None = None
+        #: The remote hosts a `load` that met its container's memory is offered, or None: here
+        #: alone, and the answer stands (mqucifer/print-shop#380).
+        self.offers: Callable[[BenchJob, Met], tuple[JobResult | None, str]] | None = None
 
     def python(self, script: str, where: Path | None = None, timeout: int | None = None) -> Ran:
         """A script, as `run` runs it: it may import what's beside it. Each bench command it
@@ -189,10 +206,30 @@ class Box:
         if timeout is None:
             timeout = host.TWO_PASSES if host.asks_two_passes(args) else None
             longer = host.offered(args)
-        return self._run(
+        ran = self._run(
             host.bench_command(args), where, timeout, image, longer=longer,
             memory=host.memory_for(args),
         )  # fmt: skip
+        if self.offers is None or ran.met is None or host.command_word(args) != "load":
+            return ran
+        return self._offered(args, where or self.work, ran)
+
+    def _offered(self, args: list[str], where: Path, ran: Ran) -> Ran:
+        """A `load` that met its container's memory, offered a host with more: its reply there,
+        or this one's with what became of the offer (mqucifer/print-shop#380)."""
+        assert ran.met is not None and self.offers is not None
+        job = BenchJob(tuple(args), where, tuple(load_files(where, args)),
+                       host.memory_for(args))
+        began = time.monotonic()
+        try:
+            done, said = self.offers(job, ran.met)
+        except (FileNotFoundError, ValueError, RuntimeError) as exc:
+            done, said = None, f"it wasn't offered a host with more memory: {exc}"
+        if done is None:
+            return dataclasses.replace(ran, output=ran.output.rstrip("\n") + f"\nnote: {said}\n")
+        self.ran += 1
+        return Ran(done.returncode, done.stdout + done.stderr,
+                   round(ran.seconds + time.monotonic() - began, 1), met=done.met)
 
     def helper(
         self, module: str, args: list[str], timeout: int = 120, where: Path | None = None
@@ -309,10 +346,14 @@ class Box:
         if timed_out:
             text += "\n" + host.past(limit, could, said)
             code = 2 if command[1:2] == ["-I"] else 124
-        elif code == host.KILLED:
+        met = None
+        if code == host.KILLED:
             text += "\n" + host.killed(said, memory)
             code = 2 if command[1:2] == ["-I"] else host.KILLED
-        return Ran(code, text, seconds, size[1], timed_out)
+            met = Met.of([host.killed_met(said, memory or host.MEMORY)])
+        elif not timed_out:
+            met = Met.of(said)
+        return Ran(code, text, seconds, size[1], timed_out, met=met)
 
 
 def answered(ran: Ran, mark: str, where: Path) -> dict[str, Any]:

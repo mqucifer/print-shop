@@ -14,18 +14,19 @@ Standard library only: this runs outside the image.
 
 from __future__ import annotations
 
+import json
 import re
 import subprocess
 import threading
 import uuid
 from collections.abc import Callable
 from dataclasses import dataclass, field
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 from . import host
 
-__all__ = ["HERE", "BenchJob", "HostLost", "JobResult", "Runner", "Stopped", "run_here",
-           "running_here", "saved_files", "stop_here"]
+__all__ = ["HERE", "OFFERED", "BenchJob", "HostLost", "JobResult", "Met", "Runner", "Stopped",
+           "load_files", "run_here", "running_here", "saved_files", "stop_here"]
 
 #: What a job's record calls this host (`report.how_it_ran`'s `host`): a remote is called by its
 #: name in the settings (`remote.RemoteHost`).
@@ -39,6 +40,9 @@ class Stopped(RuntimeError):
 class HostLost(RuntimeError):
     """The host a job ran on stopped answering before it gave the job's reply: no answer of the
     job's own, so it may run again on another host (mqucifer/print-shop#373)."""
+
+#: This host's Docker, which its jobs run by.
+DOCKER = ("docker",)
 
 #: The containers this process's jobs are running in, by name: its own, which the host's budget
 #: doesn't count twice (`budget.others`), and which `stop_here` stops.
@@ -59,6 +63,97 @@ def saved_files(stdout: str) -> tuple[str, ...]:
     return tuple(found)
 
 
+#: The setting a job offered a host with more memory is told, in its container, what it met
+#: where it ran first (`Met.told`), for its record to say (`report.how_it_ran`,
+#: mqucifer/print-shop#380).
+OFFERED = "BENCH_OFFERED"
+
+
+def _gib(count: int | None) -> str:
+    return "unknown" if count is None else f"{count / 2**30:.1f} GiB"
+
+
+@dataclass(frozen=True)
+class Met:
+    """A read that met its container's memory on the way to an answer that isn't the whole
+    read, as its command said as it ended (`host.MET_LINE`), or as the host said of one the
+    kernel killed (mqucifer/print-shop#380): its container's limit, the most the container held,
+    and, where a check of a step's need against its room said them, the need and the room; each
+    in bytes, None where unsaid. `at` is the step it was in, and `host` where it ran."""
+
+    limit: int | None
+    peak: int | None
+    need: int | None
+    room: int | None
+    at: str
+    killed: bool = False
+    host: str = HERE
+
+    @classmethod
+    def of(cls, said: list[str], host_name: str = HERE) -> Met | None:
+        """The last `host.MET_LINE` of what a command said, or None."""
+        lines = [line for line in said if line.startswith(host.MET_LINE + " ")]
+        if not lines:
+            return None
+        first, _, rest = lines[-1][len(host.MET_LINE) + 1 :].partition(" ")
+        fields, _, at = rest.partition(" at ")
+        found = dict(f.split("=", 1) for f in fields.split() if "=" in f)
+
+        def number(key: str) -> int | None:
+            value = found.get(key, "-")
+            return int(value) if value.isdigit() else None
+
+        return cls(number("limit"), number("peak"), number("need"), number("room"),
+                   at.strip() or "where it last said", first == host.MET_KILLED, host_name)
+
+    def said(self) -> str:
+        """What it met, in words: `on here, meshing ...: need 5.2 GiB, room 3.0 GiB of its
+        container's 4.0 GiB, at most 4.0 GiB held`."""
+        how = ("the kernel killed it, most likely at the memory" if self.killed
+               else "need " + _gib(self.need) + ", room " + _gib(self.room)
+               if self.need is not None or self.room is not None
+               else "the kernel stopped a process of it for memory, by the container's own count")
+        return (f"on {self.host}, {self.at}: {how}, of its container's {_gib(self.limit)}, "
+                f"at most {_gib(self.peak)} held")
+
+    def told(self) -> str:
+        """It as `OFFERED` carries it: `host=here limit=... peak=... need=... room=... killed=0
+        at STEP`."""
+        counts = {"limit": self.limit, "peak": self.peak, "need": self.need, "room": self.room}
+        fields = " ".join(f"{k}={'-' if v is None else v}" for k, v in counts.items())
+        return f"host={self.host} {fields} killed={int(self.killed)} at {self.at}"
+
+
+def load_files(folder: Path, args: list[str] | tuple[str, ...]) -> list[str]:
+    """The files a `load` reads, relative to `folder`: its assembly file and every file it names
+    beside it, each part's own, its `with`s, its `band` and its regions' meshes. Those that
+    aren't there are left for the job to say (`run_here`, `remote.Remote.run`)."""
+    word = host.command_word(list(args))
+    words = list(args)
+    if word != "load" or words.index(word) + 1 >= len(words):
+        raise ValueError(f"not a load of an assembly file: {' '.join(words)}")
+    assembly = words[words.index(word) + 1]
+    found = [assembly]
+    try:
+        raw = json.loads((folder / assembly).read_text())
+    except (OSError, ValueError):
+        return found
+    beside = PurePosixPath(assembly).parent
+    for part in raw.get("parts") or () if isinstance(raw, dict) else ():
+        if not isinstance(part, dict):
+            continue
+        named = [part.get("file"), *(part.get("with") or ()), part.get("band")]
+        printed = part.get("print")
+        if isinstance(printed, dict):
+            named += [r.get("mesh") for r in printed.get("regions") or () if isinstance(r, dict)]
+        for name in named:
+            if isinstance(name, str) and name:
+                path = (beside / name).as_posix()
+                if path not in found:
+                    found.append(path)
+    return found
+
+
 @dataclass(frozen=True)
 class BenchJob:
     """A bench command over its folder of files, with its limits."""
@@ -75,6 +170,9 @@ class BenchJob:
     #: (mqucifer/print-shop#331), and what it reads doesn't hang on how busy the host is.
     memory: str = field(default="")
     timeout: int = 0
+    #: What it met where it ran first, where it's offered a host with more memory
+    #: (mqucifer/print-shop#380): told to its container (`OFFERED`).
+    offered: Met | None = None
 
     @classmethod
     def of(cls, args: list[str] | tuple[str, ...], folder: Path,
@@ -83,6 +181,10 @@ class BenchJob:
         words = list(args)
         return cls(tuple(words), folder, tuple(files), host.memory_for(words),
                    host.timeout_for(words))
+
+    def told(self) -> dict[str, str]:
+        """What its container is told of what it met where it ran first, where it's offered."""
+        return {} if self.offered is None else {OFFERED: self.offered.told()}
 
 
 @dataclass(frozen=True)
@@ -95,6 +197,9 @@ class JobResult:
     saved: tuple[str, ...] = ()
     #: The host that ran it: `HERE`, or a remote's name.
     host: str = HERE
+    #: Where its read met its container's memory on the way to an answer that isn't the whole
+    #: read, as it said, or None (mqucifer/print-shop#380).
+    met: Met | None = None
 
 
 #: Runs a job and returns its result, with what it saved in the job's folder.
@@ -111,14 +216,17 @@ def run_here(job: BenchJob) -> JobResult:
     name = f"print-bench-{uuid.uuid4().hex[:12]}"
     with _LOCK:
         _RUNNING.add(name)
+    said: list[str] = []
     try:
         done: subprocess.CompletedProcess[str] = host.run(
             list(job.args), job.folder, timeout=job.timeout or None, name=name,
-            more_env={"BENCH_HOST": HERE})
+            more_env={"BENCH_HOST": HERE, **job.told()}, memory=job.memory or None, trace=said,
+            docker=DOCKER)
     finally:
         with _LOCK:
             _RUNNING.discard(name)
-    return JobResult(done.returncode, done.stdout, done.stderr, saved_files(done.stdout))
+    return JobResult(done.returncode, done.stdout, done.stderr, saved_files(done.stdout),
+                     met=Met.of(said))
 
 
 def running_here() -> set[str]:

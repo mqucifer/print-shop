@@ -11,7 +11,15 @@ run it. This runs one on a host named in the Mac's settings:
     BENCH_HOST_SPARK_MEMORY=15g          # the memory its jobs may hold at once
     BENCH_HOST_SPARK_FLOOR=10g           # the MemFree never to go under
 
-Every one of them is stated: nothing is guessed, and a host with one missing is refused.
+Every one of them is stated: nothing is guessed, and a host with one missing is refused. One
+more may be (mqucifer/print-shop#380):
+
+    BENCH_HOST_SPARK_LOAD_MEMORY=12g     # the larger memory a `load` is offered there
+
+A `load` whose read met its container's memory, here or on a remote, is offered a host that
+states one larger than that container's: the same command, read there in this memory, held within
+the host's budget and over its floor as any job is (`pool.Pool.offer`). A host that states none is
+offered nothing.
 
 **What a job does there** is what it does here (`host.run`), by that host's own Docker
 (`docker -H ssh://TARGET`): the same `docker run`, with the same limits, user and no network, its
@@ -55,7 +63,7 @@ from pathlib import Path, PurePosixPath
 
 from . import host
 from .budget import megabytes
-from .job import HERE, BenchJob, HostLost, JobResult, Stopped, saved_files
+from .job import HERE, BenchJob, HostLost, JobResult, Met, Stopped, saved_files
 
 __all__ = ["HOSTS", "NoRoom", "RanPastThere", "Remote", "RemoteHost", "Stopped", "cores_of",
            "cpuset", "send", "stated"]
@@ -65,6 +73,9 @@ __all__ = ["HOSTS", "NoRoom", "RanPastThere", "Remote", "RemoteHost", "Stopped",
 #: `BENCH_HOST_<NAME>_`.
 HOSTS = "BENCH_HOSTS"
 KEYS = ("SSH", "CORES", "MEMORY", "FLOOR")
+#: The key that may be stated as well: the larger memory a `load` that met its container's is
+#: offered there (mqucifer/print-shop#380).
+LOAD_MEMORY = "LOAD_MEMORY"
 #: What every container and volume this makes is named from: the bench's own prefix
 #: (`budget.CONTAINERS`), and a new id.
 PREFIX = "print-bench-"
@@ -156,6 +167,9 @@ class RemoteHost:
     #: The memory its jobs may hold at once, and the MemFree never to go under, in MiB.
     memory_mb: int
     floor_mb: int
+    #: The larger memory a `load` that met its container's is offered there, in MiB, or 0 where
+    #: none is stated (mqucifer/print-shop#380).
+    load_mb: int = 0
 
     def docker(self) -> tuple[str, ...]:
         """Its Docker, over SSH."""
@@ -164,7 +178,9 @@ class RemoteHost:
     def said(self) -> str:
         return (f"{self.name} ({self.ssh}): cores {cpuset(self.cores)}, "
                 f"{self.memory_mb / 1024:.1f} GiB for jobs, MemFree kept over "
-                f"{self.floor_mb / 1024:.1f} GiB")
+                f"{self.floor_mb / 1024:.1f} GiB"
+                + (f", a load that met its memory offered {self.load_mb / 1024:.1f} GiB"
+                   if self.load_mb else ""))
 
 
 def stated(env: dict[str, str]) -> list[RemoteHost]:
@@ -193,7 +209,14 @@ def stated(env: dict[str, str]) -> list[RemoteHost]:
         if len(cores) < int(host.CPUS) or memory < megabytes(host.MEMORY):
             raise ValueError(f"{name} holds no bench command: one takes {host.CPUS} cores and "
                              f"{host.MEMORY}")
-        found.append(RemoteHost(name, target, cores, memory, floor))
+        load_key = f"BENCH_HOST_{name.upper()}_{LOAD_MEMORY}"
+        load = megabytes(env[load_key]) if env.get(load_key, "").strip() else 0
+        if load and not megabytes(host.TWO_PASSES_MEMORY) < load <= memory:
+            raise ValueError(f"{load_key} is {env[load_key].strip()}: the larger memory a load "
+                             f"is offered there is more than a load's own "
+                             f"{host.TWO_PASSES_MEMORY}, and within its jobs' "
+                             f"{env[keys['MEMORY']].strip()}")
+        found.append(RemoteHost(name, target, cores, memory, floor, load))
     if len({h.name for h in found}) != len(found):
         raise ValueError(f"{HOSTS} names a host twice")
     return found
@@ -574,12 +597,15 @@ class Remote:
                 # Stopped while its files went over: it never starts.
                 raise Stopped(f"the study was stopped before {said} started")
             self._watch(name)
+            said_as_it_went: list[str] = []
             try:
                 done = host.run(list(job.args), job.folder, timeout=job.timeout or None,
                                 name=name, docker=self.docker, mounts=volumes,
-                                cpuset=cpuset(cores), more_env={"BENCH_HOST": self.name},
+                                cpuset=cpuset(cores),
+                                more_env={"BENCH_HOST": self.name, **job.told()},
                                 labels={MEMORY_LABEL: "0", DISK_LABEL: "0"}, by_id=True,
-                                margin=DEADLINE_MARGIN, pull=False)
+                                margin=DEADLINE_MARGIN, pull=False, memory=job.memory or None,
+                                trace=said_as_it_went)
             finally:
                 with self._lock:
                     self._running.discard(name)
@@ -604,7 +630,8 @@ class Remote:
                                  *saved, timeout=HELPER_TIMEOUT)
                 self._sized(out.stderr, said)
                 unpack(out.stdout, job.folder, saved)
-            return JobResult(done.returncode, done.stdout, done.stderr, saved, self.name)
+            return JobResult(done.returncode, done.stdout, done.stderr, saved, self.name,
+                             Met.of(said_as_it_went, self.name))
         finally:
             self._clear(name, volumes)
 

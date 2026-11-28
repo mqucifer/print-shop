@@ -162,7 +162,8 @@ def test_a_killed_load_run_by_the_host_says_where_it_was(
     assert f"most likely at the {host.memory_for(args)} memory limit" in done.stdout
     assert "Where it was: the second pass's part post-upper0 on its own" in done.stdout
     assert done.stderr == "its own\n", "what it says as it goes is the host's, not passed on"
-    assert trace == SAID.splitlines()
+    # What it said, and the host's own line that it met its memory (mqucifer/print-shop#380).
+    assert trace == [*SAID.splitlines(), host.killed_met(SAID.splitlines(), host.memory_for(args))]
 
 
 def test_a_load_that_ends_passes_on_its_stderr_less_what_it_said_as_it_went(
