@@ -16,7 +16,12 @@ processes' bench containers, a name and a memory label to a line, as `docker ps`
 A `load` of an assembly file that plants `need_mb` meets its container's memory where its
 `--memory` is less (mqucifer/print-shop#380): it says so as `load` does (`bench: met ...` on its
 stderr) and saves a NO ANSWER; under more, it reads as any other. Its record says the memory it
-ran in and what its container was told it met where it ran first (`BENCH_OFFERED`).
+ran in and what its container was told it met where it ran first (`BENCH_OFFERED`). Where it
+also plants `bound_up_to_mb`, a read that meets the memory reads a glass band's lower bound
+instead, in a container of at most that much: past it, as where a larger host's whole takes
+longer to meet its memory and leaves the band too little time, it's NO ANSWER. `ROOT/kill`
+makes the next bench command exit 137, and `ROOT/oom` makes Docker's events say the kernel
+stopped it for memory; `events` answers for the containers named in `ROOT/oom` alone.
 
 Standard library only, and nothing of the tests' own: it runs as a program of its own.
 """
@@ -100,9 +105,13 @@ def bench(args: list[str], work: Path, env: dict[str, str],
                 "offered": env.get("BENCH_OFFERED")},
     }
     if met(args, work, memory) is not None:
-        record.update(verdict="NO ANSWER", why="nothing of the assembly is read: it met the "
-                      "container's memory", numbers={})
-        over = False
+        bound = raw.get("bound_up_to_mb")
+        if bound is not None and memory is not None and _mib(memory) <= int(bound):
+            record["numbers"]["lower_bound"] = {"parts": ["bar"], "why": "made up"}
+        else:
+            record.update(verdict="NO ANSWER", why="nothing of the assembly is read: it met "
+                          "the container's memory", numbers={})
+            over = False
     out = work / "bench-out"
     out.mkdir(exist_ok=True)
     stem = f"load-{time.time_ns()}"
@@ -238,6 +247,11 @@ def _run(argv: list[str], root: Path) -> int:
                     return 137
                 time.sleep(0.05)
         memory = options.get("--memory", [None])[0]
+        if (root / "kill").exists():
+            (root / "kill").unlink()
+            if (root / "oom").exists():
+                (root / "oom").write_text(name)
+            return 137
         code, said = bench(args, mounts["/work"], env, memory)
         if not (root / "silent").exists():
             print(said, end="")
@@ -331,6 +345,12 @@ def main(argv: list[str]) -> int:
             for name in names:
                 if (root / "running" / name).exists():
                     print(f"{name} 1GiB / 3GiB")
+            return 0
+        case ["events", "--since", _, "--until", _, "--filter", watched, "--filter",
+              "event=oom", "--format", _]:
+            stopped = (root / "oom").read_text().split() if (root / "oom").exists() else []
+            if watched.removeprefix("container=") in stopped:
+                print("oom")
             return 0
         case ["save", image]:
             sys.stdout.buffer.write(f"image:{image}".encode())

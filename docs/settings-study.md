@@ -38,12 +38,19 @@ A candidate is two slices and a `load` for each case, about a minute each on a s
 
 ```
 BENCH_HOSTS=spark
-BENCH_HOST_SPARK_SSH=spark           # the SSH target, as ~/.ssh/config names it
-BENCH_HOST_SPARK_CORES=5-9,15-19     # the cores its jobs are pinned to, --cpuset-cpus
-BENCH_HOST_SPARK_MEMORY=15g          # the memory its jobs may hold at once
-BENCH_HOST_SPARK_FLOOR=10g           # the MemFree never to go under
-BENCH_HOST_SPARK_LOAD_MEMORY=12g     # optional: the larger memory a load that met its own is offered
+# the SSH target, as ~/.ssh/config names it
+BENCH_HOST_SPARK_SSH=spark
+# the cores its jobs are pinned to, --cpuset-cpus
+BENCH_HOST_SPARK_CORES=5-9,15-19
+# the memory its jobs may hold at once
+BENCH_HOST_SPARK_MEMORY=15g
+# the MemFree never to go under
+BENCH_HOST_SPARK_FLOOR=10g
+# optional: the larger memory a load that met its own is offered (mqucifer/print-shop#380)
+BENCH_HOST_SPARK_LOAD_MEMORY=12g
 ```
+
+Each comment is a line of its own: the settings' reader takes all of a line after `=` as its value, a comment with it. Each host's `_MEMORY` is this study's budget there, not shared with another process's jobs: what holds the host safe across processes is its MemFree floor, which counts every bench container there by its label.
 
 - **A job there is a job here,** by the host's own Docker (`docker -H ssh://TARGET`): the same `docker run`, with the same limits, user and no network, pinned to two of its cores of its own. Its files go into a Docker volume of its own, and the bench's code at this checkout's state into another, mounted read-only where it is here. Nothing is written on the host's own disk or installed there. The reply comes back, and the files it saved come back into its folder. Its record names the host (`ran.host`, `here` or the host's name) and the cores it was pinned to, and its volumes are removed as it ends, however it ends. It runs each image by the ID checked here, never by a tag that may since have moved. It can't outlive its study: `timeout` kills it inside its container 300 s past its own limit, whatever became of the Mac. A study stopped by a signal (SIGTERM) ends as an interrupt does, stopping what it's reading here and there, and a study says any volume it couldn't remove as it ends.
 - **It touches only its own.** Every container and volume it makes is `print-bench-` and a new id. Its containers carry their memory and disk by label, and its volumes their job and when they were made. Every run there is `--pull never`. It never asks Docker about anything else on the host: no `exec`, `inspect`, `logs` or `stop` of another's. It lists the bench containers there by name and label alone (`docker ps --filter name=print-bench-`).

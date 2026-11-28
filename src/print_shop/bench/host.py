@@ -335,6 +335,7 @@ def run(
     margin: int | None = None,
     pull: bool = True,
     memory: str | None = None,
+    longer: int | None = None,
 ) -> subprocess.CompletedProcess[str]:
     """Run a bench command, or a script with `python=True`, in a container over `work`. A command
     runs in its own image; a script in the first, or in `image`, where `CAE_IMAGE`'s Python has
@@ -347,9 +348,9 @@ def run(
     `labels` and `by_id` as `container` says. A `margin` gives it a deadline of its own, in its
     container: that many seconds past the longest it may run. `memory` is its container's
     memory, where it's given more than its own (`memory_for`): a `load` offered a host with more
-    (mqucifer/print-shop#380)."""
+    (mqucifer/print-shop#380). `longer` is the longer limit it's offered where `timeout` is
+    given, as a design round gives a `load` its own limit and offers it the hour."""
     name = name or f"print-bench-{uuid.uuid4().hex[:12]}"
-    longer = None
     if timeout is None:
         timeout = TIMEOUT if python else timeout_for(args)
         longer = None if python else offered(args)
@@ -381,6 +382,7 @@ def run(
         deadline=None if margin is None else max(timeout, longer or 0) + margin,
         pull=pull,
     )
+    began = time.time()
     done, limit, could = _waited(argv, timeout, longer)
     if done is None:
         # Bounded: a host that stopped answering mustn't hold the study here for ever.
@@ -396,7 +398,9 @@ def run(
         trace.extend(said)
     if done.returncode == KILLED:
         # A process that's killed takes its buffered output with it, so this may be all there is.
-        if trace is not None:
+        if trace is not None and oom_killed(docker, name, began):
+            # Met only where Docker says the kernel stopped a process of its own for memory:
+            # any other kill, as a stopped study's, is no memory met (mqucifer/print-shop#380).
             trace.append(killed_met(said, memory))
         return subprocess.CompletedProcess(argv, 2, done.stdout + killed(said, memory), err)
     return subprocess.CompletedProcess(argv, done.returncode, done.stdout, err)
@@ -412,6 +416,23 @@ def progress_lines(stderr: str) -> tuple[str, list[str]]:
         else:
             kept.append(line)
     return "".join(kept), said
+
+
+def oom_killed(docker: tuple[str, ...], name: str, since: float) -> bool:
+    """Whether Docker said the kernel stopped a process in the container `name`, this process's
+    own, for memory since `since`: its `oom` event, asked of that container alone, so a kill of
+    any other kind, as `docker kill`'s, isn't taken for its memory (mqucifer/print-shop#380).
+    False where Docker doesn't say."""
+    try:
+        done = subprocess.run(
+            [*docker, "events", "--since", str(int(since) - 1), "--until",
+             str(int(time.time()) + 1), "--filter", f"container={name}", "--filter",
+             "event=oom", "--format", "{{.Action}}"],
+            capture_output=True, text=True, timeout=60, check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+    return done.returncode == 0 and "oom" in done.stdout.split()
 
 
 def killed_met(said: list[str], memory: str) -> str:

@@ -6,20 +6,29 @@ command over a folder of its files, within its own limits, so any host with the 
 run it. This runs one on a host named in the Mac's settings:
 
     BENCH_HOSTS=spark
-    BENCH_HOST_SPARK_SSH=spark           # the SSH target, as ~/.ssh/config names it
-    BENCH_HOST_SPARK_CORES=5-9,15-19     # the cores its jobs are pinned to (--cpuset-cpus)
-    BENCH_HOST_SPARK_MEMORY=15g          # the memory its jobs may hold at once
-    BENCH_HOST_SPARK_FLOOR=10g           # the MemFree never to go under
+    # the SSH target, as ~/.ssh/config names it
+    BENCH_HOST_SPARK_SSH=spark
+    # the cores its jobs are pinned to (--cpuset-cpus)
+    BENCH_HOST_SPARK_CORES=5-9,15-19
+    # the memory its jobs may hold at once
+    BENCH_HOST_SPARK_MEMORY=15g
+    # the MemFree never to go under
+    BENCH_HOST_SPARK_FLOOR=10g
 
-Every one of them is stated: nothing is guessed, and a host with one missing is refused. One
+Each comment is a line of its own: the settings' reader takes all of a line after `=` as its
+value. Every one of them is stated: nothing is guessed, and a host with one missing is refused. One
 more may be (mqucifer/print-shop#380):
 
-    BENCH_HOST_SPARK_LOAD_MEMORY=12g     # the larger memory a `load` is offered there
+    # the larger memory a `load` is offered there
+    BENCH_HOST_SPARK_LOAD_MEMORY=12g
 
 A `load` whose read met its container's memory, here or on a remote, is offered a host that
 states one larger than that container's: the same command, read there in this memory, held within
 the host's budget and over its floor as any job is (`pool.Pool.offer`). A host that states none is
-offered nothing.
+offered nothing; one that states it as anything but a size over 4g is refused. The budget,
+`_MEMORY`, is this process's own, not shared with another process's jobs there; what keeps the
+host safe across them is the MemFree floor, which counts every bench container there by its
+label.
 
 **What a job does there** is what it does here (`host.run`), by that host's own Docker
 (`docker -H ssh://TARGET`): the same `docker run`, with the same limits, user and no network, its
@@ -210,12 +219,19 @@ def stated(env: dict[str, str]) -> list[RemoteHost]:
             raise ValueError(f"{name} holds no bench command: one takes {host.CPUS} cores and "
                              f"{host.MEMORY}")
         load_key = f"BENCH_HOST_{name.upper()}_{LOAD_MEMORY}"
-        load = megabytes(env[load_key]) if env.get(load_key, "").strip() else 0
-        if load and not megabytes(host.TWO_PASSES_MEMORY) < load <= memory:
-            raise ValueError(f"{load_key} is {env[load_key].strip()}: the larger memory a load "
-                             f"is offered there is more than a load's own "
+        given = env.get(load_key, "").strip()
+        load = 0
+        if given:
+            # Stated, it's a size over a load's own, never read as none (`12` is 12 bytes).
+            try:
+                load = megabytes(given) if given[-1:].lower() in ("m", "g", "t") else 0
+            except ValueError:
+                load = 0
+        if given and not megabytes(host.TWO_PASSES_MEMORY) < load <= memory:
+            raise ValueError(f"{load_key} is {given!r}: the larger memory a load is offered "
+                             f"there is a size, as 12g, more than a load's own "
                              f"{host.TWO_PASSES_MEMORY}, and within its jobs' "
-                             f"{env[keys['MEMORY']].strip()}")
+                             f"{env[keys['MEMORY']].strip()}; to offer none, leave it out")
         found.append(RemoteHost(name, target, cores, memory, floor, load))
     if len({h.name for h in found}) != len(found):
         raise ValueError(f"{HOSTS} names a host twice")
@@ -233,6 +249,25 @@ class RanPastThere(HostLost):
     NO ANSWER. The host stays in use."""
 
 
+
+
+def _exit_said(code: int) -> str:
+    """Docker's or SSH's exit code, said with whose it is."""
+    return f"ssh's exit {code}" if code == 255 else f"docker's exit {code}"
+
+
+def _failed_said(message: str) -> str:
+    """How a call there failed, as a kind with no name or figure: SSH or Docker not answering,
+    an image Docker hasn't, a file not sent back, or Docker's refusal."""
+    if "didn't answer" in message:
+        return "ssh or docker didn't answer"
+    if re.search(r"No such image|Unable to find image|pull access denied", message):
+        return "an image it hasn't"
+    if "didn't send back" in message:
+        return "a file it saved wasn't sent back"
+    if re.search(r"ssh:|Connection (refused|reset)|connection reset", message):
+        return "ssh failed"
+    return "docker refused it"
 
 
 def _user() -> tuple[int, int]:
@@ -581,13 +616,17 @@ class Remote:
         with self._lock:
             reserved = name in self._held
             self._held.setdefault(name, memory_mb)
+        #: The step it's at, which a failure is said by (`HostLost.kind`).
+        stage = ["holding its memory"]
         try:
             if not reserved:
                 self._hold(name, memory_mb)
+            stage[0] = "making its volumes"
             for volume in volumes:
                 self._call("volume", "create", "--label", f"{OWNER_LABEL}=print-shop",
                            "--label", f"{JOB_LABEL}={name}",
                            "--label", f"{CREATED_LABEL}={int(time.time())}", volume)
+            stage[0] = "sending its files"
             self._run("--rm", "-i", "--name", f"{name}-in", *self._helper(0), "--user",
                        "0:0", "--cap-add", "CHOWN", "--cap-add", "FOWNER",
                        "-v", f"{volumes[0]}:/mnt/work", "-v", f"{volumes[1]}:/mnt/code",
@@ -597,6 +636,7 @@ class Remote:
                 # Stopped while its files went over: it never starts.
                 raise Stopped(f"the study was stopped before {said} started")
             self._watch(name)
+            stage[0] = "running it"
             said_as_it_went: list[str] = []
             try:
                 done = host.run(list(job.args), job.folder, timeout=job.timeout or None,
@@ -605,20 +645,28 @@ class Remote:
                                 more_env={"BENCH_HOST": self.name, **job.told()},
                                 labels={MEMORY_LABEL: "0", DISK_LABEL: "0"}, by_id=True,
                                 margin=DEADLINE_MARGIN, pull=False, memory=job.memory or None,
-                                trace=said_as_it_went)
+                                trace=said_as_it_went, longer=job.longer or None)
             finally:
                 with self._lock:
                     self._running.discard(name)
                     killed = self._killed.pop(name, None)
             if killed is not None:
-                raise HostLost(f"{self.name} killed {said}: {killed}")
+                lost = HostLost(f"{self.name} killed {said}: {killed}")
+                lost.kind = "running it: killed as its Docker disk fell under its floor"
+                raise lost
             if done.returncode in DOCKER_CODES or not done.stdout.strip():
                 why = (done.stderr or "").strip().splitlines()[-1:] or ["no reply"]
-                raise HostLost(f"{self.name} failed {said} (exit {done.returncode}): "
-                               f"{why[0][:300]}")
+                lost = HostLost(f"{self.name} failed {said} (exit {done.returncode}): "
+                                f"{why[0][:300]}")
+                lost.kind = ("running it: no reply" if done.returncode not in DOCKER_CODES
+                             else f"running it: {_exit_said(done.returncode)}")
+                raise lost
             if done.stdout.startswith(RAN_PAST):
-                raise RanPastThere(f"{self.name} stopped {said} at its {job.timeout} s limit")
+                late = RanPastThere(f"{self.name} stopped {said} at its {job.timeout} s limit")
+                late.kind = "running it: past its time limit"
+                raise late
             saved = saved_files(done.stdout)
+            stage[0] = "bringing back what it saved"
             if not saved and not self.answers():
                 raise HostLost(f"{self.name} stopped answering while it ran {said}")
             if saved:
@@ -629,9 +677,14 @@ class Remote:
                                  'du -sk /work >&2 && exec tar -c -C /work -f - -- "$@"', "sh",
                                  *saved, timeout=HELPER_TIMEOUT)
                 self._sized(out.stderr, said)
+                stage[0] = "unpacking what it saved"
                 unpack(out.stdout, job.folder, saved)
             return JobResult(done.returncode, done.stdout, done.stderr, saved, self.name,
                              Met.of(said_as_it_went, self.name))
+        except HostLost as exc:
+            if not exc.kind:
+                exc.kind = f"{stage[0]}: {_failed_said(str(exc))}"
+            raise
         finally:
             self._clear(name, volumes)
 

@@ -48,6 +48,7 @@ import dataclasses
 import json
 import os
 import subprocess
+import tarfile
 import threading
 import time
 import uuid
@@ -59,7 +60,7 @@ from typing import Any
 
 from print_shop.bench import answers, host
 from print_shop.bench.cli import CALLS
-from print_shop.bench.job import BenchJob, JobResult, Met, load_files
+from print_shop.bench.job import BenchJob, JobResult, Met, load_files, saved_files
 from print_shop.bench.report import EXIT
 from print_shop.rounds import paths
 
@@ -180,7 +181,9 @@ class Box:
         self.placing: Callable[[list[str], Path], list[str]] | None = None
         #: The remote hosts a `load` that met its container's memory is offered, or None: here
         #: alone, and the answer stands (mqucifer/print-shop#380).
-        self.offers: Callable[[BenchJob, Met], tuple[JobResult | None, str]] | None = None
+        self.offers: (
+            Callable[[BenchJob, Met, tuple[str, ...]], tuple[JobResult | None, str]] | None
+        ) = None
 
     def python(self, script: str, where: Path | None = None, timeout: int | None = None) -> Ran:
         """A script, as `run` runs it: it may import what's beside it. Each bench command it
@@ -212,19 +215,23 @@ class Box:
         )  # fmt: skip
         if self.offers is None or ran.met is None or host.command_word(args) != "load":
             return ran
-        return self._offered(args, where or self.work, ran)
+        return self._offered(args, where or self.work, ran, timeout or self.timeout, longer)
 
-    def _offered(self, args: list[str], where: Path, ran: Ran) -> Ran:
-        """A `load` that met its container's memory, offered a host with more: its reply there,
-        or this one's with what became of the offer (mqucifer/print-shop#380)."""
+    def _offered(self, args: list[str], where: Path, ran: Ran, limit: int,
+                 longer: int | None) -> Ran:
+        """A `load` that met its container's memory, offered a host with more under the same
+        limits of time as here, `limit` and the `longer` it's offered: its reply there, where it
+        reads more than this one, or this one's with what became of the offer
+        (mqucifer/print-shop#380)."""
         assert ran.met is not None and self.offers is not None
         job = BenchJob(tuple(args), where, tuple(load_files(where, args)),
-                       host.memory_for(args))
+                       host.memory_for(args), limit, longer or 0)
         began = time.monotonic()
         try:
-            done, said = self.offers(job, ran.met)
-        except (FileNotFoundError, ValueError, RuntimeError) as exc:
-            done, said = None, f"it wasn't offered a host with more memory: {exc}"
+            done, said = self.offers(job, ran.met, saved_files(ran.output))
+        except (OSError, ValueError, RuntimeError, tarfile.TarError) as exc:
+            done, said = None, (f"it wasn't offered a host with more memory: "
+                                f"{type(exc).__name__}: {exc}")
         if done is None:
             return dataclasses.replace(ran, output=ran.output.rstrip("\n") + f"\nnote: {said}\n")
         self.ran += 1
@@ -260,6 +267,7 @@ class Box:
         name = f"print-rounds-{uuid.uuid4().hex[:12]}"
         self.ran += 1
         began = time.monotonic()
+        began_at = time.time()
         told = {**(env or {}), "BENCH_TIMEOUT": str(limit)}
         if longer is not None:
             told[host.OFFER] = str(longer)
@@ -350,7 +358,9 @@ class Box:
         if code == host.KILLED:
             text += "\n" + host.killed(said, memory)
             code = 2 if command[1:2] == ["-I"] else host.KILLED
-            met = Met.of([host.killed_met(said, memory or host.MEMORY)])
+            # Met only where Docker says the kernel stopped a process of its own for memory.
+            if host.oom_killed(("docker",), name, began_at):
+                met = Met.of([host.killed_met(said, memory or host.MEMORY)])
         elif not timed_out:
             met = Met.of(said)
         return Ran(code, text, seconds, size[1], timed_out, met=met)

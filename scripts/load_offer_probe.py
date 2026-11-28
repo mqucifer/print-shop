@@ -16,8 +16,12 @@ codes, words, kinds, seconds and memory: for each read, the exit code and the ve
 never its reasons; whether it read the whole, a glass band's lower bound, or nothing; how its
 read met the memory, as a kind (`killed`, `the cgroup's count`, `a step's need against its
 room`), with the container's limit, the most it held, and the need and room where a check said
-them, in GiB; and where the offer went, as a kind (`read there`, `no host states more`, `no host
-took it`, `the host failed it`), with the host's name and its limit. No figure of a part, joint,
+them, in GiB; and where the offer went, as a kind (`read there`, `read there, no more than its
+first answer`, `no host states more`, `no host took it`, `the host failed it`, `stopping`), with
+each failure's kind (the step, and SSH's or Docker's part, as `running it: docker's exit 125`,
+or `running it: past its time limit`), the host's name and its limit, and, where it was read
+there, how that read met the memory there too, if it did, as it would where its whole is killed
+at the larger memory as well. No figure of a part, joint,
 load or mesh, no step's words and no name from the assembly is printed, and each reply stays
 where `load` saves it, here and, brought back, beside it.
 """
@@ -72,16 +76,6 @@ def reply_said(where: str, done: JobResult, record: dict[str, Any], seconds: flo
             f"  {met_said(done.met)}"]
 
 
-#: What became of an offer, by the words `pool.Pool.offer` says it in, as a kind.
-OUTCOMES = (("was read on", "read there"), ("no host states more", "no host states more"),
-            ("which failed it", "the host failed it"), ("no host with more took it",
-                                                         "no host took it"))
-
-
-def outcome(said: str) -> str:
-    return next((kind for words, kind in OUTCOMES if words in said), "not offered")
-
-
 def main(argv: list[str]) -> int:
     if host.command_word(argv) != "load" or len(argv) < 2:
         print(__doc__.split("\n\n")[2])
@@ -107,14 +101,22 @@ def main(argv: list[str]) -> int:
         print("offer: none, as its read didn't meet the memory")
         return here.returncode
     began = time.monotonic()
-    there, said = offers(job, here.met)
-    print(f"offer: {outcome(said)}")
+    there, _ = offers(job, here.met, here.saved)
+    seconds = time.monotonic() - began
+    last = offers.pool().last_offer
+    print(f"offer: {last.outcome if last else 'not offered'}")
+    for kind in last.failures if last else ():
+        print(f"  a host failed it: {kind}")
+    if last is not None and last.host:
+        # Read there, kept or not: what it read, and how its read met the memory there, if it did.
+        print(f"{last.host}, in its {last.memory_mb / 1024:.1f} GiB: verdict {last.verdict}, "
+              f"read {last.read}, {seconds:.0f} s")
+        print(f"  there, {met_said(last.met)}")
     if there is None:
         return here.returncode
-    for line in reply_said(there.host, there, _record(folder, there), time.monotonic() - began):
+    for line in reply_said(there.host, there, _record(folder, there), seconds):
         print(line)
     return there.returncode
-
 
 if __name__ == "__main__":
     sys.exit(main(sys.argv[1:]))

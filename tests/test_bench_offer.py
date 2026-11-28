@@ -260,7 +260,7 @@ def test_a_host_whose_memfree_holds_no_more_leaves_the_answer_and_says_why(
     assert done.host == HERE and _record(planted.folder, done)["verdict"] == "NO ANSWER"
     assert _runs(root) == []
     said = pool.said()
-    assert "no host with more took it: spark: spark's MemFree is 17.0 GiB, under its floor" in said
+    assert "no host with more read it: spark: spark's MemFree is 17.0 GiB, under its floor" in said
     assert "plus the job's 8.0 GiB" in said
 
 
@@ -352,6 +352,8 @@ def test_a_study_reads_a_case_that_meets_here_on_the_host_with_more(
     assert set(hosts) == {"spark"}, "every case met here's memory and was read there"
     assert _without_budget(offered) == _without_budget(enough)
     assert "was read on spark in its 8.0 GiB" in offered
+    assert "as one was offered a host with more memory" in offered
+    assert "as one failed them" not in offered
 
 
 def test_a_rounds_load_that_meets_its_memory_reads_on_the_host_with_more(
@@ -435,3 +437,196 @@ def test_the_probe_says_where_the_read_went_by_counts_alone(
     monkeypatch.setattr(print_shop.env, "load_env", lambda path=None: {})
     assert probe.main(list(planted.args)) == 2
     assert "refused: no host the settings name states" in capsys.readouterr().out
+
+
+# --------------------------------------------------------------------------
+# The cold review's fixes
+# --------------------------------------------------------------------------
+
+
+def _bounded(folder: Path, need_mb: int, bound_up_to_mb: int) -> BenchJob:
+    """A planted read that meets the memory under `need_mb`, and then reads a glass band's
+    lower bound in a container of at most `bound_up_to_mb`."""
+    made = _planted(folder)
+    raw = json.loads((folder / "study-assembly.json").read_text())
+    raw.update(need_mb=need_mb, bound_up_to_mb=bound_up_to_mb)
+    (folder / "study-assembly.json").write_text(json.dumps(raw))
+    return made
+
+
+def test_an_offered_reply_that_reads_no_more_never_replaces_the_first(tmp_path: Path) -> None:
+    """A band's bound read here, offered spark's 8g, meets the memory there too and leaves the
+    band no time: its NO ANSWER doesn't replace the bound, and both are said."""
+    root = tmp_path / "spark"
+    pool = Pool(Slots(Budget(4 * 1024, 4)), [_remote(root)], here_runner=_here())
+    planted = _bounded(tmp_path / "job", need_mb=9000, bound_up_to_mb=4096)
+    with pool.take(3072, 2, kind="load standing"):
+        done = pool.run(planted)
+    assert done.host == HERE
+    assert "lower_bound" in _record(planted.folder, done)["numbers"]
+    assert len(_runs(root)) == 1, "it was read there"
+    said = pool.said()
+    assert ("as NO ANSWER, NO ANSWER: no more than its first answer, OK, a glass band's lower "
+            "bound, which stands. There it met its memory too") in said
+    assert pool.last_offer is not None
+    assert pool.last_offer.outcome == "read there, no more than its first answer"
+
+
+def test_an_offered_reply_that_reads_the_whole_replaces_a_bound(tmp_path: Path) -> None:
+    root = tmp_path / "spark"
+    pool = Pool(Slots(Budget(4 * 1024, 4)), [_remote(root)], here_runner=_here())
+    planted = _bounded(tmp_path / "job", need_mb=NEED_MB, bound_up_to_mb=4096)
+    with pool.take(3072, 2, kind="load standing"):
+        done = pool.run(planted)
+    assert done.host == "spark"
+    assert "lower_bound" not in _record(planted.folder, done)["numbers"]
+    assert "the whole, where its first answer was a glass band's lower bound" in pool.said()
+
+
+@pytest.mark.parametrize("wrong", ["12", "12000", "0", "lots", "4g", "16g"])
+def test_a_stated_load_memory_that_isnt_a_size_over_a_loads_own_is_refused(wrong: str) -> None:
+    with pytest.raises(ValueError, match="BENCH_HOST_SPARK_LOAD_MEMORY is"):
+        stated({**SETTINGS, "BENCH_HOST_SPARK_LOAD_MEMORY": wrong})
+
+
+def test_a_rounds_offered_read_has_the_runs_own_limits_of_time(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = tmp_path / "spark"
+    fake = _remote(root)
+    monkeypatch.setattr(RemoteHost, "docker", lambda self: fake.docker)
+    planted = _planted(tmp_path / "work")
+    met = Met(3 * GIB, 3 * GIB - 1, NEED_MB * 2**20, 2 * GIB, "meshing")
+    box = Box(planted.folder, timeout=450)
+    box.offers = Offers(SETTINGS)
+    monkeypatch.setattr(box, "_run", lambda *a, **k: Ran(2, "verdict: NO ANSWER\n", 4.0, met=met))
+    assert box.bench(list(planted.args)).code == 0
+    (run,) = _runs(root)
+    told = [run[k + 1] for k, word in enumerate(run) if word == "-e"]
+    assert "BENCH_TIMEOUT=450" in told, "the run's own limit, as here"
+    assert f"{host.OFFER}={host.TWO_PASSES}" in told, "and the hour it's offered, as here"
+
+
+def test_an_unexpected_error_in_the_offered_read_keeps_the_first_answer(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = tmp_path / "spark"
+    there = _remote(root)
+    pool = Pool(Slots(Budget(4 * 1024, 4)), [there], here_runner=_here())
+
+    def broken(*args: Any, **kwargs: Any) -> JobResult:
+        raise OSError("a made-up failure of the read's own")
+
+    monkeypatch.setattr(there, "run", broken)
+    planted = _planted(tmp_path / "job")
+    with pool.take(3072, 2, kind="load standing"):
+        done = pool.run(planted)
+    assert done.host == HERE and _record(planted.folder, done)["verdict"] == "NO ANSWER"
+    assert "whose read raised OSError: a made-up failure" in pool.said()
+    assert not there.held()
+
+    import tarfile
+
+    met = Met(3 * GIB, None, None, None, "meshing")
+    box = Box(planted.folder)
+    monkeypatch.setattr(box, "_run", lambda *a, **k: Ran(2, "verdict: NO ANSWER\n", 4.0, met=met))
+
+    def tar_broken(*args: Any) -> tuple[JobResult | None, str]:
+        raise tarfile.TarError("a made-up bad tar")
+
+    box.offers = tar_broken
+    ran = box.bench(list(planted.args))
+    assert ran.code == 2 and "note: it wasn't offered a host with more memory: TarError" in (
+        ran.output)
+
+
+def test_a_kill_thats_not_the_kernels_for_memory_isnt_met(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Exit 137 is met memory only where Docker's `oom` event for that container says so: a
+    kill of any other kind, as a stopped study's, offers nothing."""
+    here = tmp_path / "here-docker"
+    here.mkdir()
+    (here / "images.json").write_text(json.dumps({"tag": host.CAE_IMAGE}))
+    monkeypatch.setattr(job, "DOCKER", (sys.executable, str(FAKE), str(here)))
+    planted = _planted(tmp_path / "job")
+    (here / "kill").write_text("")
+    killed = job.run_here(planted)
+    assert killed.returncode == 2 and "it was killed" in killed.stdout and killed.met is None
+    (here / "kill").write_text("")
+    (here / "oom").write_text("")
+    stopped = job.run_here(planted)
+    assert stopped.met is not None and stopped.met.killed and stopped.met.limit == 3 * GIB
+    events = [e["argv"] for e in _log(here) if e.get("argv", [""])[0] == "events"]
+    assert events and all(any(w.startswith("container=print-bench-") for w in e) for e in events)
+
+
+def test_nothing_is_offered_while_the_study_is_stopping(tmp_path: Path) -> None:
+    root = tmp_path / "spark"
+    pool = Pool(Slots(Budget(4 * 1024, 4)), [_remote(root)], here_runner=_here())
+    pool.stop()
+    planted = _planted(tmp_path / "job")
+    with pool.take(3072, 2, kind="load standing"):
+        done = pool.run(planted)
+    assert done.host == HERE and _runs(root) == []
+    assert "as the study was stopping: it wasn't offered more" in pool.said()
+    offers = Offers(SETTINGS)
+    offers.stop()
+    assert offers(planted, Met(1, 1, None, None, "x"))[0] is None
+
+
+def test_a_host_that_fails_an_offer_says_how_by_its_kind(tmp_path: Path) -> None:
+    root = tmp_path / "spark"
+    pool = Pool(Slots(Budget(4 * 1024, 4)), [_remote(root)], here_runner=_here())
+    (root / "drop").write_text("")
+    planted = _planted(tmp_path / "job")
+    with pool.take(3072, 2, kind="load standing"):
+        pool.run(planted)
+    assert pool.last_offer is not None and pool.last_offer.outcome == "the host failed it"
+    assert pool.last_offer.failures == ["running it: ssh's exit 255"]
+    assert "which failed it (running it: ssh's exit 255)" in pool.said()
+    assert "takes no more jobs this run" in pool.said()
+
+
+def test_an_evals_run_is_offered_nothing_unless_it_opts_in(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import importlib.util
+
+    import print_shop.env
+
+    path = Path(__file__).resolve().parents[1] / "scripts" / "rounds.py"
+    spec = importlib.util.spec_from_file_location("rounds_offering", path)
+    assert spec is not None and spec.loader is not None
+    script = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(script)
+    monkeypatch.setattr(print_shop.env, "load_env", lambda path=None: dict(SETTINGS))
+
+    class Run:
+        def __init__(self, folder: Path) -> None:
+            self.folder = folder
+            self.box = Box(folder)
+
+    for name, opted, offered in (("eval-tip-9", False, False), ("eval-tip-9", True, True),
+                                 ("design-table", False, True)):
+        run = Run(tmp_path / name)
+        script._offering(run, opted)
+        assert (run.box.offers is not None) == offered, (name, opted)
+    kept = tmp_path / "scenario"
+    kept.mkdir()
+    (kept / "right.json").write_text("{}")
+    assert script.is_eval(kept) and not script.is_eval(tmp_path / "design-table")
+
+
+def test_the_settings_example_reads_as_the_settings_reader_reads_it(tmp_path: Path) -> None:
+    """Each comment in the docs' example is a line of its own: read by `load_env`, every value
+    is the value, with no comment in it."""
+    from print_shop.env import load_env
+
+    text = (Path(__file__).resolve().parents[1] / "docs" / "settings-study.md").read_text()
+    block = text[text.index("BENCH_HOSTS=spark\n"):]
+    block = block[:block.index("```")]
+    (tmp_path / ".env").write_text(block)
+    found = stated(load_env(tmp_path / ".env"))[0]
+    assert (found.ssh, found.memory_mb, found.floor_mb, found.load_mb) == (
+        "spark", 15 * 1024, 10 * 1024, 12 * 1024)

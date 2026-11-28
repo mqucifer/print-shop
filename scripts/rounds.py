@@ -89,6 +89,11 @@ from print_shop.rounds.session import TRIM_AT, TRIM_KEEP, Limits
 from print_shop.slicer.store import NoChoice
 
 #: Said of `--assembly-run`, at `start` and at `resume` (mqucifer/print-shop#310).
+OFFER_MEMORY = (
+    "for an eval's run (one kept with a right answer, or named eval-...): offer a load that "
+    "meets its container's memory to a remote host with more, as a design run does. Off unless "
+    "given, so an eval's answers stay comparable between batches"
+)
 ASSEMBLY_RUN = (
     "an assembly run, given the approved parts to put together and making none: its `done` "
     "takes its assembly file in `part`, placing two or more given parts, each unchanged. "
@@ -233,13 +238,22 @@ def _lessons(args: argparse.Namespace, ledger: DesignLedger) -> str:
     return f"lesson {lesson}: {found['status']}, by {found['status_by']}"
 
 
-def _offering(run: Run) -> None:
-    """Where the settings name a remote host that states a larger memory for a `load`, a
+def is_eval(folder: Path) -> bool:
+    """Whether a run is an eval's: kept with a scenario's right answer, or named `eval-...`."""
+    return (folder / scores.RIGHT_FILE).exists() or folder.name.startswith("eval")
+
+
+def _offering(run: Run, opted_in: bool = False) -> None:
+    """Where the settings name a remote host that states a larger memory for a `load`, a design
     round's `load` whose read meets its container's memory is offered it (`bench.pool.Offers`,
-    mqucifer/print-shop#380). Where none does, its answer stands, as before. Settings that state
-    a host wrongly are said, and the run reads here alone."""
+    mqucifer/print-shop#380). Where none does, its answer stands, as before. An eval's run is
+    offered nothing unless `opted_in`: its answers are compared between batches. Settings that
+    state a host wrongly are said, and the run reads here alone."""
     from print_shop.bench.pool import Offers  # noqa: PLC0415
     from print_shop.env import SETTINGS_PATH, load_env  # noqa: PLC0415
+
+    if is_eval(run.folder) and not opted_in:
+        return
 
     try:
         offers = Offers(load_env(SETTINGS_PATH))
@@ -432,9 +446,11 @@ def main() -> int:
         f"{lessons.START_CHARS} unless given. The `lessons` tool finds the rest",
     )
     start.add_argument("--assembly-run", action="store_true", help=ASSEMBLY_RUN)
+    start.add_argument("--offer-memory", action="store_true", help=OFFER_MEMORY)
     resume = sub.add_parser("resume")
     resume.add_argument("name")
     resume.add_argument("--assembly-run", action="store_true", help=ASSEMBLY_RUN)
+    resume.add_argument("--offer-memory", action="store_true", help=OFFER_MEMORY)
     resume.add_argument("--note", type=Path)
     resume.add_argument(
         "--from",
@@ -626,7 +642,7 @@ def main() -> int:
                 # locked can be stopped and done again (mqucifer/print-shop#66).
                 for line in told:
                     print(line, flush=True)
-            _offering(run)
+            _offering(run, args.offer_memory)
             ending = run.drive()
             print(what_next(run, ending))
     except (

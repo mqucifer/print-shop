@@ -22,6 +22,13 @@ from print_shop.bench.report import NoAnswer
 GIB = 2**30
 
 
+@pytest.fixture(autouse=True)
+def _no_docker_events(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Docker's events are never asked here: a stand-in's kill is no `oom` event unless a test
+    says it is (mqucifer/print-shop#380)."""
+    monkeypatch.setattr(host, "oom_killed", lambda docker, name, since: False)
+
+
 def _cgroup(tmp_path: Path, current: int, peak: int, shmem: int) -> Path:
     group = tmp_path / "cgroup"
     group.mkdir()
@@ -154,6 +161,8 @@ def test_a_killed_load_run_by_the_host_says_where_it_was(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path, args: list[str]
 ) -> None:
     trace: list[str] = []
+    # Docker's own `oom` event for the container says the kernel stopped it for memory.
+    monkeypatch.setattr(host, "oom_killed", lambda docker, name, since: True)
     done = _host_run(
         monkeypatch, tmp_path, _child("its own\n" + SAID, host.KILLED), args, trace=trace
     )
@@ -164,6 +173,11 @@ def test_a_killed_load_run_by_the_host_says_where_it_was(
     assert done.stderr == "its own\n", "what it says as it goes is the host's, not passed on"
     # What it said, and the host's own line that it met its memory (mqucifer/print-shop#380).
     assert trace == [*SAID.splitlines(), host.killed_met(SAID.splitlines(), host.memory_for(args))]
+    # Killed otherwise, as a stopped study's: its memory isn't said to be met.
+    monkeypatch.setattr(host, "oom_killed", lambda docker, name, since: False)
+    trace.clear()
+    _host_run(monkeypatch, tmp_path, _child("its own\n" + SAID, host.KILLED), args, trace=trace)
+    assert trace == SAID.splitlines()
 
 
 def test_a_load_that_ends_passes_on_its_stderr_less_what_it_said_as_it_went(

@@ -25,8 +25,9 @@ from pathlib import Path, PurePosixPath
 
 from . import host
 
-__all__ = ["HERE", "OFFERED", "BenchJob", "HostLost", "JobResult", "Met", "Runner", "Stopped",
-           "load_files", "run_here", "running_here", "saved_files", "stop_here"]
+__all__ = ["HERE", "OFFERED", "READS", "BenchJob", "HostLost", "JobResult", "Met", "Runner",
+           "Stopped", "load_files", "reads", "run_here", "running_here", "saved_files",
+           "stop_here", "verdict_of"]
 
 #: What a job's record calls this host (`report.how_it_ran`'s `host`): a remote is called by its
 #: name in the settings (`remote.RemoteHost`).
@@ -39,7 +40,11 @@ class Stopped(RuntimeError):
 
 class HostLost(RuntimeError):
     """The host a job ran on stopped answering before it gave the job's reply: no answer of the
-    job's own, so it may run again on another host (mqucifer/print-shop#373)."""
+    job's own, so it may run again on another host (mqucifer/print-shop#373). `kind` is how it
+    failed, in words with no name or figure of the job's: the step and Docker's or SSH's part,
+    as `run: docker's exit 125` (mqucifer/print-shop#380)."""
+
+    kind: str = ""
 
 #: This host's Docker, which its jobs run by.
 DOCKER = ("docker",)
@@ -124,6 +129,35 @@ class Met:
         return f"host={self.host} {fields} killed={int(self.killed)} at {self.at}"
 
 
+def reads(folder: Path, saved: tuple[str, ...] | list[str]) -> int:
+    """How much a saved reply read (mqucifer/print-shop#380): 2 an answer of the whole, any
+    verdict but NO ANSWER; 1 a glass band's lower bound; 0 NO ANSWER, or no reply saved."""
+    found = next((f for f in saved if f.endswith(".json")), None)
+    if found is None:
+        return 0
+    try:
+        record = json.loads((folder / found).read_text())
+    except (OSError, ValueError):
+        return 0
+    if not isinstance(record, dict) or record.get("verdict") in (None, "NO ANSWER"):
+        return 0
+    return 1 if "lower_bound" in (record.get("numbers") or {}) else 2
+
+
+#: What each of `reads`'s counts is, in words.
+READS = ("NO ANSWER", "a glass band's lower bound", "the whole")
+
+
+def verdict_of(folder: Path, saved: tuple[str, ...] | list[str]) -> str:
+    """A saved reply's verdict word, or `none saved`."""
+    found = next((f for f in saved if f.endswith(".json")), None)
+    try:
+        record = json.loads((folder / found).read_text()) if found else {}
+    except (OSError, ValueError):
+        record = {}
+    return str(record.get("verdict") or "none saved") if isinstance(record, dict) else "none saved"
+
+
 def load_files(folder: Path, args: list[str] | tuple[str, ...]) -> list[str]:
     """The files a `load` reads, relative to `folder`: its assembly file and every file it names
     beside it, each part's own, its `with`s, its `band` and its regions' meshes. Those that
@@ -170,6 +204,9 @@ class BenchJob:
     #: (mqucifer/print-shop#331), and what it reads doesn't hang on how busy the host is.
     memory: str = field(default="")
     timeout: int = 0
+    #: The longer limit it's offered as it runs, where `timeout` is given, in s, or 0: a design
+    #: round's `load` under the run's own limit, offered the hour (`host.offered`).
+    longer: int = 0
     #: What it met where it ran first, where it's offered a host with more memory
     #: (mqucifer/print-shop#380): told to its container (`OFFERED`).
     offered: Met | None = None
@@ -221,7 +258,7 @@ def run_here(job: BenchJob) -> JobResult:
         done: subprocess.CompletedProcess[str] = host.run(
             list(job.args), job.folder, timeout=job.timeout or None, name=name,
             more_env={"BENCH_HOST": HERE, **job.told()}, memory=job.memory or None, trace=said,
-            docker=DOCKER)
+            docker=DOCKER, longer=job.longer or None)
     finally:
         with _LOCK:
             _RUNNING.discard(name)
