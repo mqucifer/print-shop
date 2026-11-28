@@ -6,10 +6,14 @@ Commands a session calls over files in its working directory, each answering in 
 scripts/bench.py build                       # once: the first image, if the disk has room
 scripts/bench.py build cae                   # once: the second, with FreeCAD, for fit-on, bend, load and optimise
 scripts/bench.py check                       # each image and the disk against their limits
+scripts/bench.py hosts                       # each remote host the settings name, checked
+scripts/bench.py send NAME [bench|cae]       # the images sent to a remote host, checked by ID
 scripts/bench.py clearance a.step b.step     # any command below, over the current directory
 scripts/bench.py python script.py            # your own script, in the first image's container
 scripts/bench.py freecad script.py           # your own script, in the second's, with FreeCAD
 ```
+
+A settings study's `load` reads can also run on a remote host's Docker over SSH, as [the study's page](settings-study.md) says (`bench/remote.py`, mqucifer/print-shop#373): `hosts` checks each one, and `send` pipes `docker save` here into its `docker load` and checks the IDs, where its disk keeps the floor free with the image.
 
 [The rounds](rounds.md) use it as a session's tool. A session inside the image can call the same commands directly, by mounting `src/print_shop/bench` read-only (`host.py` shows how). Nothing fences the model off: these are tools it may use, and it can write its own scripts.
 

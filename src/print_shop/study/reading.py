@@ -199,6 +199,9 @@ class CaseRead:
     figures: list[Figure] = field(default_factory=list)
     notes: list[str] = field(default_factory=list)
     seconds: float | None = None
+    #: The host its `load` ran on, as its record names it (mqucifer/print-shop#373): "here", or
+    #: a remote's name; None where it doesn't say.
+    host: str | None = None
 
     @property
     def worst(self) -> Figure | None:
@@ -211,7 +214,7 @@ class CaseRead:
     def plain(self) -> dict[str, Any]:
         return {"case": self.case, "verdict": self.verdict, "why": self.why,
                 "figures": [f.plain() for f in self.figures], "notes": self.notes,
-                "seconds": self.seconds}
+                "seconds": self.seconds, "host": self.host}
 
 
 @dataclass
@@ -434,8 +437,11 @@ def unchecked(printed: dict[str, Any]) -> list[str]:
 def figures(record: dict[str, Any], part: str, case: Case) -> CaseRead:
     """This part's figures in one `load` reply (its saved record), each against its limit."""
     numbers = record.get("numbers") or {}
+    ran = record.get("ran")
+    on = ran.get("host") if isinstance(ran, dict) else None
     read = CaseRead(case.name, str(record.get("verdict", "NO ANSWER")),
-                    str(record.get("why", "")), seconds=record.get("seconds"))
+                    str(record.get("why", "")), seconds=record.get("seconds"),
+                    host=str(on) if on else None)
     one = (numbers.get("parts") or {}).get(part)
     if isinstance(one, dict):
         printed = bool(one.get("printed"))

@@ -158,15 +158,24 @@ def container(
     image: str = IMAGE,
     env: dict[str, str] | None = None,
     memory: str | None = None,
+    docker: tuple[str, ...] = ("docker",),
+    mounts: tuple[str, str] | None = None,
+    cpuset: str | None = None,
 ) -> list[str]:
     """The `docker run` for a command over a working directory, in either image under the same
     limits, but for the memory a command may be given (`memory_for`). It holds no secret. `env`
-    is more of its environment, none of it a secret either."""
+    is more of its environment, none of it a secret either.
+
+    On another host (`remote`, mqucifer/print-shop#373) it's the same run, by that host's
+    `docker` (`docker -H ssh://HOST`): `mounts` are what /work and the bench's code are there,
+    in place of `work` and this checkout's package, and `cpuset` the cores it's pinned to."""
     memory = MEMORY if memory is None else memory
     user = f"{os.getuid()}:{os.getgid()}"
     more = [word for key, value in (env or {}).items() for word in ("-e", f"{key}={value}")]
+    work_from, code_from = mounts or (str(work.resolve()), str(HERE))
+    pinned = ["--cpuset-cpus", cpuset] if cpuset else []
     return [
-        "docker",
+        *docker,
         "run",
         "--rm",
         "--name",
@@ -175,6 +184,7 @@ def container(
         "none",
         "--cpus",
         CPUS,
+        *pinned,
         "--memory",
         memory,
         "--memory-swap",
@@ -209,9 +219,9 @@ def container(
         f"BENCH_CODE={code_version()}",
         *more,
         "-v",
-        f"{work.resolve()}:/work",
+        f"{work_from}:/work",
         "-v",
-        f"{HERE}:{MOUNT}:ro",
+        f"{code_from}:{MOUNT}:ro",
         "-w",
         workdir,
         image,
@@ -291,6 +301,10 @@ def run(
     image: str | None = None,
     trace: list[str] | None = None,
     name: str | None = None,
+    docker: tuple[str, ...] = ("docker",),
+    mounts: tuple[str, str] | None = None,
+    cpuset: str | None = None,
+    more_env: dict[str, str] | None = None,
 ) -> subprocess.CompletedProcess[str]:
     """Run a bench command, or a script with `python=True`, in a container over `work`. A command
     runs in its own image; a script in the first, or in `image`, where `CAE_IMAGE`'s Python has
@@ -298,7 +312,8 @@ def run(
     it; otherwise a command has its own (`timeout_for`), and `load` may take up a longer one
     (`offered`). What it says as it goes (`STEP_LINE`, `MEMORY_LINE`) isn't passed on, but put
     in `trace` where one's given. Its container is `name`, or a new one's: a caller that names it
-    can stop it (`job.stop_here`)."""
+    can stop it (`job.stop_here`). `docker`, `mounts` and `cpuset` run it on another host, as
+    `container` says; `more_env` is more of its environment there, as the host's name."""
     name = name or f"print-bench-{uuid.uuid4().hex[:12]}"
     longer = None
     if timeout is None:
@@ -313,7 +328,7 @@ def run(
     # The command's own limit, so a command that can see it coming stops before it and says
     # where it got to (`load` in two passes, mqucifer/print-shop#301); and the longer one it may
     # take up (mqucifer/print-shop#325).
-    env = {"BENCH_TIMEOUT": str(timeout)}
+    env = {"BENCH_TIMEOUT": str(timeout), **(more_env or {})}
     if longer is not None:
         env[OFFER] = str(longer)
     memory = MEMORY if python else memory_for(args)
@@ -324,10 +339,13 @@ def run(
         image=image or (IMAGE if python else image_for(args)),
         env=env,
         memory=memory,
+        docker=docker,
+        mounts=mounts,
+        cpuset=cpuset,
     )
     done, limit, could = _waited(argv, timeout, longer)
     if done is None:
-        subprocess.run(["docker", "kill", name], capture_output=True, check=False)
+        subprocess.run([*docker, "kill", name], capture_output=True, check=False)
         stopped = list(STOPPED_SAID)
         if trace is not None:
             trace.extend(stopped)
@@ -559,6 +577,11 @@ def main(argv: list[str]) -> int:
         return build(*argv[1:2])
     if argv[:1] == ["check"]:
         return check()
+    if argv[:1] in (["hosts"], ["send"]):
+        # The remote hosts the settings name (mqucifer/print-shop#373).
+        from .remote import main as remote_main
+
+        return remote_main(argv)
     work = Path.cwd()
     # `python script.py` in the first image, `freecad script.py` in the second.
     python = argv[:1] in (["python"], ["freecad"])

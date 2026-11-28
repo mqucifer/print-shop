@@ -200,47 +200,83 @@ class Slots:
     """The jobs running on a host, each holding its memory and its cores of the budget until it
     ends: a job waits until both are free, past what other processes' containers hold (`others`,
     MiB, asked again every `LOOK_AGAIN` s as it waits). One the whole budget can't hold is
-    refused."""
+    refused. Where the host's `cores` are stated (a remote's, mqucifer/print-shop#373), each job
+    is given cores of its own from them, to pin it to."""
 
-    def __init__(self, budget: Budget, others: Callable[[], int] | None = None) -> None:
+    def __init__(self, budget: Budget, others: Callable[[], int] | None = None,
+                 cores: tuple[int, ...] = ()) -> None:
         self.budget = budget
         self.others = others
+        self.cores = cores
+        self._free_cores = list(cores)
         self._lock = threading.Condition()
         self._memory = 0
         self._cpus = 0
         #: The most jobs that ran at once.
         self.most = 0
         self._running = 0
+        #: How many jobs have ended: a job that found no room waits for the next.
+        self.ended = 0
 
-    @contextmanager
-    def take(self, memory_mb: int = 0, cpus: int = 1) -> Iterator[None]:
-        """Hold `memory_mb` and `cpus` while the block runs.
+    def said(self, memory: str = host.MEMORY) -> str:
+        return self.budget.said(memory)
 
-        Raises:
-            ValueError: If the budget can't hold it at all, saying what it holds.
-        """
-        cores = self.budget.holds(cpus)
+    def refuse_past(self, memory_mb: int) -> None:
+        """Raises ValueError, saying what the budget holds, where it can't hold a job of
+        `memory_mb` at all."""
         if memory_mb > self.budget.free_memory_mb or self.budget.free_cpus < 1:
             raise ValueError(f"a job of {memory_mb} MiB is past the budget: "
                              f"{self.budget.free_memory_mb} MiB and {self.budget.free_cpus} CPUs "
                              "free of what's kept for other work and the VM's own")
+
+    def hold(self, memory_mb: int = 0, cpus: int = 1) -> tuple[int, ...] | None:
+        """Hold `memory_mb` and `cpus` where they're free now, without waiting: the cores given
+        it (none where none are stated), or None where they aren't free. `let_go` them as it
+        ends."""
+        cores = self.budget.holds(cpus)
+        elsewhere = self.others() if self.others is not None else 0
+        with self._lock:
+            if (self._memory + elsewhere + memory_mb > self.budget.free_memory_mb
+                    or self._cpus + cores > self.budget.free_cpus):
+                return None
+            self._memory += memory_mb
+            self._cpus += cores
+            self._running += 1
+            self.most = max(self.most, self._running)
+            given = tuple(self._free_cores[:cores]) if self.cores else ()
+            del self._free_cores[:len(given)]
+            return given
+
+    def let_go(self, memory_mb: int, cpus: int, given: tuple[int, ...]) -> None:
+        with self._lock:
+            self._memory -= memory_mb
+            self._cpus -= self.budget.holds(cpus)
+            self._running -= 1
+            self._free_cores = sorted({*self._free_cores, *given})
+            self.ended += 1
+            self._lock.notify_all()
+
+    @contextmanager
+    def take(self, memory_mb: int = 0, cpus: int = 1,
+             kind: str | None = None) -> Iterator[tuple[int, ...]]:
+        """Hold `memory_mb` and `cpus` while the block runs, and give it its cores where they're
+        stated. `kind` is for a pool of hosts (`pool.Pool`): one host runs every kind.
+
+        Raises:
+            ValueError: If the budget can't hold it at all, saying what it holds.
+        """
+        self.refuse_past(memory_mb)
         while True:
-            elsewhere = self.others() if self.others is not None else 0
             with self._lock:
-                if (self._memory + elsewhere + memory_mb <= self.budget.free_memory_mb
-                        and self._cpus + cores <= self.budget.free_cpus):
-                    self._memory += memory_mb
-                    self._cpus += cores
-                    self._running += 1
-                    self.most = max(self.most, self._running)
-                    break
+                seen = self.ended
+            given = self.hold(memory_mb, cpus)
+            if given is not None:
+                break
+            with self._lock:
                 # Woken as one of its own ends; looks again at other processes' as it waits.
-                self._lock.wait(timeout=LOOK_AGAIN if self.others is not None else None)
+                if self.ended == seen:
+                    self._lock.wait(timeout=LOOK_AGAIN if self.others is not None else None)
         try:
-            yield
+            yield given
         finally:
-            with self._lock:
-                self._memory -= memory_mb
-                self._cpus -= cores
-                self._running -= 1
-                self._lock.notify_all()
+            self.let_go(memory_mb, cpus, given)

@@ -7,7 +7,7 @@ mqucifer/print-shop#339. On the Mac, with Orca installed and the bench's second 
         --nozzle 0.4 --filament NAME [--turn RX,RY,RZ|RX,RY,fit] [--context PATH] \\
         (--case 'NAME=LOAD ARGS' ... | --needs RUN/record/needs.json [--need ID ...] |
          --no-cases) [--limits FILE] [--out DIR] [--ledger PATH] [--max-candidates N] \\
-        [--max-hours H] [--reserve-memory SIZE] [--reserve-cpus N] [--serial]
+        [--max-hours H] [--reserve-memory SIZE] [--reserve-cpus N] [--serial] [--here-only]
     uv run python scripts/settings_study.py queue RUN --by WHO [--file NAME]... \\
         [--case 'NAME=ARGS']... [--assembly FILE] [--limits FILE]
     uv run python scripts/settings_study.py retry ORDER --root ROOT --by WHO
@@ -57,11 +57,13 @@ from pathlib import Path
 
 import trimesh
 
+from print_shop.bench import remote
 from print_shop.bench.assembly import MATERIALS
 from print_shop.bench.assembly import read as read_assembly
 from print_shop.bench.budget import Budget, Slots, megabytes, others_mb, reserved
 from print_shop.bench.host import memory_for
-from print_shop.bench.job import running_here
+from print_shop.bench.job import run_here, running_here
+from print_shop.bench.pool import Pool
 from print_shop.bench.report import NoAnswer
 from print_shop.env import SETTINGS_PATH, load_env
 from print_shop.expert.client import LLMConfig
@@ -88,6 +90,21 @@ from print_shop.study.reading import (
     defaults,
 )
 from print_shop.study.table import as_plain, table
+
+
+def _with_remotes(here: Slots | Pool, env: dict[str, str]) -> Slots | Pool:
+    """This host's slots, and each remote host's the settings name (`BENCH_HOSTS`,
+    `bench.remote`) that has this host's images: a pool, where there's one. A host that's
+    refused is said, and the study goes on without it."""
+    remotes = []
+    for stated in remote.stated(env):
+        found = remote.Remote(stated)
+        why = found.refused()
+        if why:
+            print(f"not reading on {stated.name}: {why}", file=sys.stderr, flush=True)
+            continue
+        remotes.append(found)
+    return Pool(here, remotes) if remotes and isinstance(here, Slots) else here
 
 
 def _load_mb(case: Case) -> int:
@@ -207,6 +224,11 @@ def study(args: argparse.Namespace) -> int:
         if budget.at_once(heaviest) < 1:
             raise ValueError(f"the host's budget, {budget.said()}, holds no load of "
                              f"{heaviest} MiB: keep less for other work")
+        # Other processes' bench and rounds containers are counted as each read takes its slot.
+        slots: Slots | Pool = Slots(budget, None if args.serial else
+                                    (lambda: others_mb(running_here())))
+        if not (args.serial or args.here_only):
+            slots = _with_remotes(slots, env)
     except (ValueError, RuntimeError) as exc:
         print(exc, file=sys.stderr)
         return 2
@@ -227,17 +249,17 @@ def study(args: argparse.Namespace) -> int:
                       line_width=float(own.line_width or 0.45),
                       layer_height=float(own.layer_height or 0.2)),
         slicing=OrcaSlicing(stl, profiles, meshes),
-        loading=BenchLoad(assembly_path or stl, part_name),
+        loading=BenchLoad(assembly_path or stl, part_name,
+                          slots.run if isinstance(slots, Pool) else run_here),
         defaults=own, material=material, limits=limits,
         workdir=out / "candidates", keys=keys,
         poses=poses,
         lessons=tuple(kept_lessons), earlier=tuple(studied_before),
         wall_sequence=str(process.get("wall_sequence", "")), filament=filament,
-        # Other processes' bench and rounds containers are counted as each read takes its slot.
-        slots=Slots(budget, None if args.serial else (lambda: others_mb(running_here()))),
+        slots=slots,
     )
     print(f"studying {part_name} turned {degrees_said(turn)} under {len(cases)} load cases, "
-          f"in {out}, within {budget.said()}", flush=True)
+          f"in {out}, within {slots.said()}", flush=True)
     names = [c.name for c in cases]
 
     def landed(so_far: StudyResult) -> None:
@@ -411,6 +433,9 @@ def main(argv: list[str] | None = None) -> int:
                          "settings, else one bench command's 2")
     go.add_argument("--serial", action="store_true",
                     help="read one slice or load at a time, as before")
+    go.add_argument("--here-only", action="store_true",
+                    help="read only on this host, not on the remote hosts BENCH_HOSTS names in "
+                         "the settings")
     go.add_argument("--max-candidates", type=int, default=10)
     go.add_argument("--max-hours", type=float, default=6.0)
     listing = sub.add_parser("lessons", help="every study lesson, or one study's")

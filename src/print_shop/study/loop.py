@@ -37,6 +37,7 @@ from __future__ import annotations
 import contextlib
 import json
 import queue
+import shlex
 import threading
 import time
 from collections.abc import Callable
@@ -49,6 +50,8 @@ from print_shop.bench import host
 from print_shop.bench.as_printed import wall_thickness
 from print_shop.bench.assembly import Material
 from print_shop.bench.budget import LOAD_CORES, SLICE_CORES, Budget, Slots, megabytes
+from print_shop.bench.job import HostLost
+from print_shop.bench.pool import Pool
 from print_shop.bench.printed import Settings
 from print_shop.core.state import Orientation
 from print_shop.expert.client import CutOff, LLMConfig, Stopped, TimedOut, chat_with_tools
@@ -93,6 +96,8 @@ __all__ = [
 #: The model's calls, the seconds and the candidates of its own the loop takes at most. A
 #: candidate is two slices and a `load` for each case, minutes each, so the time is hours.
 MAX_CALLS = 40
+#: How many hosts a case's `load` is tried on, where the one it ran on stopped answering.
+HOST_TRIES = 3
 MAX_SECONDS = 6 * 3600.0
 MAX_CANDIDATES = 10
 #: The candidates of its own the model reads before it may recommend.
@@ -229,8 +234,9 @@ class StudyPart:
     wall_sequence: str = ""
     filament: str = ""
     #: What the host runs at once: each slice holds a core, and each `load` its memory and a
-    #: core (`bench.budget`). One at a time unless given.
-    slots: Slots = field(default_factory=lambda: Slots(Budget.serial()))
+    #: core (`bench.budget`). One at a time unless given. Or a pool of this host and remote ones
+    #: (`bench.pool`), whose `load`s run where there's room, the fastest for each first.
+    slots: Slots | Pool = field(default_factory=lambda: Slots(Budget.serial()))
     #: The Sponsor's limits, binding on it (`study.limits`).
     limits: Limits = field(default_factory=Limits)
 
@@ -316,13 +322,25 @@ def read_candidate(part: StudyPart, candidate: Candidate,
     sliced = reading.sliced
 
     def one(case: Case) -> CaseRead | None:
-        try:
-            with part.slots.take(_load_memory(case), LOAD_CORES):
-                if cancel is not None and cancel.is_set():
-                    return None
-                record = part.loading(candidate, sliced, case, out / case.name)
-        except Exception as exc:  # noqa: BLE001 - load failing is the case's answer, said
-            record = {"verdict": "NO ANSWER", "why": f"{type(exc).__name__}: {exc}"[:400]}
+        # Its kind, which a pool of hosts measures each host's speed by: the same command for
+        # every candidate under the case (`bench.pool`).
+        kind = shlex.join(["load", *case.args])
+        for tries_left in range(HOST_TRIES - 1, -1, -1):
+            try:
+                with part.slots.take(_load_memory(case), LOAD_CORES, kind=kind):
+                    if cancel is not None and cancel.is_set():
+                        return None
+                    record = part.loading(candidate, sliced, case, out / case.name)
+                break
+            except HostLost as exc:
+                # The host stopped answering: no answer of the job's own, so it runs again on
+                # another, which the pool now gives it.
+                record = {"verdict": "NO ANSWER", "why": f"{type(exc).__name__}: {exc}"[:400]}
+                if not tries_left:
+                    break
+            except Exception as exc:  # noqa: BLE001 - load failing is the case's answer, said
+                record = {"verdict": "NO ANSWER", "why": f"{type(exc).__name__}: {exc}"[:400]}
+                break
         return figures(record, part.name, case)
 
     with ThreadPoolExecutor(max_workers=max(1, len(part.cases)),
@@ -499,7 +517,7 @@ def run(loop: StudyLoop, part: StudyPart, stop: threading.Event | None = None,
     def outcome(why: str, **done: Any) -> StudyResult:
         return StudyResult(why, state.readings, state.calls, model_calls,
                            round(time.monotonic() - started, 1), loop.model, **done,
-                           budget=part.slots.budget.said(), most_at_once=part.slots.most,
+                           budget=part.slots.said(), most_at_once=part.slots.most,
                            limits=part.limits.said(), ruled_out=list(state.ruled_out))
 
     def so_far() -> None:
@@ -590,7 +608,8 @@ def run(loop: StudyLoop, part: StudyPart, stop: threading.Event | None = None,
         # An interrupt, or what no tool answers for (a mesh that won't write, a full disk):
         # nothing is left running, and the table so far is written, before it's raised.
         state.cancel.set()
-        for stopping in (getattr(part.slicing, "stop", None), getattr(part.loading, "stop", None)):
+        for stopping in (getattr(part.slicing, "stop", None), getattr(part.loading, "stop", None),
+                         getattr(part.slots, "stop", None)):
             if callable(stopping):
                 with contextlib.suppress(Exception):
                     stopping()
@@ -679,7 +698,7 @@ def _read(loop: StudyLoop, part: StudyPart, state: _State, args: dict[str, Any])
     return "\n".join([
         f"queued {name}: {candidate.said()}", *notes,
         f"Reading or queued: {', '.join(state.pending)}, within the host's budget "
-        f"({part.slots.budget.said()}). Queue more you'd read anyway, or `wait` for readings "
+        f"({part.slots.said()}). Queue more you'd read anyway, or `wait` for readings "
         "as they land."])
 
 

@@ -3,6 +3,8 @@
 
 scripts/bench.py build                      the one image, if the disk has room
 scripts/bench.py check                      the image and the disk against their limits
+scripts/bench.py hosts                      the remote hosts the settings name, checked
+scripts/bench.py send NAME [bench|cae]      the images sent to one, and checked by ID
 scripts/bench.py clearance a.step b.step    any command, in a container with no network
 scripts/bench.py python script.py           your own script, in the same container
 """

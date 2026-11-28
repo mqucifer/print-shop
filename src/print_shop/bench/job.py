@@ -24,8 +24,17 @@ from pathlib import Path
 
 from . import host
 
-__all__ = ["BenchJob", "JobResult", "Runner", "run_here", "running_here", "saved_files",
-           "stop_here"]
+__all__ = ["HERE", "BenchJob", "HostLost", "JobResult", "Runner", "run_here", "running_here",
+           "saved_files", "stop_here"]
+
+#: What a job's record calls this host (`report.how_it_ran`'s `host`): a remote is called by its
+#: name in the settings (`remote.RemoteHost`).
+HERE = "here"
+
+
+class HostLost(RuntimeError):
+    """The host a job ran on stopped answering before it gave the job's reply: no answer of the
+    job's own, so it may run again on another host (mqucifer/print-shop#373)."""
 
 #: The containers this process's jobs are running in, by name: its own, which the host's budget
 #: doesn't count twice (`budget.others`), and which `stop_here` stops.
@@ -80,6 +89,8 @@ class JobResult:
     stdout: str
     stderr: str
     saved: tuple[str, ...] = ()
+    #: The host that ran it: `HERE`, or a remote's name.
+    host: str = HERE
 
 
 #: Runs a job and returns its result, with what it saved in the job's folder.
@@ -98,7 +109,8 @@ def run_here(job: BenchJob) -> JobResult:
         _RUNNING.add(name)
     try:
         done: subprocess.CompletedProcess[str] = host.run(
-            list(job.args), job.folder, timeout=job.timeout or None, name=name)
+            list(job.args), job.folder, timeout=job.timeout or None, name=name,
+            more_env={"BENCH_HOST": HERE})
     finally:
         with _LOCK:
             _RUNNING.discard(name)
