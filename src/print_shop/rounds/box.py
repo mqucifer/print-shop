@@ -187,8 +187,12 @@ class Box:
             self.built.add(image)
         longer = None
         if timeout is None:
-            timeout = host.TWO_PASSES if host.asks_two_passes(args) else None
-            longer = host.offered(args)
+            # By its folder, as `host.run` gives it: a read as printed of an assembly with a
+            # `through` joint is given the hour from the start (mqucifer/print-shop#363).
+            folder = where or self.work
+            hour = host.asks_two_passes(args) or host.reads_printed_through(args, folder)
+            timeout = host.TWO_PASSES if hour else None
+            longer = host.offered(args, folder)
         return self._run(
             host.bench_command(args), where, timeout, image, longer=longer,
             memory=host.memory_for(args),

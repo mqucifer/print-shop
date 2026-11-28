@@ -25,7 +25,9 @@ Nothing here changes how the bench reads anything else.
 - `search-fails`: the search for faces closer than the mesh's sag failing;
 - `unsized`: the faces found close where gmsh's triangles cross given no local size, so gmsh
   refuses them as it did (mqucifer/print-shop#346);
-- `plain`: nothing forced, `load` as the bench runs it.
+- `plain`: nothing forced, `load` as the bench runs it;
+- `iterative`: a part read as printed solved by the iterative solver from the start
+  (mqucifer/print-shop#363).
 
 And either of these may follow MODE, for two runs read on the same meshes
 (mqucifer/print-shop#348): gmsh's high-order optimisation numbers each patch of elements it
@@ -86,6 +88,10 @@ if given[:1] in (["--keep-meshes"], ["--meshes"]):
     GmshTools.update_properties = same_meshes
 if mode == "plain":
     pass
+elif mode == "iterative":
+    # A part read as printed solved by CalculiX's iterative solver from the start, corrected to
+    # the nodes' balance (mqucifer/print-shop#363).
+    load.ITERATE_PRINTED = True
 elif mode == "straight":
     solve = load._Model.solve
 

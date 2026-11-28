@@ -437,6 +437,9 @@ REPORTS: dict[str, tuple[str, ...]] = {
         # (mqucifer/print-shop#337).
         "printed",
         "reaction_n",
+        # Where a printed core's worst cells were read in coarse elements near their limit,
+        # the places meshed again finer and what each read first (mqucifer/print-shop#363).
+        "refined",
         "solve_s",
         "toward",
         # Where it's read in two passes, why, and each pass's meshes, time and memory

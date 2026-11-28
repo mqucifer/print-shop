@@ -70,6 +70,12 @@ standing and placed by the one turn about z, exactly where it is, and by its `at
 lofted through 9 sections bowing 25 mm along its layers, its flat sides B-spline as a loft makes
 them; and the leg bowing along its layers with a notch 6 x 4 in its flat side.
 
+`load/web*` (mqucifer/print-shop#363): two round bosses 12 across and 20 tall, 40 apart, joined
+by a web 1.75 thick, and 2.0 thick.
+
+`load/tile*` (mqucifer/print-shop#363): a plate 60 x 60 x 8 with four counterbored holes, a
+pocket in its top and a boss in the pocket against its wall.
+
 `capped/` (mqucifer/print-shop#346): a top 40 x 40 and 6 thick with a counterbore 10 across and
 2 deep at its middle, and a cap 2 tall standing on the counterbore's floor with play round it,
 turned 15° about its axis so its seam isn't the counterbore's: 0.15 mm of play, a fit's, and
@@ -1235,6 +1241,93 @@ def bowed() -> None:
     (out / "bowed-at.json").write_text(json.dumps(at))
 
 
+#: The slotted bar (mqucifer/print-shop#363): 120 by 20 by 20, held at x 0, a slot 4 wide and 12
+#: deep across its top at its middle, printed at 60% grid, its core's cell 1.36 mm.
+SLOT_AT, SLOT_WIDE, SLOT_DEEP = 58.0, 4.0, 12.0
+
+
+def slotted() -> None:
+    """The slotted bar (mqucifer/print-shop#363): loaded at its end, its core's worst cells lie
+    at the slot's inside corners, far from its held face, in elements of a coarse mesh many
+    times its cell, so read at the mesh's scale: where that's near its limit, it's meshed
+    again finer round them (`load.refined`)."""
+    out = Path("load")
+    bar = box((0, 0, 0), (120, 20, 20)).cut(
+        box((SLOT_AT, -1, 20 - SLOT_DEEP), (SLOT_AT + SLOT_WIDE, 21, 21)))
+    save(bar, out / "slotted.step")
+    row = {"name": "bar", "file": "slotted.step", "layers": "z",
+           "print": {**PRINT, "walls": 2, "infill": 60}}
+    assembly(out / "printed-slotted.json", [row], held=[{"plane": "x=0", "how": "fixed"}])
+
+
+#: The webbed bosses (mqucifer/print-shop#363): two round bosses 12 across and 20 tall, their
+#: axes 40 apart, joined by a web between them, 1.75 thick, its core 0.12 mm across between its
+#: 2 walls, under what Orca's opening leaves infill in, and 2.0 thick, 0.37 mm, over it.
+WEB_BOSS_R, WEB_APART, WEB_TALL, WEB_THIN, WEB_WIDE = 6.0, 40.0, 20.0, 1.75, 2.0
+
+
+def webbed() -> None:
+    """The webbed bosses (mqucifer/print-shop#363), each printed and solid, held on their bed
+    face and pushed across the web's top at its middle."""
+    out = Path("load")
+    for name, web in (("web", WEB_THIN), ("web-wide", WEB_WIDE)):
+        bosses = [Part.makeCylinder(WEB_BOSS_R, WEB_TALL, App.Vector(x, 0, 0))
+                  for x in (0.0, WEB_APART)]  # fmt: skip
+        plate = box((0, -web / 2, 0), (WEB_APART, web / 2, WEB_TALL))
+        save(bosses[0].fuse([bosses[1], plate]).removeSplitter(), out / f"{name}.step")
+        for kind, extra in (("", {}), ("printed-", {"print": {**PRINT, "walls": 2, "infill": 20}})):
+            row = {"name": "webbed", "file": f"{name}.step", "layers": "z", **extra}
+            assembly(out / f"{kind}{name}.json", [row], held=[{"plane": "z=0", "how": "fixed"}])
+
+
+#: The tile (mqucifer/print-shop#363): a plate 60 x 60 and 8 thick, four holes 5.5 across
+#: through it, each counterbored 10 across and 3 deep, a pocket 20 x 10 and 4 deep in its top,
+#: and a boss 6 across standing in the pocket against its wall: every face upright to its
+#: layers or flat in their plane, planes and cylinders, as a real tile's.
+TILE_SIDE, TILE_T, TILE_HOLE_R, TILE_BORE_R, TILE_BORE_DEEP = 60.0, 8.0, 2.75, 5.0, 3.0
+
+
+def tile() -> None:
+    """The tile (mqucifer/print-shop#363), printed and solid, held on its bed face and pushed
+    down on its top by a corner."""
+    out = Path("load")
+    shape = box((0, 0, 0), (TILE_SIDE, TILE_SIDE, TILE_T))
+    for x, y in ((10, 10), (50, 10), (10, 50), (50, 50)):
+        shape = shape.cut(Part.makeCylinder(TILE_HOLE_R, TILE_T + 2, App.Vector(x, y, -1)))
+        shape = shape.cut(Part.makeCylinder(TILE_BORE_R, TILE_BORE_DEEP + 1,
+                                            App.Vector(x, y, TILE_T - TILE_BORE_DEEP)))  # fmt: skip
+    shape = shape.cut(box((20, 25, TILE_T - 4), (40, 35, TILE_T + 1)))
+    shape = shape.fuse(Part.makeCylinder(3, 4, App.Vector(30, 25, TILE_T - 4))).removeSplitter()
+    save(shape, out / "tile.step")
+    printing = {"print": {**PRINT, "walls": 2, "infill": 20}}
+    for kind, extra in (("", {}), ("printed-", printing)):
+        row = {"name": "tile", "file": "tile.step", "layers": "z", **extra}
+        assembly(out / f"{kind}tile.json", [row], held=[{"plane": "z=0", "how": "fixed"}])
+    # Its top's four outer edges chamfered 1 mm, its skin on sloped faces (mqucifer/print-shop#363).
+    def on_rim(edge: Any) -> bool:
+        span = edge.BoundBox
+        return bool(type(edge.Curve).__name__ == "Line" and span.ZMin > TILE_T - 1e-6
+                    and (min(span.XMax, span.YMax) < 1e-6
+                         or max(span.XMin, span.YMin) > TILE_SIDE - 1e-6))
+
+    save(shape.makeChamfer(1.0, [e for e in shape.Edges if on_rim(e)]),
+         out / "tile-chamfered.step")
+    row = {"name": "tile", "file": "tile-chamfered.step", "layers": "z", **printing}
+    assembly(out / "printed-tile-chamfered.json", [row],
+             held=[{"plane": "z=0", "how": "fixed"}])
+    # And with a solid pin bonded in each of its holes, below its counterbore: parts beside a
+    # printed one, each to keep elements of its own (mqucifer/print-shop#363's real tile).
+    rows: Rows = [{"name": "tile", "file": "tile.step", "layers": "z", **printing}]
+    joints: Rows = []
+    for k, (x, y) in enumerate(((10, 10), (50, 10), (10, 50), (50, 50)), 1):
+        pin = Part.makeCylinder(TILE_HOLE_R, TILE_T - TILE_BORE_DEEP, App.Vector(x, y, 0))
+        save(pin, out / f"tile-pin-{k}.step")
+        rows.append({"name": f"pin{k}", "file": f"tile-pin-{k}.step", "layers": "z"})
+        joints.append({"between": ["tile", f"pin{k}"], "kind": "bonded"})
+    assembly(out / "printed-tile-pinned.json", rows, joints,
+             [{"plane": "z=0", "how": "fixed"}])  # fmt: skip
+
+
 #: The capped top (mqucifer/print-shop#346): its side and thickness, the counterbore's radius
 #: and depth, and the cap's play round it, a fit's and a hair's, and its turn, in mm and degrees.
 CAPPED_SIDE, CAPPED_T, CAPPED_BORE_R, CAPPED_DEEP = 40.0, 6.0, 5.0, 2.0
@@ -1272,6 +1365,9 @@ def main() -> None:
     capped()
     printed()
     bowed()
+    slotted()
+    webbed()
+    tile()
     throughs()
     peaks()
     shears()

@@ -33,6 +33,7 @@ dev = [
     "types-pyyaml>=6.0",
     "pytest-xdist>=3.6",
     "cryptography>=43",
+    "shapely==2.2.0",
 ]
 
 [build-system]
@@ -56,6 +57,7 @@ markers = [
     "assembly: a cae test of a whole furniture assembly, run by CI in a job of its own (mqucifer/print-shop#295)",
     "bands: an assembly test of a glass frame's band under --parts or a lift, run by CI in a job of its own beside assembly (mqucifer/print-shop#375)",
     "proof: a cae proof too long for CI's job, run by hand on the Mac with -m proof (mqucifer/print-shop#325)",
+    "printed: a cae test reading a part as printed, minutes a read, in CI's cae-printed job (mqucifer/print-shop#363)",
     "remote: runs bench jobs on a real remote host over SSH; runs only with PRINT_SHOP_TEST_REMOTE=SSH-TARGET (mqucifer/print-shop#373)",
 ]
 
@@ -80,5 +82,5 @@ follow_imports = "skip"
 
 # The bench's second image (src/print_shop/bench/cae-image) has FreeCAD and its FEM workbench.
 [[tool.mypy.overrides]]
-module = ["FreeCAD", "Part", "Mesh", "ObjectsFem", "femmesh.*", "femtools", "femtools.*", "matplotlib", "matplotlib.*", "mpl_toolkits.*"]
+module = ["FreeCAD", "Part", "Mesh", "MeshPart", "ObjectsFem", "femmesh.*", "femtools", "femtools.*", "matplotlib", "matplotlib.*", "mpl_toolkits.*"]
 ignore_missing_imports = true

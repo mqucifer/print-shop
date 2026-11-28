@@ -15,7 +15,7 @@ from typing import Any
 import numpy as np
 import pytest
 
-from print_shop.bench import assembly, dovetail, host, through, way_in
+from print_shop.bench import assembly, dovetail, host, load, through, way_in
 from print_shop.bench.load import (
     MIDS,
     _gmsh_errors,
@@ -1631,3 +1631,88 @@ def test_a_triangle_taken_by_its_corners_lies_on_the_face_or_is_left_out() -> No
     up = np.array([0, 0, 1.0])
     assert lies_on(flat, flat.mean(axis=0), up, 0.0)
     assert not lies_on(flat + [0, 0, 0.01], flat.mean(axis=0), up, 0.0)
+
+
+def _read_with(core: dict[str, Any]) -> dict[str, Any]:
+    base = {"cell_mm": 1.2, "cell": "the part", "across_layers_pct": 0.1,
+            "across_limit_pct": 0.481, "stretch_pct": 0.2, "stretch_limit_pct": 1.51,
+            "near_limit": [{"at": [0.0, 0.0, 0.0], "reading": "across", "pct": 0.5,
+                            "mesh_mm": 20.0},
+                           {"at": [5.0, 5.0, 5.0], "reading": "stretch", "pct": 1.3,
+                            "mesh_mm": 20.0}]}  # fmt: skip
+    return {"parts": {"leg": {"cores": [{**base, **core}]}}}
+
+
+def test_a_core_read_near_its_limit_in_coarse_elements_is_meshed_again_finer() -> None:
+    """mqucifer/print-shop#363: where a printed core's verdict is in doubt, either mesh's worst
+    reading within `REFINE_DOUBT` under its limit or over it, not failing beyond doubt, every place
+    either reads near its limit in coarse elements (`_Model._near_limit`) is meshed again
+    finer, at `REFINE_SIZE_CELLS` of its cell, no finer than `HELD_FINEST`, out `REFINE_CELLS`
+    cells or `HELD_ZONE`, whichever is more, each with what it read first, one to a box. A
+    verdict not in doubt, or a mesh no coarser than that, is read as it was."""
+    near = max(load.REFINE_SIZE_CELLS * 1.2, load.HELD_FINEST)
+    reach = max(load.REFINE_CELLS * 1.2, load.HELD_ZONE)
+    # Either side of its limit, as a real leg's core across its layers read: both places.
+    over, under = _read_with({"across_layers_pct": 0.55}), _read_with({"across_layers_pct": 0.40})
+    found = load.refined(over, under, 20.0)
+    assert sorted(p[:3] for p in found) == [([0.0, 0.0, 0.0], near, reach),
+                                            ([5.0, 5.0, 5.0], near, reach)]
+    why = next(p[3] for p in found if p[0] == [0.0, 0.0, 0.0])
+    assert why["reading"] == "across" and why["first_pct"] == 0.5
+    assert why["limit_pct"] == 0.481 and why["first_cell_mesh_mm"] == 20.0
+    # Both under it, one within `REFINE_DOUBT`: in doubt.
+    close = _read_with({"stretch_pct": 1.45})
+    assert len(load.refined(close, _read_with({"stretch_pct": 1.2}), 20.0)) == 2
+    # Both well under it, though within the margin, the meshes apart: not in doubt.
+    assert load.refined(_read_with({"stretch_pct": 1.23}), _read_with({"stretch_pct": 0.94}),
+                        20.0) == []  # fmt: skip
+    # Both over it past `REFINE_SURE`: a FAIL either way.
+    high = _read_with({"across_layers_pct": 1.5})
+    assert load.refined(high, high, 20.0) == []
+    # A coarse cell over its limit by 15% to 30% on both meshes, as a real leg's first read:
+    # refined, not a FAIL, as such a cell over-reads.
+    for share in (1.15, 1.3):
+        reading = share * 0.481
+        assert load.refined(_read_with({"across_layers_pct": reading}),
+                            _read_with({"across_layers_pct": reading}), 20.0)  # fmt: skip
+    # The same, its worst cells already in elements at its aim on both meshes: a finer mesh
+    # wouldn't move them, so it fails beyond doubt.
+    sized = {"across_layers_pct": 1.3 * 0.481, "across_cell_mesh_mm": near}
+    assert load.refined(_read_with(sized), _read_with(sized), 20.0) == []
+    # Over by more than `REFINE_SURE` on both meshes, as the tall bar's core at three times:
+    # a FAIL whatever this core reads elsewhere, coarse cells or not.
+    sure = _read_with({"across_layers_pct": 3.2 * 0.481, "stretch_pct": 1.45})
+    assert load.refined(sure, sure, 20.0) == []
+    # And a skin's: no cell of its own to refine, so only past `REFINE_SURE`.
+    skin = {"across_layers_pct": 1.6, "across_limit_pct": 1.0}
+    failing = {"parts": {"leg": {**over["parts"]["leg"], **skin}}}
+    assert load.refined(failing, {"parts": {"leg": {**under["parts"]["leg"], **skin}}},
+                        20.0) == []  # fmt: skip
+    nearer = {"parts": {"leg": {**over["parts"]["leg"], "across_layers_pct": 1.3,
+                                "across_limit_pct": 1.0}}}
+    assert load.refined(nearer, nearer, 20.0)
+    # Under its limit and out of doubt, but its worst cell unresolved, in elements many times
+    # its aim, and reading over `REFINE_UNRESOLVED` of it: refined, as such a cell's reading is
+    # the mesh's (mqucifer/print-shop#363's review). Resolved, or under that share: not.
+    coarse = {"stretch_pct": 0.7 * 1.51, "stretch_cell_mesh_mm": 20.0,
+              "across_cell_mesh_mm": 20.0}
+    assert load.refined(_read_with(coarse), _read_with(coarse), 20.0)
+    resolved = {**coarse, "stretch_cell_mesh_mm": near, "across_cell_mesh_mm": near}
+    assert load.refined(_read_with(resolved), _read_with(resolved), 20.0) == []
+    low = {**coarse, "stretch_pct": 0.3 * 1.51}
+    assert load.refined(_read_with(low), _read_with(low), 20.0) == []
+    # The coarser mesh refined at `REFINE_COARSER` times the finer's size, so the second check
+    # reads the mesh there, not gmsh's spread at one size.
+    places = load.refined(over, under, 20.0)
+    assert [p[1] for p in load.coarser_refine(places)] == [
+        pytest.approx(load.REFINE_COARSER * p[1]) for p in places]
+    # No place near its limit in coarse elements: read as it was.
+    bare = _read_with({"across_layers_pct": 0.55, "near_limit": []})
+    assert load.refined(bare, bare, 20.0) == []
+    # A mesh no coarser than its aim already.
+    assert load.refined(over, under, near) == []
+    # A solid part, or one with no cell: nothing.
+    solid: dict[str, Any] = {"parts": {"leg": {"part": {}}}}
+    assert load.refined(solid, solid, 20.0) == []
+    none = _read_with({"cell_mm": 0, "across_layers_pct": 0.55})
+    assert load.refined(none, none, 20.0) == []

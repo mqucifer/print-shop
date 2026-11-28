@@ -260,7 +260,7 @@ def test_a_host_whose_images_arent_this_ones_by_id_is_refused(tmp_path: Path) ->
     assert _remote(tmp_path / "a").refused() is None
     other = {**IDS, host.CAE_IMAGE: "sha256:" + "d" * 64}
     why = _remote(tmp_path / "b", images=other).refused()
-    assert why is not None and "print-shop/cae:0.2 is sha256:dddddddddddd" in why
+    assert why is not None and f"{host.CAE_IMAGE} is sha256:dddddddddddd" in why
     assert "scripts/bench.py send spark" in why
     why = _remote(tmp_path / "c", images={host.CAE_IMAGE: IDS[host.CAE_IMAGE]}).refused()
     assert why is not None and f"{host.IMAGE} is none" in why
@@ -622,7 +622,7 @@ def test_a_job_that_runs_past_its_limit_there_is_read_again_elsewhere(
     alone is read again on another host, and that host stays in use."""
     root = tmp_path / "spark"
     alone, _ = _study(part, tmp_path, 0, Slots(Budget(4 * 1024, 4)), _here)
-    monkeypatch.setattr(host, "timeout_for", lambda args: 1)
+    monkeypatch.setattr(host, "timeout_for", lambda args, folder=None: 1)
     (root / "volumes").mkdir(parents=True)
     (root / "delay").write_text("3")
     pool = Pool(Slots(Budget(4 * 1024, 4)), [_remote(root)], here_runner=_here)

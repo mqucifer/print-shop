@@ -5,7 +5,10 @@ solid skin of walls and shells round an infill core, and regions of their own. N
 The beam of `test_cae.py`, 120 x 20 x 10, held at its root and loaded with 1 kg at its tip,
 printed at 2 and 4 walls and at 20, 40 and 60% grid (`cae_cases/make_fixtures.py`, `printed`):
 it reads stiffer and stronger as both rise, and moves as a sandwich beam's formula says, with
-the skin and core's own section.
+the skin and core's own section. Each element is read as its layers have it, all skin, all
+core, or a blend of the two (`classify`, mqucifer/print-shop#363), its mesh fine at the part's
+faces: a few minutes a read, so each is asked once a module (`cae`), and the whole grid of
+walls and infill is a `proof`, by hand. Marked `printed`: CI runs them in a job of their own.
 """
 
 from __future__ import annotations
@@ -21,11 +24,11 @@ from typing import Any
 import numpy as np
 import pytest
 
-from print_shop.bench import as_printed, host, infill
+from print_shop.bench import as_printed, host, infill, load
 from print_shop.bench.assembly import MATERIALS
 from print_shop.bench.printed import Settings
 
-pytestmark = pytest.mark.cae
+pytestmark = [pytest.mark.cae, pytest.mark.printed]
 CASES = Path(__file__).parent / "cae_cases"
 TIP = ("--weight", "1", "--at", "115,10,10")
 #: The beam, as the formula reads it: its length to the load, its width and depth, and the
@@ -35,6 +38,14 @@ LENGTH, WIDTH, DEPTH, MODULUS, G = 115.0, 20.0, 10.0, 1500.0, 9.80665
 #: load is spread over a patch whose middle is nearer the root (`test_cae.py`), and the printed
 #: ones the same, so they're held to it within 8%.
 AGREE = 0.08
+#: How far the beam's second, coarser mesh may read it from its first (mqucifer/print-shop#363):
+#: its movement, and its skin and core, each at its own scale, where resolved. Measured on the
+#: 2-20 beam: its skin 3.6% across its layers and 10.3% its stretch, its core 2.7% across; held
+#: at 15%, the most of those and half again. Its core's stretch, read in elements more than
+#: `load.REFINE_OVER` times its aim, is its mesh's figure, not its cell's: its two meshes 21%
+#: apart, said and not held (mqucifer/print-shop#363's review).
+SECOND_MOVES = 0.03
+SECOND_AGREE = 0.15
 
 
 @dataclass
@@ -61,23 +72,30 @@ def cae(tmp_path_factory: pytest.TempPathFactory) -> Any:
     made = host.run(["make_fixtures.py"], work, python=True, image=host.CAE_IMAGE)
     assert made.returncode == 0, made.stdout + made.stderr
 
+    asked: dict[tuple[str, ...], Answer] = {}
+
     def ask(*args: str) -> Answer:
-        done = host.run([str(a) for a in args], work)
-        found = re.search(r"saved: (\S+)\.txt and \.json", done.stdout)
-        assert found, f"nothing saved: {done.stdout}{done.stderr}"
-        record = json.loads((work / f"{found.group(1)}.json").read_text())
-        return Answer(done.returncode, done.stdout, record)
+        """`load`'s answer to `args`, read once a module: a read as printed takes minutes."""
+        words = tuple(str(a) for a in args)
+        if words not in asked:
+            done = host.run(list(words), work)
+            found = re.search(r"saved: (\S+)\.txt and \.json", done.stdout)
+            assert found, f"nothing saved: {done.stdout}{done.stderr}"
+            record = json.loads((work / f"{found.group(1)}.json").read_text())
+            asked[words] = Answer(done.returncode, done.stdout, record)
+        return asked[words]
 
     ask.work = work  # type: ignore[attr-defined]
     return ask
 
 
-def sandwich(walls: int, density: float, pattern: str = "grid", angle: float = 0.0) -> float:
-    """How far the beam's tip moves as a sandwich beam: FL³/(3·EI), with EI the skin's and the
-    core's about their own neutral axis, the skin solid and the core its infill's stiffness
-    along the beam (`infill.Core`). Its walls are Orca's beads' spacing at 0.45 mm lines and 0.2
-    mm layers (`as_printed.wall_thickness`), and its 5 top and 3 bottom layers 0.2 mm, as
-    `make_fixtures.PRINT` has them."""
+def section(walls: int, density: float, pattern: str = "grid", angle: float = 0.0
+            ) -> tuple[float, float, float]:
+    """The beam's section as a sandwich: its EI, the skin's and the core's about their own
+    neutral axis, the skin solid and the core its infill's stiffness along the beam
+    (`infill.Core`), in N·mm²; that axis's height, and the core's top's, in mm. Its walls are
+    Orca's beads' spacing at 0.45 mm lines and 0.2 mm layers (`as_printed.wall_thickness`), and
+    its 5 top and 3 bottom layers 0.2 mm, as `make_fixtures.PRINT` has them."""
     found = infill.core(Settings(pattern=pattern, infill=density, infill_angle=angle),
                         MATERIALS["petg"])
     up, first, second = np.eye(3)[2], np.eye(3)[0], np.eye(3)[1]
@@ -90,7 +108,20 @@ def sandwich(walls: int, density: float, pattern: str = "grid", angle: float = 0
     bending = MODULUS * (WIDTH * DEPTH**3 / 12 + area * (DEPTH / 2 - middle) ** 2) - soft * (
         (WIDTH - 2 * side) * (high - low) ** 3 / 12 + inner * ((low + high) / 2 - middle) ** 2
     )
-    return float(G * LENGTH**3 / (3 * bending))
+    return float(bending), float(middle), float(high)
+
+
+def sandwich(walls: int, density: float, pattern: str = "grid", angle: float = 0.0) -> float:
+    """How far the beam's tip moves as a sandwich beam, 1 kg at its tip: FL³/(3·EI)."""
+    return G * LENGTH**3 / (3 * section(walls, density, pattern, angle)[0])
+
+
+def core_at_root(walls: int, density: float, kg: float = 1.0) -> float:
+    """The core's stretch along the beam at its root's top, in %, by the sandwich's own
+    section: M·c/EI, the root's moment `kg` at the tip, c the core's top over its neutral
+    axis. The plane-sections arithmetic the cell's average must not read under."""
+    bending, middle, high = section(walls, density)
+    return 100 * kg * G * LENGTH * (high - middle) / bending
 
 
 def worst(answer: Answer) -> float:
@@ -108,31 +139,87 @@ def worst(answer: Answer) -> float:
     return float(max(shares))
 
 
+def read_or_cornered(answer: Answer) -> None:
+    """Read, OK; or, where a held face's edge or a sharp inside corner has no one figure in any
+    mesh, its two meshes either side of a limit, DISAGREE, the reply saying to round it: the
+    honest answer there (mqucifer/print-shop#363's review, the operator's ruling)."""
+    assert answer.verdict in ("OK", "DISAGREE"), answer.text
+    if answer.verdict == "DISAGREE":
+        assert "round it" in answer.text, answer.text
+
+
+def held_to_its_layers(cell: dict[str, Any]) -> None:
+    """A printed cell's mesh holds its core as Orca's layers do, band by band of its layers,
+    its wedges' volume less (`classify.checked`): short of it by no more than
+    `as_printed.SHORT`, the unsafe side, and over it by no more than `as_printed.AGREE`; every
+    layer read; and every element told skin, core or one blend of them."""
+    assert cell["layers_unread"] == 0, cell
+    assert cell["band_short_pct"] <= 100 * as_printed.SHORT, cell
+    assert cell["band_over_pct"] <= 100 * as_printed.AGREE, cell
+    kinds = ("skin", "core", "laminate", "column", "series")
+    assert sum(cell[f"{k}_elements"] for k in kinds) == cell["elements"], cell
+    # Its skin as wedges on its faces: every triangle but those held, thin, leaving the part
+    # or turned inside out (`wedges.layer`).
+    assert cell["wedges"] > 0, cell
+    left = ("held", "thin", "outside", "inverted")
+    assert cell["part_wedges"] + sum(cell[f"faces_{k}"] for k in left) == cell["faces"], cell
+
+
+def bar(answer: Answer, walls: int, density: int) -> None:
+    """The printed beam at `walls` and `density`: read OK, as the sandwich formula says, its
+    walls, shells and core as its layers have them."""
+    assert answer.verdict == "OK" and answer.code == 0, answer.text
+    beam = answer.numbers["parts"]["beam"]
+    assert beam["printed"] and len(beam["cores"]) == 1
+    assert beam["cores"][0]["pattern"] == "grid"
+    assert beam["cores"][0]["density_pct"] == density
+    assert answer.numbers["moves_mm"] == pytest.approx(sandwich(walls, density), rel=AGREE)
+    # Its core averaged over its own cell, never under the section's own arithmetic at its root.
+    core = beam["cores"][0]
+    assert core["stretch_pct"] >= core_at_root(walls, density), core
+    assert core["cell_mm"] == pytest.approx(infill.cell_mm(
+        "grid", density, as_printed.wall_thickness(1, 0.45, 0.2)), abs=1e-3)
+    printed = answer.numbers["printed"]["beam"][0]
+    side = as_printed.wall_thickness(walls, 0.45, 0.2)
+    assert printed["walls_mm"] == pytest.approx(side, abs=1e-3)
+    assert printed["top_mm"] == pytest.approx(1.0)
+    assert printed["bottom_mm"] == pytest.approx(0.6)
+    assert printed["core_mm3"] == pytest.approx(
+        (120 - 2 * side) * (20 - 2 * side) * (10 - 1.6), rel=0.01)
+    held_to_its_layers(printed)
+
+
 def test_a_printed_bar_reads_stiffer_and_stronger_as_its_walls_and_infill_rise(cae: Any) -> None:
+    """At 2 walls and 20%, and 4 walls and 60%, the beam bends as the sandwich formula says
+    within `AGREE`, less than all core and more than solid; the stiffer stronger."""
     solid = cae("load", "load/one.json", *TIP)
+    low = cae("load", "load/printed-2-20.json", *TIP)
+    high = cae("load", "load/printed-4-60.json", *TIP)
+    bar(low, 2, 20)
+    bar(high, 4, 60)
+    assert solid.numbers["moves_mm"] < high.numbers["moves_mm"] < low.numbers["moves_mm"]
+    assert worst(high) < worst(low)
+    # Each core read at its own cell's scale at the clamped root, the same on both meshes: the
+    # 60% core's cell, 1.36 mm, finer than the mesh, its held face meshed at twice it.
+    for answer in (low, high):
+        core = answer.numbers["parts"]["beam"]["cores"][0]
+        assert core["coarse_stretch_pct"] == pytest.approx(core["stretch_pct"], rel=0.05), core
+    cell = high.numbers["printed"]["beam"][0]
+    assert cell["held_mesh_mm"] == pytest.approx(2 * cell["cell_mm"], rel=1e-3)
+    assert low.numbers["printed"]["beam"][0]["held_mesh_mm"] is None
+    # The solid beam is read as before: one material, no cores.
+    assert "printed" not in solid.numbers
+    assert solid.numbers["moves_mm"] == pytest.approx(1.870, abs=0.002)
+
+
+@pytest.mark.proof
+def test_the_whole_grid_of_walls_and_infill_reads_in_order(cae: Any) -> None:
+    """Each of 2 and 4 walls at 20, 40 and 60%: each as the formula says, and each step up in
+    walls or infill stiffer and stronger. Six reads as printed, past CI's job: by hand."""
     read = {(w, d): cae("load", f"load/printed-{w}-{d}.json", *TIP)
             for w in (2, 4) for d in (20, 40, 60)}
     for (walls, density), answer in read.items():
-        assert answer.verdict == "OK" and answer.code == 0, answer.text
-        beam = answer.numbers["parts"]["beam"]
-        assert beam["printed"] and len(beam["cores"]) == 1
-        assert beam["cores"][0]["pattern"] == "grid"
-        assert beam["cores"][0]["density_pct"] == density
-        moves = answer.numbers["moves_mm"]
-        assert moves == pytest.approx(sandwich(walls, density), rel=AGREE), (walls, density)
-        # Softer than the solid beam, which the skin and core can never pass.
-        assert moves > solid.numbers["moves_mm"]
-        printed = answer.numbers["printed"]["beam"][0]
-        side = as_printed.wall_thickness(walls, 0.45, 0.2)
-        assert printed["walls_mm"] == pytest.approx(side, abs=1e-3)
-        assert printed["top_mm"] == pytest.approx(1.0)
-        assert printed["bottom_mm"] == pytest.approx(0.6)
-        assert printed["core_mm3"] == pytest.approx(
-            (120 - 2 * side) * (20 - 2 * side) * (10 - 1.6), rel=0.01
-        )
-        # Printed own +z up: its 3 bottom layers on its z 0 face, its 5 top on its z 10.
-        (_, _, low), (_, _, high) = printed["core_box"]
-        assert (low, high) == (pytest.approx(0.6, abs=1e-3), pytest.approx(9.0, abs=1e-3))
+        bar(answer, walls, density)
     for walls in (2, 4):
         moves = [read[(walls, d)].numbers["moves_mm"] for d in (20, 40, 60)]
         shares = [worst(read[(walls, d)]) for d in (20, 40, 60)]
@@ -141,9 +228,81 @@ def test_a_printed_bar_reads_stiffer_and_stronger_as_its_walls_and_infill_rise(c
     for density in (20, 40, 60):
         assert read[(4, density)].numbers["moves_mm"] < read[(2, density)].numbers["moves_mm"]
         assert worst(read[(4, density)]) < worst(read[(2, density)])
-    # The solid beam is read as before: one material, no cores.
-    assert "printed" not in solid.numbers
-    assert solid.numbers["moves_mm"] == pytest.approx(1.870, abs=0.002)
+
+
+def forced(cae: Any, mode: str, *args: str) -> Answer:
+    """`load` with one step forced (`cae_cases/load_forced.py`), read once a module."""
+    work: Path = cae.work
+    asked: dict[tuple[str, tuple[str, ...]], Answer] = cae.__dict__.setdefault("forced", {})
+    if (mode, args) not in asked:
+        shutil.copy(CASES / "load_forced.py", work / "load_forced.py")
+        done = host.run(["load_forced.py", mode, *args], work, python=True, image=host.CAE_IMAGE)
+        found = re.search(r"saved: (\S+)\.txt and \.json", done.stdout)
+        assert found, done.stdout + done.stderr
+        asked[(mode, args)] = Answer(done.returncode, done.stdout,
+                                     json.loads((work / f"{found.group(1)}.json").read_text()))
+    return asked[(mode, args)]
+
+
+def test_the_iterative_solver_reads_a_printed_part_as_the_direct_one_does(cae: Any) -> None:
+    """The beam at 2 walls and 20%, its skin a layer of wedges on its faces, by CalculiX's
+    direct solver and by its iterative one from the start, balanced by `load`'s corrections
+    (`cae_cases/load_forced.py`, `iterative`): the same movement, verdict, skin and core, to
+    the balance's own tolerance, a part in a thousand."""
+    direct = cae("load", "load/printed-2-20.json", *TIP)
+    iterated = forced(cae, "iterative", "load", "load/printed-2-20.json", *TIP)
+    assert direct.verdict == iterated.verdict != "NO ANSWER", direct.text + iterated.text
+    assert "iterative" not in direct.text and "iterative" in iterated.text
+    assert iterated.numbers["moves_mm"] == pytest.approx(direct.numbers["moves_mm"], rel=1e-3)
+    for key in ("across_layers_pct", "stretch_pct"):
+        assert iterated.numbers["parts"]["beam"][key] == pytest.approx(
+            direct.numbers["parts"]["beam"][key], rel=1e-3)
+        assert iterated.numbers["parts"]["beam"]["cores"][0][key] == pytest.approx(
+            direct.numbers["parts"]["beam"]["cores"][0][key], rel=1e-3)
+
+
+def test_the_second_check_reads_the_wedges_meshed_again_with_the_solid(cae: Any) -> None:
+    """mqucifer/print-shop#363: the beam's skin is laid as wedges on each mesh's own faces, so
+    its coarser mesh is a second reading of it: it moves within `SECOND_MOVES` of the first,
+    and its skin and core, each read at its own scale, within `SECOND_AGREE`; and its core's
+    peak at its elements is left unjudged beside its cell's."""
+    fine = cae("load", "load/printed-2-20.json", *TIP)
+    place = fine.numbers["loads"][0]
+    first = place.get("mesh_moves_mm", place["moves_mm"])
+    assert place["coarse_moves_mm"] == pytest.approx(first, rel=SECOND_MOVES)
+    beam = fine.numbers["parts"]["beam"]
+    core = beam["cores"][0]
+    aim = load.REFINE_OVER * max(load.REFINE_SIZE_CELLS * core["cell_mm"], load.HELD_FINEST)
+    for one in (beam, core):
+        for key, cell in (("across_layers_pct", "across"), ("stretch_pct", "stretch")):
+            if one is core and core[f"{cell}_cell_mesh_mm"] > aim:
+                continue  # unresolved, its mesh's figure: said, not held
+            assert one[f"coarse_{key}"] == pytest.approx(one[key], rel=SECOND_AGREE), (key, one)
+    core = beam["cores"][0]
+    assert core["at_elements_stretch_pct"] > core["stretch_pct"]
+    assert "averaged over its own cell, 4.07 mm each way" in fine.text
+    assert "its skin laid on its faces as" in fine.text
+    assert "its skin's strain read at its wedges' and its elements' own points" in fine.text
+
+
+def test_a_core_truly_overloaded_at_its_root_fails_there(cae: Any) -> None:
+    """Twice the weight at which the section's arithmetic stretches the beam's core at its
+    root to its limit: read over its own cell, the core is over its limit, at its root, and
+    no less stretched than that arithmetic says. An overload spans many cells, so its cell's
+    average doesn't hide it; and it reaches past its held face's zone, so judged from that
+    zone's edge on, Saint-Venant's way, it's still caught (mqucifer/print-shop#363's review)."""
+    limit = infill.core(Settings(pattern="grid", infill=20, infill_angle=0),
+                        MATERIALS["petg"]).along_pct  # fmt: skip
+    kg = math.ceil(2 * limit / core_at_root(2, 20))
+    heavy = cae("load", "load/printed-2-20.json", "--weight", str(kg), "--at", "115,10,10")
+    assert heavy.verdict == "FAIL", heavy.text
+    core = heavy.numbers["parts"]["beam"]["cores"][0]
+    assert core["stretch_pct"] > core["stretch_limit_pct"], core
+    assert core["stretch_pct"] >= core_at_root(2, 20, kg), core
+    assert core["stretch_at"][0] < 10, core
+    assert core["stretch_at"][0] >= core["held_zone"]["depth_mm"] - 1e-6, core
+    assert "judged from its held faces' zone's edge on" in heavy.text
+    assert "the part beam's core in the part is stretched" in heavy.text
 
 
 def test_the_reply_says_what_it_assumed_and_that_no_print_has_checked_it(cae: Any) -> None:
@@ -175,6 +334,8 @@ def test_a_box_round_the_root_stiffens_it_and_its_own_walls_more(cae: Any) -> No
         cells = {c["cell"]: c for c in answer.numbers["parts"]["beam"]["cores"]}
         assert set(cells) == {name, "the part"}
         assert cells[name]["density_pct"] == 60 and cells["the part"]["density_pct"] == 20
+        for cell in answer.numbers["printed"]["beam"]:
+            held_to_its_layers(cell)
     assert walled.numbers["moves_mm"] < dense.numbers["moves_mm"] < plain["moves_mm"]
     # The island's ring each side of its face at x 30 takes from both cores.
     island = {c["cell"]: c for c in walled.numbers["printed"]["beam"]}
@@ -207,11 +368,11 @@ def test_a_band_of_layers_is_read_in_the_part_s_own_axes_and_a_box_wins_over_it(
 
 def test_a_printed_part_s_joint_carries_what_statics_says(cae: Any) -> None:
     """The beam as two halves bolted at its middle, each printed: the joint's force and moment,
-    read from the nodes' own balance with each element's own stiffness, skin or core, are the
-    weight and its moment about the joint by statics, as for the solid halves, within 0.3% of
-    the weight: read from CalculiX's seven figures of each movement, as the skin's thin flat
-    elements made the .frd's six 3.9% out; and the halves, each walled where they meet, are
-    stiffer than the one-piece printed beam."""
+    read from the nodes' own balance with each element's own stiffness, skin, core or blend,
+    are the weight and its moment about the joint by statics, as for the solid halves, within
+    0.3% of the weight: read from CalculiX's seven figures of each movement, as the skin's thin
+    flat elements made the .frd's six 3.9% out; and the halves, each walled where they meet,
+    are stiffer than the one-piece printed beam."""
     two = cae("load", "load/printed-two.json", *TIP)
     assert two.verdict == "OK", two.text
     joint = two.numbers["joints"]["root+tip"]
@@ -230,7 +391,8 @@ def test_lines_along_the_bar_hold_it_stiffer_than_lines_across_it(cae: Any) -> N
     run along the beam, and at 45° none do."""
     along = cae("load", "load/printed-lines-0.json", *TIP)
     across = cae("load", "load/printed-lines-45.json", *TIP)
-    assert along.verdict == "OK" and across.verdict == "OK", along.text + across.text
+    read_or_cornered(along)
+    read_or_cornered(across)
     assert along.numbers["moves_mm"] < across.numbers["moves_mm"]
     for answer, angle in ((along, 0), (across, 45)):
         assert answer.numbers["moves_mm"] == pytest.approx(
@@ -239,27 +401,27 @@ def test_lines_along_the_bar_hold_it_stiffer_than_lines_across_it(cae: Any) -> N
 
 
 def test_a_part_printed_turned_over_has_its_top_shells_on_its_other_face(cae: Any) -> None:
-    """Own -z up, its 5 top layers are on its z 0 face and its 3 bottom on its z 10: the core
-    runs from 1.0 to 9.4, where printed own +z up it runs from 0.6 to 9.0. Where a face pulled
-    has the thinner shells under it, it reads weaker."""
+    """Own -z up, its 5 top layers are on its z 0 face and its 3 bottom on its z 10, the face
+    the tip's weight pulls: its core runs 0.6 mm from it, not 1.0, so it's stretched more
+    there than printed own +z up."""
     over = cae("load", "load/printed-over.json", *TIP)
-    assert over.verdict == "OK", over.text
-    (_, _, low), (_, _, high) = over.numbers["printed"]["beam"][0]["core_box"]
-    assert (low, high) == (pytest.approx(1.0, abs=1e-3), pytest.approx(9.4, abs=1e-3))
+    up = cae("load", "load/printed-2-20.json", *TIP)
+    read_or_cornered(over)
     assert "printed own -z up" in over.text
+    held_to_its_layers(over.numbers["printed"]["beam"][0])
+    stretched = [a.numbers["parts"]["beam"]["cores"][0]["stretch_pct"] for a in (over, up)]
+    assert stretched[0] > stretched[1]
 
 
 def test_a_core_pulled_across_its_layers_is_read_at_its_own_elements(cae: Any) -> None:
-    """A block 40 x 40 x 10 held on its bed face and pulled up by 50 kg over its top: its core
-    is read at its own elements' integration points and nodes, never less than CalculiX's
-    mean at a node, which takes in the skin's where they meet; and on average no less than a
-    column of shells and core beside its walls says: the walls and the column stretch alike,
-    the column's shells and core in series."""
+    """A block 40 x 40 x 10 held on its bed face and pulled up by 50 kg over its top: its core,
+    read over its own cell, is no less than a column of shells and core beside its walls says
+    on average: the walls and the column stretch alike, the column's shells and core in
+    series; and no less than CalculiX's own mean at a node of its core."""
     pulled = cae("load", "load/printed-pulled.json", "--weight", "50", "--at", "20,20,10",
                  "--over", "40", "--toward", "+z")
     assert pulled.verdict == "OK", pulled.text
     core = pulled.numbers["parts"]["block"]["cores"][0]
-    assert core["across_layers_pct"] >= core["averaged_across_layers_pct"] - 1e-9
     side = as_printed.wall_thickness(2, 0.45, 0.2)
     found = infill.core(Settings(pattern="grid", infill=20, infill_angle=0), MATERIALS["petg"])
     up, first, second = np.eye(3)[2], np.eye(3)[0], np.eye(3)[1]
@@ -268,6 +430,16 @@ def test_a_core_pulled_across_its_layers_is_read_at_its_own_elements(cae: Any) -
     column = 1.6 / MODULUS + 8.4 / across
     stretch = 50 * G / (inner / column + MODULUS * (40**2 - inner) / 10)
     assert core["across_layers_pct"] > 100 * stretch / column / across
+    # The core's own nodal mean is said beside it and held nowhere (the operator's ruling):
+    # main held a core no lower than CalculiX's mean at a node, but that mixes skin and wedges
+    # at a singular corner, so it isn't the core's figure. Its own elements' nodes, no skin's
+    # or wedge's, read over its cell, planted, across the layers (an open finding, for the beam
+    # test bed): the 4-60 beam 0.154% over its 1.36 mm cell and 0.162% at its nodes; the 2-20
+    # beam 0.156% and 0.230%, its highest nodes on its bottom face's edges, in elements stepped
+    # to all core whose corners lie in its shells; this block 0.343% and 0.452%, 0.355% at its
+    # all-core elements', the rest its mixed elements' core recovered beside its shells; the
+    # lines-0 beam 0.360% and 0.847%. The guard held in full is the section's arithmetic.
+    assert core["core_nodal_across_pct"] > 0, core
 
 
 @pytest.mark.parametrize(
@@ -304,49 +476,15 @@ def test_a_print_load_can_t_read_says_why_and_nothing_is_solved(
 BOWED = ("bowed", "bowed-up", "bowed-notched")
 
 
-def test_a_bowed_bar_s_walls_are_cut_with_no_sliver_and_never_read_solid_unsaid(cae: Any) -> None:
-    """The cut on the bowed bars, in the second image (`cae_cases/as_printed_cut.py`): main's
-    common of 16 copies left the notched leg's core 16 faces under a bead's width by its
-    B-spline faces, steps at its concave edges, and the lofted bar bowed along its layers no
-    core at all, read solid and said nothing. Now neither: the offset cuts each, and with the
-    offset refused, as on a real leg, the copies mitred at the notch's concave edges leave no
-    sliver, and the empty common is refused in words; each cut held to each layer's own
-    outline offset in by its walls within `AGREE`."""
-    work: Path = cae.work
-    shutil.copy(CASES / "as_printed_cut.py", work / "as_printed_cut.py")
-    done = host.run(["as_printed_cut.py"], work, python=True, image=host.CAE_IMAGE)
-    assert done.returncode == 0, done.stdout + done.stderr
-    found = json.loads(done.stdout.strip().splitlines()[-1])
-    for name in BOWED:
-        now = found[name]["now"]
-        assert now["slivers"] == 0 and now["checked"] >= max(5, 0.8 * now["planes"]), now
-        assert now["short"] <= as_printed.SHORT and now["over"] <= as_printed.AGREE, now
-        assert found[name]["refused"].startswith(
-            f"the skin couldn't be cut round the part {name}'s curved faces: OCCT couldn't make "
-            "its offset"
-        ), found[name]["refused"]
-    assert found["bowed-notched"]["main"]["slivers"] >= 8
-    mitred = found["bowed-notched"]["copies"]
-    assert "mitred at 2 concave edge(s)" in mitred["cut"] and mitred["slivers"] == 0
-    assert mitred["short"] <= as_printed.SHORT and mitred["over"] <= as_printed.AGREE
-    assert mitred["core_mm3"] == pytest.approx(found["bowed-notched"]["now"]["core_mm3"],
-                                               rel=0.005)  # fmt: skip
-    # Bowed along its layers its sections are the bar's, moved up and down: its shells, not
-    # its walls, set its sloped faces, so its core is the straight bar's.
-    side = as_printed.wall_thickness(2, 0.45, 0.2)
-    assert found["bowed-up"]["main"]["core_mm3"] == 0
-    assert found["bowed-up"]["now"]["core_mm3"] == pytest.approx(
-        (120 - 2 * side) * (20 - 2 * side) * 8.4, rel=0.01)
-    assert "short of a layer's own outline" in found["bowed-up"]["copies"]["refused"]
-
-
 @pytest.mark.parametrize("name", BOWED)
 def test_a_bowed_bar_reads_as_printed_between_solid_and_its_core_alone(
     cae: Any, name: str
 ) -> None:
     """Each bowed bar, held at its root and loaded at x 110, meshes and solves as printed at
-    the defaults with nothing turned inside out, moves more than it does solid and less than
-    it would all core, the core's stiffness along it; and its solid read is as it was."""
+    the defaults with nothing turned inside out, its core held to its layers, and moves more
+    than it does solid and less than it would all core, the core's stiffness along it; and its
+    solid read is as it was. Bowed along its layers, its sections are the straight bar's moved
+    up and down, so its core is the straight bar's: main's common of 16 copies read it solid."""
     work: Path = cae.work
     at = ",".join(f"{v:g}" for v in json.loads((work / "load/bowed-at.json").read_text())[name])
     solid = cae("load", f"load/{name}.json", "--weight", "1", "--at", at)
@@ -355,11 +493,8 @@ def test_a_bowed_bar_reads_as_printed_between_solid_and_its_core_alone(
     assert printed.verdict != "NO ANSWER", printed.text
     assert "inside out" not in printed.text
     cell = printed.numbers["printed"]["bar"][0]
-    assert cell["cut_planes_read"] >= max(5, 0.8 * cell["cut_planes"]), cell
     assert cell["core_mm3"] > 0, cell
-    assert cell["cut_short_walls_pct"] <= 100 * as_printed.SHORT, cell
-    assert cell["cut_over_walls_pct"] <= 100 * as_printed.AGREE, cell
-    assert f"its walls cut by {cell['cut']}" in printed.text
+    held_to_its_layers(cell)
     found = infill.core(Settings(pattern="grid", infill=20, infill_angle=0), MATERIALS["petg"])
     up, first, second = np.eye(3)[2], np.eye(3)[0], np.eye(3)[1]
     along = infill.pulled(found.stiffness(up, first, second), first)
@@ -367,36 +502,154 @@ def test_a_bowed_bar_reads_as_printed_between_solid_and_its_core_alone(
     assert alone < moves < alone * MODULUS / along
 
 
-def test_the_cut_s_check_holds_it_to_each_layer_and_to_the_part(cae: Any) -> None:
-    """mqucifer/print-shop#356's review, each case a cut made wrong on purpose
-    (`cae_cases/as_printed_checks.py`):
-
-    - a block and a fin thinner than its walls: each layer's core is the block's, though OCCT's
-      2D offset of the two together fails for both. An empty cut is refused, never read solid,
-      and the 16 copies' cut, the block's alone, holds;
-    - a bar's core moved 0.5 mm across, the same area each layer, isn't the cut; nor is one cut
-      4% of its walls too far in, the unsafe side, while 4% too little is within `AGREE`;
-    - a bar with a ledge, its core missing a slab between the spread planes: read at planes
-      just off the ledge, the cut missing it isn't taken;
-    - a bar whose layers can be read at one plane only is refused, not passed on one;
-    - a core cut from the bar with a lump on it is kept within the bar's own shells."""
+def test_a_layer_s_core_is_read_as_orca_slices_it_along_each_axis(cae: Any) -> None:
+    """The layers' own 2D reading each element is classified by and checked against
+    (`cae_cases/as_printed_checks.py`): a block's layer beside a fin thinner than its walls is
+    the block's core alone, though OCCT's 2D offset of the two together fails; and the tile,
+    chamfered, its layers along each of its own axes, reads the same middle layer each way,
+    offset in, not out: OCCT's 2D offset goes by a face's own way round, and a section across
+    its own y once offset out (mqucifer/print-shop#363's real tile)."""
     work: Path = cae.work
     shutil.copy(CASES / "as_printed_checks.py", work / "as_printed_checks.py")
     done = host.run(["as_printed_checks.py"], work, python=True, image=host.CAE_IMAGE)
     assert done.returncode == 0, done.stdout + done.stderr
     found = json.loads(done.stdout.strip().splitlines()[-1])
-    fin = found["fin"]
-    assert fin["layer_mm2"] == pytest.approx(fin["true_mm2"], rel=1e-6)
-    assert "the skin couldn't be cut round the part test's faces" in fin["empty"]["refused"]
-    assert "short of a layer's own outline" in fin["empty"]["refused"]
+    assert found["fin"]["layer_mm2"] == pytest.approx(found["fin"]["true_mm2"], rel=1e-6)
+    for up in "+-":
+        read = [found["axes"][f"{axis}{up}"] for axis in "xyz"]
+        for layer in read:
+            assert 0.8 * layer["section_mm2"] < layer["core_mm2"] < layer["section_mm2"], read
+            assert layer["core_mm2"] == pytest.approx(read[2]["core_mm2"], rel=1e-4), read
+
+
+def test_a_web_too_thin_for_infill_reads_solid_and_its_bosses_skin_and_core(cae: Any) -> None:
+    """mqucifer/print-shop#363: two bosses joined by a web 1.75 mm thick, at 2 walls, 0.81 mm
+    each, leave 0.12 mm inside them, under what Orca's opening of the area inside its walls
+    lays infill in. The web reads solid skin and the core is the bosses' alone, as Orca prints
+    it. At 2.0 mm, 0.37 mm inside, Orca lays infill, and the core runs through the web."""
     side = as_printed.wall_thickness(2, 0.45, 0.2)
-    assert fin["copies"]["cut"] == "its common with 16 copies of itself"
-    # The block's core over its 40 mm, less its shells, and a strip of the base's under it.
-    assert fin["copies"]["core_mm3"] > (10 - 2 * side) ** 2 * (40 - 1.0 - 2.6)
-    for name in ("shifted", "short", "ledge"):
-        assert found[name]["cut"] == "its common with 16 copies of itself", (name, found[name])
-    assert found["over"]["cut"] == "OCCT's offset of it stretched along its layers"
-    assert found["over"]["core_mm3"] > found["shifted"]["core_mm3"]
-    assert "only 1 of" in found["unread"]["refused"]
-    assert "planes could be read to check it" in found["unread"]["refused"]
-    assert found["outside"]["cut"] is not None and found["outside"]["outside_mm3"] == 0.0
+    boss = math.pi * (6.0 - side) ** 2 * (20.0 - 1.0 - 0.6)
+    read = {}
+    for name in ("web", "web-wide"):
+        solid = cae("load", f"load/{name}.json", "--weight", "1", "--at", "20,0,20",
+                    "--toward", "-y")  # fmt: skip
+        printed = cae("load", f"load/printed-{name}.json", "--weight", "1", "--at", "20,0,20",
+                      "--toward", "-y")  # fmt: skip
+        assert solid.verdict != "NO ANSWER" and "printed" not in solid.numbers, solid.text
+        assert printed.verdict != "NO ANSWER", printed.text
+        assert "inside out" not in printed.text
+        cell = printed.numbers["printed"]["webbed"][0]
+        held_to_its_layers(cell)
+        read[name] = cell
+    assert read["web"]["core_mm3"] == pytest.approx(2 * boss, rel=0.02)
+    # The wide web's 0.37 mm of core between the bosses' own, through its height less shells.
+    strip = (2.0 - 2 * side) * (40.0 - 2 * (6.0 - side)) * (20.0 - 1.6)
+    assert read["web-wide"]["core_mm3"] > 2 * boss + 0.9 * strip
+
+
+def test_a_tile_of_planes_and_cylinders_reads_as_printed(cae: Any) -> None:
+    """mqucifer/print-shop#363: a tile of counterbored holes and a boss in a pocket, every face
+    upright to its layers or flat in their plane, where the cut's ways each failed: read
+    element by element, it holds to its layers, meshes with nothing turned inside out and
+    reads softer than solid; its solid read is as it was."""
+    solid = cae("load", "load/tile.json", "--weight", "1", "--at", "55,55,8")
+    printed = cae("load", "load/printed-tile.json", "--weight", "1", "--at", "55,55,8")
+    assert solid.verdict != "NO ANSWER" and "printed" not in solid.numbers, solid.text
+    assert printed.verdict != "NO ANSWER", printed.text
+    assert "inside out" not in printed.text
+    held_to_its_layers(printed.numbers["printed"]["tile"][0])
+    assert printed.numbers["moves_mm"] > solid.numbers["moves_mm"]
+
+
+def test_a_chamfered_tile_s_sloped_faces_read_as_printed(cae: Any) -> None:
+    """The tile with its top's outer edges chamfered 1 mm at 45°, its skin's depth there its
+    walls' or its shells' along their own way, whichever is deeper (`wedges.depths`): none of
+    its wedges turned inside out, its core held to its layers, and it moves more than the plain
+    tile, less stiff by its chamfer."""
+    plain = cae("load", "load/printed-tile.json", "--weight", "1", "--at", "55,55,8")
+    sloped = cae("load", "load/printed-tile-chamfered.json", "--weight", "1", "--at", "55,55,8")
+    assert sloped.verdict != "NO ANSWER", sloped.text
+    assert "inside out" not in sloped.text and "nonpositive jacobian" not in sloped.text
+    cell = sloped.numbers["printed"]["tile"][0]
+    held_to_its_layers(cell)
+    # Where a wedge would turn over at the chamfer's narrow strip, there's none, and it's said.
+    assert f"{cell['faces_inverted']} whose wedge would be too sharp or turned over" in sloped.text
+    assert sloped.numbers["moves_mm"] > plain.numbers["moves_mm"]
+
+
+def test_parts_beside_a_printed_one_keep_elements_of_their_own(cae: Any) -> None:
+    """The printed tile with a solid pin bonded in each hole: each pin keeps elements of its own
+    and is read, as a real tile's neighbours weren't when its faces were meshed at its
+    walls (mqucifer/print-shop#363); its skin's wedges lie on the faces it meets them by too."""
+    pinned = cae("load", "load/printed-tile-pinned.json", "--weight", "1", "--at", "55,55,8")
+    assert pinned.verdict != "NO ANSWER", pinned.text
+    for k in range(1, 5):
+        assert pinned.numbers["parts"][f"pin{k}"]["nodes"] > 0, pinned.numbers["parts"]
+        assert not pinned.numbers["parts"][f"pin{k}"].get("printed")
+    held_to_its_layers(pinned.numbers["printed"]["tile"][0])
+
+
+#: How far each layer's core read from the part's mesh may be from OCCT's on its B-rep: the
+#: largest distance between their outlines, in mm, as `BRepMesh` holds its 0.003 mm deflection
+#: at the points it samples, not everywhere on a B-spline face: on the bowed bar its mesh is
+#: 0.018 mm off the surface at its farthest, by `distToShape`, at Orca's own parameters, so Orca
+#: prints it too, and their outlines 0.033 mm apart; their mean, in mm; and their areas, in %
+#: (mqucifer/print-shop#363's review).
+SLICED_FARTHEST_MM = 0.04
+SLICED_APART_MM = 0.005
+SLICED_AREA_PCT = 0.1
+
+
+def test_each_layer_read_from_the_mesh_orca_slices_is_the_b_rep_s_within_its_chord(
+    cae: Any,
+) -> None:
+    """The Sponsor's decision (mqucifer/print-shop#363): each layer is read from the triangle
+    mesh Orca slices, at its own 0.003 mm chord and 0.5 rad, by GEOS, not OCCT on the B-rep
+    (`slices`). On the beam, its halves, the tile, chamfered or not, and the bowed bars, at 12
+    of its layers each and at each of its flat faces' levels, its core is OCCT's on the B-rep
+    within `SLICED_FARTHEST_MM` at its farthest, `SLICED_APART_MM` on the mean, and
+    `SLICED_AREA_PCT` of area (`cae_cases/layers_bound.py`). And the bar bowed along its
+    layers' core, as its elements hold it read exactly, is OCCT's on its B-rep, every layer, to
+    1%: a truth read apart from the mesh Orca slices and the read's own `Layered`, less than
+    the straight bar's, 18,267 mm³, as its sloped faces' shells are grown into it."""
+    work: Path = cae.work
+    shutil.copy(CASES / "layers_bound.py", work / "layers_bound.py")
+    done = host.run(["layers_bound.py"], work, python=True, image=host.CAE_IMAGE)
+    assert done.returncode == 0, done.stdout + done.stderr
+    found = json.loads(done.stdout.strip().splitlines()[-1])
+    assert set(found) >= {"beam", "tile", "tile-chamfered", "bowed", "bowed-up", "bowed-notched"}
+    for name, read in found.items():
+        assert read["layers"] >= 12, (name, read)
+        assert read["apart_mm"] <= SLICED_FARTHEST_MM, (name, read)
+        assert read["mean_mm"] <= SLICED_APART_MM, (name, read)
+        assert read["area_pct"] <= SLICED_AREA_PCT, (name, read)
+    at = ",".join(f"{v:g}" for v in json.loads((work / "load/bowed-at.json").read_text())[
+        "bowed-up"])  # fmt: skip
+    printed = cae("load", "load/printed-bowed-up.json", "--weight", "1", "--at", at)
+    cell = printed.numbers["printed"]["bar"][0]
+    truth = found["bowed-up"]["brep_core_mm3"]
+    assert truth < 18267 and cell["core_mm3"] == pytest.approx(truth, rel=0.01), (cell, truth)
+
+
+def test_a_core_read_near_its_limit_in_coarse_elements_is_meshed_again_round_it(cae: Any) -> None:
+    """mqucifer/print-shop#363: the slotted bar's core is worst at the slot's inside corners,
+    far from its held face, in elements of a 10 mm mesh many times its 1.36 mm cell, so its
+    cells were read at the mesh's scale. Near its limit, it's meshed again round every such
+    place at half its cell, no finer than 1 mm, its coarser mesh at 1.5 times that, and the
+    reply says so and what each read first; then its worst cells are in elements at that. A
+    sharp inside corner has no one figure in any mesh, so its two meshes read it either side
+    of its limit, and the reply says DISAGREE and to round it: the honest answer there
+    (mqucifer/print-shop#363's review, the operator's ruling)."""
+    answer = cae("load", "load/printed-slotted.json", "--weight", "4", "--at", "115,10,20",
+                 "--mesh", "10")  # fmt: skip
+    assert "meshed again, both meshes" in answer.text, answer.text
+    places = answer.numbers["refined"]
+    core = answer.numbers["parts"]["bar"]["cores"][0]
+    near = max(load.REFINE_SIZE_CELLS * core["cell_mm"], load.HELD_FINEST)
+    assert places and len(places) <= load.REFINE_MOST
+    for place in places:
+        assert place["mesh_mm"] == pytest.approx(near)
+        assert place["first_cell_mesh_mm"] > load.REFINE_OVER * near
+    for key in ("across", "stretch"):
+        assert core[f"{key}_cell_mesh_mm"] <= load.REFINE_OVER * near, core
+    assert answer.verdict == "DISAGREE" and "round it" in answer.text, answer.text

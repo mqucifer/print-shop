@@ -15,12 +15,14 @@ for whichever of them isn't built yet.
 from __future__ import annotations
 
 import contextlib
+import json
 import os
 import subprocess
 import threading
 import time
 import uuid
 from pathlib import Path
+from typing import Any
 
 IMAGE = "print-shop/bench:0.15"
 BASE = (
@@ -34,13 +36,14 @@ TMP_SIZE = "1g"
 #: The disk limit, in GB: the image at its largest, and the free space never to go under.
 IMAGE_LIMIT_GB = 4.0
 FLOOR_GB = 5.0
-#: The second image: FreeCAD 1.1.3, gmsh and CalculiX from conda-forge, each package by its
-#: name, version, build and MD5 in `cae-image/lock-*.txt`. To make the lists again, in any
-#: micromamba container with a network: `micromamba create -p /tmp/x --platform linux-aarch64 -c
-#: conda-forge --override-channels freecad=1.1.3 calculix=2.23 gmsh=4.15.2 --dry-run --json`,
-#: and from each `actions.LINK` entry in order, its `subdir`, `name`, `v` and its `version`,
-#: `build`, the file type its `fn` ends in, and `md5`; `linux-64` for CI.
-CAE_IMAGE = "print-shop/cae:0.2"
+#: The second image: FreeCAD 1.1.3, gmsh, CalculiX and Shapely (GEOS) from conda-forge, each
+#: package by its name, version, build and MD5 in `cae-image/lock-*.txt`. To make the lists
+#: again, in any micromamba container with a network: `micromamba create -p /tmp/x --platform
+#: linux-aarch64 -c conda-forge --override-channels freecad=1.1.3 calculix=2.23 gmsh=4.15.2
+#: --dry-run --json`, and from each `actions.LINK` entry in order, its `subdir`, `name`, `v` and
+#: its `version`, `build`, the file type its `fn` ends in, and `md5`; `linux-64` for CI. Shapely
+#: 2.2.0 and GEOS 3.14.1 were added to both by hand (mqucifer/print-shop#363).
+CAE_IMAGE = "print-shop/cae:0.3"
 CAE_LIMIT_GB = 4.0
 #: The commands that run in it. Every other runs in `IMAGE`.
 CAE_COMMANDS = ("fit-on", "bend", "load", "optimise")
@@ -283,12 +286,56 @@ def helper(module: str, args: list[str]) -> list[str]:
     return ["python", "-I", "-c", entry, *args]
 
 
-def timeout_for(args: list[str]) -> int:
+def timeout_for(args: list[str], folder: Path | None = None) -> int:
     """How long a bench command may run: `TIMEOUT`, or its own in `TIMEOUTS`, or `TWO_PASSES`
-    for a `load` that asks for two passes with `--parts`."""
-    if asks_two_passes(args):
+    for a `load` that asks for two passes with `--parts`, or that reads a part as printed in an
+    assembly, in `folder`, with a through joint (`reads_printed_through`)."""
+    if asks_two_passes(args) or reads_printed_through(args, folder):
         return TWO_PASSES
     return TIMEOUTS.get(command_word(args) or "", TIMEOUT)
+
+
+def reads_printed_through(args: list[str], folder: Path | None) -> bool:
+    """Whether a bench command is a `load` that reads a part as printed (`reads_printed`) in an
+    assembly with a `through` joint: given `TWO_PASSES`' limit from the start, its memory
+    `load`'s own (mqucifer/print-shop#363). Judging each bolted joint, its bolts' ways and
+    their readings, is the most of such a read's time, as it is of a solid read of it; with
+    the direct solve and its correction a part read as printed needs, a real tile of a few
+    bolts read in one pass ran past `TIMEOUT`."""
+    if not reads_printed(args, folder) or folder is None:
+        return False
+    data = _assembly(args, folder)
+    joints = data.get("joints", []) if isinstance(data, dict) else []
+    return any(isinstance(j, dict) and j.get("kind") == "through" for j in joints)
+
+
+def _assembly(args: list[str], folder: Path) -> Any:
+    word = command_word(args) or ""
+    file = next((a for a in args[args.index(word) + 1 :] if a.endswith(".json")), None)
+    if file is None:
+        return None
+    try:
+        return json.loads((Path(folder) / file).read_text())
+    except (OSError, ValueError):
+        return None
+
+
+def reads_printed(args: list[str], folder: Path | None) -> bool:
+    """Whether a bench command is a `load` of an assembly file in `folder` that gives a part a
+    `print`, read as printed (mqucifer/print-shop#363): its skin as wedges on its faces, at
+    `load`'s own mesh, memory and time."""
+    word = command_word(args)
+    if word != "load" or folder is None:
+        return False
+    file = next((a for a in args[args.index(word) + 1 :] if a.endswith(".json")), None)
+    if file is None:
+        return False
+    try:
+        data = json.loads((Path(folder) / file).read_text())
+    except (OSError, ValueError):
+        return False
+    parts = data.get("parts", []) if isinstance(data, dict) else []
+    return any(isinstance(p, dict) and p.get("print") for p in parts)
 
 
 def asks_two_passes(args: list[str]) -> bool:
@@ -303,11 +350,11 @@ def memory_for(args: list[str]) -> str:
     return TWO_PASSES_MEMORY if asks_two_passes(args) else MEMORY
 
 
-def offered(args: list[str]) -> int | None:
+def offered(args: list[str], folder: Path | None = None) -> int | None:
     """The longer limit a bench command may take up as it runs, or None: `TWO_PASSES` for a
     `load` that may come to two passes, or a `clearance` whose exact reads may run past
     `TIMEOUT`, where it isn't already given it."""
-    if command_word(args) in OFFERED and timeout_for(args) < TWO_PASSES:
+    if command_word(args) in OFFERED and timeout_for(args, folder) < TWO_PASSES:
         return TWO_PASSES
     return None
 
@@ -342,8 +389,8 @@ def run(
     name = name or f"print-bench-{uuid.uuid4().hex[:12]}"
     longer = None
     if timeout is None:
-        timeout = TIMEOUT if python else timeout_for(args)
-        longer = None if python else offered(args)
+        timeout = TIMEOUT if python else timeout_for(args, work)
+        longer = None if python else offered(args, work)
     if python and image == CAE_IMAGE:
         start = "import sys, runpy; sys.path.append('/opt/conda/lib'); del sys.argv[0]; "
         start += "runpy.run_path(sys.argv[0], run_name='__main__')"

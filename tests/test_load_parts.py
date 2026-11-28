@@ -311,7 +311,7 @@ def test_a_design_round_waits_the_hour_only_once_two_passes_take_it_up(
     # A script, which isn't offered the hour, can't take it up by saying so.
     box, _ = _box(monkeypatch, tmp_path, taken + "time.sleep(3)", timeout=1)
     assert box.python("make.py").timed_out
-    monkeypatch.setattr(host, "offered", lambda args: 2)
+    monkeypatch.setattr(host, "offered", lambda args, folder=None: 2)
     box, _ = _box(monkeypatch, tmp_path, taken + "time.sleep(5)", timeout=1)
     late = box.bench(["load", "a.json"])
     assert late.timed_out and "ran past the 2 s limit" in late.output
@@ -776,10 +776,10 @@ def test_a_design_round_s_one_pass_stopped_names_parts_where_two_passes_could_re
     assert done.output == "a\nread\n", "the line is the harness's"
     taken = f"print({host.TAKEN!r}, flush=True); "
     box, _ = _box(monkeypatch, tmp_path, able + taken + "time.sleep(5)", timeout=1)
-    monkeypatch.setattr(host, "offered", lambda args: 2)
+    monkeypatch.setattr(host, "offered", lambda args, folder=None: 2)
     late = box.bench(["load", "a.json"])
     assert late.timed_out and late.output.endswith(host.past(2, False)), "as on main"
-    monkeypatch.setattr(host, "offered", lambda args: 30)
+    monkeypatch.setattr(host, "offered", lambda args, folder=None: 30)
     box, _ = _box(monkeypatch, tmp_path, "import time; time.sleep(3)", timeout=1)
     assert box.bench(["load", "a.json"]).output.endswith(host.past(1, False))
     # TAKEN as `docker kill` runs, which here signals the child to say it, then end.
