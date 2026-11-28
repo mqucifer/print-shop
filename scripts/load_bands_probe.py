@@ -11,7 +11,8 @@ command, and prints only counts, kinds, seconds and memory: the exit code and th
 never its reasons; whether the container was killed; whether the whole was read, in one pass or
 two, or each band left out, under a weight or lifted with its weight kept; what stopped the
 whole, as a kind (`time`, `memory meshing`, `memory reading the mesh back`, `memory setting
-the mesh up`, `memory in load's own process`, `memory solving`, `no mesh`, `unparted`, `other`),
+the mesh up`, `memory in load's own process`, `memory writing CalculiX's input`, `memory reading
+CalculiX's results`, `memory solving`, `no mesh`, `unparted`, `other`),
 never its words; each mesh's elements and nodes as `load` set it up, counts, and the container's
 memory then; how many parts were read without their band and how many of those had their
 band's weight hung from where it met them; the try's and the band's seconds; and each step as
@@ -39,6 +40,8 @@ KINDS = (
     ("memory meshing", re.compile(r"gmsh made no mesh.*met the container's memory")),
     ("memory reading the mesh back", re.compile(r"GiB read back, where the container's memory")),
     ("memory setting the mesh up", re.compile(r"to set up in load's own process")),
+    ("memory writing CalculiX's input", re.compile(r"to write CalculiX's input with its loads")),
+    ("memory reading CalculiX's results", re.compile(r"to read CalculiX's results back")),
     ("memory in load's own process", re.compile(r"load's own process met the container's memory")),
     ("memory solving", re.compile(r"met the container's memory")),
     ("unparted", re.compile(r"no element of its own|in none of the parts")),

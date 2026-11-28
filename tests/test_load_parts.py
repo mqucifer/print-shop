@@ -1323,6 +1323,13 @@ def test_the_bands_probe_says_how_it_was_read_and_what_stopped_the_whole_by_kind
     assert probe.kinds(
         "load's own process met the container's memory, reading the joint a+b"
     ) == ["memory in load's own process"]
+    assert probe.kinds(
+        "the mesh of the joined parts at a mesh of at most 7 mm, 9 elements and 9 nodes, takes "
+        "about 3.50 GiB to write CalculiX's input with its loads in load's own process"
+    ) == ["memory writing CalculiX's input"]
+    assert probe.kinds(
+        "the mesh ..., takes about 3.50 GiB to read CalculiX's results back in load's own"
+    ) == ["memory reading CalculiX's results"]
     assert probe.kinds("gmsh made no mesh of the joined parts: it gave no reason") == ["no mesh"]
     assert probe.summary({"numbers": {"parts": {"a": {}}, "two_passes": {}}}) == [
         "read: the whole, in two passes"
