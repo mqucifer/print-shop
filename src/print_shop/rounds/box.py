@@ -190,8 +190,8 @@ class Box:
             # By its folder, as `host.run` gives it: a read as printed of an assembly with a
             # `through` joint is given the hour from the start (mqucifer/print-shop#363).
             folder = where or self.work
-            given = host.timeout_for(args, folder)
-            timeout = given if given >= host.TWO_PASSES else None
+            hour = host.asks_two_passes(args) or host.reads_printed_through(args, folder)
+            timeout = host.TWO_PASSES if hour else None
             longer = host.offered(args, folder)
         return self._run(
             host.bench_command(args), where, timeout, image, longer=longer,

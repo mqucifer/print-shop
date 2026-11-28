@@ -243,3 +243,35 @@ def test_a_compound_placed_in_scratch_isnt_the_runs_assembly(tmp_path: Path) -> 
     # With none outside it, there's none at all, and a run without scratch/ finds its own.
     (work / "table.json").unlink()
     assert print_sides.assemblies(work, named) == []
+
+
+def test_the_bench_s_own_scratch_left_by_a_killed_load_is_never_the_run_s(tmp_path: Path) -> None:
+    """The operator's review of mqucifer/print-shop#376: `load` writes its mesh and solve files
+    in `.bench-scratch` in the run's own folder, and a killed `load` leaves them there. They're
+    never the run's: no walk of the folder finds them, so they're never its geometry, its
+    state, its texts or its size, and no copy of it takes them, clean or not."""
+    from print_shop.bench import cae
+
+    assert paths.BENCH_SCRATCH == cae.SCRATCH
+    work = tmp_path / "work"
+    (work / "scratch").mkdir(parents=True)
+    (work / PART).write_text("ISO-10303-21;\nDATA;\nmade\n")
+    left = work / paths.BENCH_SCRATCH
+    for folder, name in (("gmsh-a1", "shape.brep"), ("gmsh-a1", "shape2mesh.geo"),
+                         ("load-b2", "solve.inp"), ("load-b2", "solve.frd"),
+                         ("gmsh-a1", "mesh.unv")):  # fmt: skip
+        (left / folder).mkdir(parents=True, exist_ok=True)
+        (left / folder / name).write_text("x" * 1000)
+    for skip in (False, True):
+        assert [str(p) for p in paths.walk_plain(work, skip)] == [PART], skip
+    assert list(paths.snapshot(work)) == [PART]
+    assert paths.texts(work) == {}
+    assert list(paths.geometry_hashes(work)) == [PART]
+    assert paths.size_of(work) == (work / PART).stat().st_size
+    for copy in ("plain", "made", "clean"):
+        target = tmp_path / copy
+        if copy == "clean":
+            judge.clean_copy(work, target)
+        else:
+            paths.copy_plain(work, target, skip_made=copy == "made")
+        assert not (target / paths.BENCH_SCRATCH).exists(), copy
