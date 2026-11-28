@@ -53,8 +53,9 @@ def skin_layer(self, k, layered, points, row, elements, to_own):
     return original_skin(self, k, layered, points, row, elements, to_own)
 
 
-def layer(points, rows, normals, depth, cells, over_core, inside, planes=None):
-    built = original_layer(points, rows, normals, depth, cells, over_core, inside, planes)
+def layer(points, rows, normals, depth, cells, over_core, inside, planes=None, apart=None):
+    built = original_layer(points, rows, normals, depth, cells, over_core, inside, planes,
+                           apart)
     import shapely
     layered, to_own, solid = CONTEXT["layered"], CONTEXT["to_own"], CONTEXT["solid"]
     held = np.zeros(len(rows), dtype=bool) if planes is None else planes
@@ -73,6 +74,17 @@ def layer(points, rows, normals, depth, cells, over_core, inside, planes=None):
     status = np.where(has, "wedge", status)
     record = {"status": status.tolist(), "middles": middles.tolist(), "rows": [],
               "only_shallower": 0}
+    def how_far(own):
+        along = float(own[layered.layers])
+        if along < layered.low or along > layered.high:
+            return "past the end layers", min(abs(along - layered.low), abs(along - layered.high))
+        first, second = (a for a in range(3) if a != layered.layers)
+        k = int(layered.layer_of(np.array([along]))[0])
+        section = layered.mesh().section(layered.low + (k + 0.5) * layered.height)
+        point = shapely.Point(own[first], own[second])
+        return ("out of its layer's section",
+                float(section.distance(point)) if not section.is_empty else float("nan"))
+
     for t in dropped:
         out = []
         for n in rows[t]:
@@ -81,22 +93,23 @@ def layer(points, rows, normals, depth, cells, over_core, inside, planes=None):
             own = to_own(np.asarray(offsets[n], dtype=float)[None])[0]
             if not inside(np.asarray(offsets[n], dtype=float)[None])[0]:
                 out.append(own)
+        # The face's own nodes, where the mesh put them: corners, then each side's middle.
+        surface_out = ~inside(points[rows[t]])
+        surface = ("a corner and a side's middle" if surface_out[:3].any() and surface_out[3:].any()
+                   else "a corner" if surface_out[:3].any()
+                   else "a side's middle" if surface_out[3:].any() else "none")
+        surface_far = 0.0
+        if surface_out.any():
+            first_out = rows[t][int(np.flatnonzero(surface_out)[0])]
+            surface_far = how_far(to_own(points[first_out][None])[0])[1]
+        depth_said = "at its full depth" if out else "only once made shallower"
         if not out:
-            # Its nodes at its full depth are in the part: it left once made shallower.
             record["only_shallower"] += 1
-            continue
-        own = out[0]
-        along = float(own[layered.layers])
-        if along < layered.low or along > layered.high:
-            how = "past the end layers"
-            far = min(abs(along - layered.low), abs(along - layered.high))
+            own = to_own(points[rows[t][:3]].mean(axis=0)[None])[0]
+            how, far = "in at its full depth", 0.0
         else:
-            first, second = (a for a in range(3) if a != layered.layers)
-            k = int(layered.layer_of(np.array([along]))[0])
-            section = layered.mesh().section(layered.low + (k + 0.5) * layered.height)
-            how = "out of its layer's section"
-            point = shapely.Point(own[first], own[second])
-            far = float(section.distance(point)) if not section.is_empty else float("nan")
+            own = out[0]
+            how, far = how_far(own)
         vertex = Part.Vertex(App.Vector(*middles[t]))
         nearest = min(solid.Faces, key=lambda f: f.distToShape(vertex)[0])
         own_normal = to_own(normals[t][None])[0] - to_own(np.zeros((1, 3)))[0]
@@ -104,7 +117,8 @@ def layer(points, rows, normals, depth, cells, over_core, inside, planes=None):
             "kind": type(nearest.Surface).__name__,
             "lean": float(abs(own_normal[layered.layers])),
             "borders_held": bool(set(rows[t].tolist()) & held_nodes),
-            "how": how, "far_mm": far,
+            "how": how, "far_mm": far, "depth": depth_said,
+            "surface_out": surface, "surface_far_mm": surface_far,
             "height": (float(to_own(middles[t][None])[0][layered.layers]) - layered.low) / span
                       if span else 0.0,
         })
@@ -119,6 +133,13 @@ finally:
     json.dump(FOUND, open("leaving.json", "w"))
 sys.exit(code)
 '''
+
+
+def _tally(values: list[str]) -> list[tuple[str, int]]:
+    counts: dict[str, int] = {}
+    for v in values:
+        counts[v] = counts.get(v, 0) + 1
+    return sorted(counts.items(), key=lambda kv: -kv[1])
 
 
 def bins(values: list[float], edges: list[float], unit: str = "") -> str:
@@ -159,10 +180,22 @@ def main(argv: list[str]) -> int:
                    if saved else {})  # fmt: skip
         for mesh, record in zip(("the mesh", "the coarser mesh"), found, strict=False):
             rows = record["rows"]
-            print(f"{mesh}: {len(rows)} faces leaving the part at their full depth, "
-                  f"{record.get('only_shallower', 0)} only once made shallower")
+            shallow = record.get("only_shallower", 0)
+            print(f"{mesh}: {len(rows) - shallow} faces leaving the part at their full depth, "
+                  f"{shallow} only once made shallower")
             if not rows:
                 continue
+            print("  the face's own nodes out of the part, as the mesh put them: "
+                  + ", ".join(f"{k} {n}" for k, n in _tally([r["surface_out"] for r in rows])))
+            out_far = [r["surface_far_mm"] for r in rows if r["surface_out"] != "none"]
+            if out_far:
+                print("    how far out, mm: " + bins(out_far, [0.005, 0.02, 0.1, 0.5]))
+            for said in ("at its full depth", "only once made shallower"):
+                mine = [r for r in rows if r["depth"] == said]
+                if mine:
+                    print(f"  {said}, {len(mine)}: their node out of the part as the mesh put "
+                          "it: " + ", ".join(f"{k} {n}" for k, n in
+                                             _tally([r["surface_out"] for r in mine])))
             kinds: dict[str, int] = {}
             for r in rows:
                 kinds[r["kind"]] = kinds.get(r["kind"], 0) + 1

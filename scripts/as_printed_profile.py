@@ -15,7 +15,9 @@ with an hour's limit. It says only seconds and counts:
   average over its cell, CalculiX's solves, gmsh's mesh, and the rest;
 - each step's seconds, by the probe's own names for them (`as_printed_probe.STEPS`);
 - each printed cell's layers and how many were read, its elements and wedges;
-- the verdict's word, and the eight functions most of its time is in, by the code's names.
+- the verdict's word, and the eight functions most of its time is in, by the code's names,
+  each with the four of the code's or FreeCAD's functions it was called from most,
+  through numpy's and Python's own.
 
 Nothing of any part's name, shape or place is printed.
 """
@@ -70,6 +72,30 @@ finally:
         held[0] += calls
         held[1] += tottime
     json.dump(own, open("profile.json", "w"))
+    # Who calls the functions most of the time is in: the first caller in the bench's code or
+    # FreeCAD's, through numpy's and Python's own, each library frame's seconds shared out by
+    # what each of its callers spent in it; by its file, line and name, and those seconds.
+    def library(file):
+        return ("site-packages/numpy" in file or "/lib/python3" in file) and "site-packages/" \
+            not in file.replace("site-packages/numpy", "")
+    def origins(key, seconds, depth=0):
+        by = stats.stats.get(key, (0, 0, 0, 0, {}))[4]
+        whole = sum(ct for (_, _, _, ct) in by.values()) or 1.0
+        found = {}
+        for caller, (_, _, _, ct) in by.items():
+            share = seconds * ct / whole
+            if library(caller[0]) and depth < 6:
+                for k, v in origins(caller, share, depth + 1).items():
+                    found[k] = found.get(k, 0.0) + v
+            else:
+                k = f"{caller[0].rsplit('/', 1)[-1]}:{caller[1]}({caller[2]})"
+                found[k] = found.get(k, 0.0) + share
+        return found
+    top = sorted(stats.stats.items(), key=lambda kv: -kv[1][2])[:10]
+    callers = {}
+    for key, (_, _, tottime, _, _) in top:
+        callers[key[2]] = sorted(origins(key, tottime).items(), key=lambda kv: -kv[1])[:4]
+    json.dump(callers, open("callers.json", "w"))
 sys.exit(code)
 '''
 
@@ -134,8 +160,12 @@ def main(argv: list[str]) -> int:
             rest = sum(v[1] for k, v in own.items() if k not in counted)
             print(f"the rest: {rest:.1f} s")
             # The functions most of the time is in, by the code's own names, never the part's.
+            callers_file = work / "callers.json"
+            callers = json.loads(callers_file.read_text()) if callers_file.exists() else {}
             for name, (calls, seconds) in sorted(own.items(), key=lambda kv: -kv[1][1])[:8]:
                 print(f"  in {name}: {seconds:.1f} s over {calls} calls")
+                for by, spent in callers.get(name, []):
+                    print(f"    from {by}: {spent:.1f} s")
         saved = re.search(r"saved: (\S+)\.txt and \.json", done.stdout)
         if saved:
             numbers = json.loads((work / f"{saved.group(1)}.json").read_text()).get("numbers", {})

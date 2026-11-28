@@ -285,7 +285,10 @@ class Layered:
 
     def holds(self, points: np.ndarray) -> np.ndarray:
         """Whether each of `points`, in the part's own axes, is inside the part: inside its
-        section, as Orca slices its mesh, in the layer it's in (`slices.Mesh.section`)."""
+        section, as Orca slices its mesh, in the layer it's in (`slices.Mesh.section`), or
+        failing that inside the section at its own height, `HOLDS_MM` above or below it. A
+        layer's section is its middle's, so a point on a step's flat face, at a height the
+        layer's middle is past, read as out of it, by as much as the step is wide."""
         import shapely
 
         first, second = (a for a in range(3) if a != self.layers)
@@ -304,7 +307,37 @@ class Layered:
                 self._held_sections[int(k)] = section.buffer(HOLDS_MM)
             found[mine] = shapely.contains_xy(self._held_sections[int(k)], points[mine, first],
                                               points[mine, second])  # fmt: skip
+        rest = np.flatnonzero(within & ~found)
+        heights = np.round(along[rest], 4)
+        for height in np.unique(heights):
+            mine = rest[heights == height]
+            for at in (height - HOLDS_MM, height + HOLDS_MM):
+                section = self.mesh().section(float(at))
+                if section.is_empty:
+                    continue
+                found[mine] |= shapely.contains_xy(section.buffer(HOLDS_MM), points[mine, first],
+                                                   points[mine, second])  # fmt: skip
         return found
+
+    def outside_by(self, points: np.ndarray) -> np.ndarray:
+        """How far each of `points`, in the part's own axes, is out of the part, in mm, 0 where
+        it's in: the nearer of its layer's section and its own height's (`holds`), and past
+        its lowest or highest layer by as much as it's past it."""
+        import shapely
+
+        first, second = (a for a in range(3) if a != self.layers)
+        along = points[:, self.layers]
+        past = np.maximum(self.low - along, 0) + np.maximum(along - self.high, 0)
+        found = np.zeros(len(points))
+        layer = self.layer_of(along)
+        for k, point in enumerate(points):
+            flat = shapely.Point(point[first], point[second])
+            heights = (self.low + (int(layer[k]) + 0.5) * self.height,
+                       float(along[k]) - HOLDS_MM, float(along[k]) + HOLDS_MM)
+            sections = [self.mesh().section(h) for h in heights]
+            near = [float(sec.distance(flat)) for sec in sections if not sec.is_empty]
+            found[k] = min(near) if near else float("inf")
+        return np.asarray(np.hypot(found, past))
 
     def islands(self) -> tuple[tuple[slices.Mesh, float], ...]:
         """Each island region's mesh, a region with walls of its own but a band of layers, and
@@ -511,7 +544,11 @@ def reuss(skin: np.ndarray, core: np.ndarray, share: float) -> np.ndarray:
 
 def _turned(tensor: np.ndarray, turn: np.ndarray) -> np.ndarray:
     """A stiffness C_ijkl in axes turned by `turn`, whose rows are the new axes in the old."""
-    return np.asarray(np.einsum("ai,bj,ck,dl,ijkl->abcd", turn, turn, turn, turn, tensor))
+    # One index at a time: einsum's own loop over all eight at once was most of its time.
+    turned = np.einsum("dl,ijkl->ijkd", turn, tensor)
+    turned = np.einsum("ck,ijkd->ijcd", turn, turned)
+    turned = np.einsum("bj,ijcd->ibcd", turn, turned)
+    return np.asarray(np.einsum("ai,ibcd->abcd", turn, turned))
 
 
 def _frame_of(normal: np.ndarray) -> np.ndarray:

@@ -344,7 +344,8 @@ def element_stiffness(
         g = np.einsum("nik,ak->nai", np.linalg.inv(mapped), slopes)
         weight = (np.abs(np.linalg.det(mapped)) / 24)[:, None, None, None, None]
         if tensor is not None:
-            stiffness += weight * np.einsum("naj,nijkl,nbl->naibk", g, tensor, g)
+            held = np.einsum("nijkl,nbl->nijkb", tensor, g)  # two operands at a time
+            stiffness += weight * np.einsum("naj,nijkb->naibk", g, held)
             continue
         both = np.einsum("nac,nbc->nab", g, g)[:, :, None, :, None] * np.eye(3)[None, None, :, None]
         stiffness += weight * (
@@ -1120,8 +1121,11 @@ class _Model:
                       for n in self._nodes_by_face(f) if n in row}  # fmt: skip
         held = np.array([all(int(n) in held_nodes for n in r[:3]) for r in rows], dtype=bool)
 
+        def apart(given: np.ndarray) -> np.ndarray:
+            return layered.outside_by(to_own(np.asarray(given, dtype=float)))
+
         built = wedges.layer(points, rows, normals, depth, cells, over_core & ~held, inside,
-                             planes=held)
+                             planes=held, apart=apart)
         built.thin = int((~over_core & ~held).sum())
         built.held = int(held.sum())
         return built
@@ -2095,8 +2099,24 @@ class _Model:
         whose sides are curved is read as it was.
 
         Either way a node is on the face within the tolerance the joined parts hold it to
-        (`as_joined`, mqucifer/print-shop#334), not the face's own alone."""
-        face = as_joined(face)
+        (`as_joined`, mqucifer/print-shop#334), not the face's own alone. Once for each face
+        and mesh."""
+        cache = self.__dict__.setdefault("_on_face_cache", {})
+        key = (id(self.fem), face.hashCode())
+        if key not in cache:
+            cache[key] = self._on_face_uncached(self._as_joined(face))
+        return list(cache[key])
+
+    def _as_joined(self, face: Any) -> Any:
+        """`as_joined`'s face, made once for each face: a copy made afresh each time is a new
+        shape to FreeCAD, and the mesh's nodes on it were found again each time."""
+        cache = self.__dict__.setdefault("_as_joined_cache", {})
+        key = face.hashCode()
+        if key not in cache:
+            cache[key] = (face, as_joined(face))  # the face kept, so its hash isn't reused
+        return cache[key][1]
+
+    def _on_face_uncached(self, face: Any) -> list[tuple[int, ...]]:
         if not self.straight:
             return [self.fem.getElementNodes(e) for e in self.fem.getFacesByFace(face)]
         import FreeCAD as App
@@ -2126,7 +2146,7 @@ class _Model:
         triangles' mid-side nodes, which are off a curved face, or past a curved edge of a flat
         one (`_on_face`); within the tolerance the joined parts hold it to (`as_joined`). A held
         face's are FreeCAD's own, as its constraint holds those."""
-        found = self._nodes_by_face(as_joined(face))
+        found = self._nodes_by_face(self._as_joined(face))
         if not self.straight:
             return list(found)
         return sorted({*found, *(n for nodes in self._on_face(face) for n in nodes)})

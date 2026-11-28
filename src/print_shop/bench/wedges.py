@@ -119,7 +119,11 @@ def stiffness(places: np.ndarray, tensor: np.ndarray) -> np.ndarray:
     found = np.zeros((len(places), 15, 3, 15, 3))
     for point, weight in zip(POINTS, WEIGHTS, strict=True):
         in_space, det, _ = _in_space(places, point)
-        found += np.einsum("n,naj,nijkl,nbl->naibk", weight * det, in_space, tensor, in_space)
+        # Two operands at a time: einsum's own loop over all seven indices at once was most
+        # of a tile's wedges' time.
+        held = np.einsum("nijkl,nbl->nijkb", tensor, in_space)
+        found += (weight * det)[:, None, None, None, None] * np.einsum(
+            "naj,nijkb->naibk", in_space, held)
     return found
 
 
@@ -159,6 +163,9 @@ SHARPEST = 3.0
 #: How many times wedges are dropped and their inner nodes found again, before what's left is
 #: taken as it is.
 ROUNDS = 4
+#: How much further out than its own face's node, as the mesh put it, an inner node may be,
+#: in mm (`layer`): `classify.HOLDS_MM`'s, the mesh Orca slices off the B-rep by its chord.
+REACH_MM = 0.005
 
 
 @dataclass
@@ -249,16 +256,21 @@ def inner_nodes(points: np.ndarray, rows: np.ndarray, normals: np.ndarray, depth
 def layer(points: np.ndarray, rows: np.ndarray, normals: np.ndarray, depth: np.ndarray,
           cells: np.ndarray, over_core: np.ndarray,
           inside: Callable[[np.ndarray], np.ndarray],
-          planes: np.ndarray | None = None) -> Layer:
+          planes: np.ndarray | None = None,
+          apart: Callable[[np.ndarray], np.ndarray] | None = None) -> Layer:
     """The part's skin as wedges on its boundary triangles `rows` (`faces_of`), each as deep
     as `depth`, none where its skin isn't `over_core`. Where a wedge would be turned over, as a
     face narrower than its neighbour's skin is by the mitre, or an inner node would leave the
-    part (`inside`, of points in the assembly's axes) or lie too far off (`SHARPEST`), its
+    part (`inside`, of points in the assembly's axes, where its own face's node is in it) or
+    lie too far off (`SHARPEST`), its
     nodes' inner offsets are halved, `ROUNDS` times at most (`Layer.thinned`), the rest of its
     skin left to the solid's layers; and where that doesn't stand it, it's dropped and the rest
     found again. `planes`, triangles with no wedge, a held face's, still mitre their neighbours'
     inner nodes at no depth, so a wall leaning onto a held face keeps its nodes on that face's
-    plane, not past it, out of the part."""
+    plane, not past it, out of the part. `apart`, how far points are out of the part, lets a
+    node the mesh itself puts out, a side's middle on a straight-sided mesh's chord off a
+    concave face, have its inner node out by as much as it is, and `REACH_MM` more, never
+    further; without it, every inner node is held to be in."""
     keep = over_core.copy()
     fixed = np.zeros(len(rows), dtype=bool) if planes is None else planes & ~over_core
     outside = inverted = 0
@@ -302,6 +314,15 @@ def layer(points: np.ndarray, rows: np.ndarray, normals: np.ndarray, depth: np.n
                 sides[where[m]] = (where[a], where[b])
         side_at = np.array(sorted(sides), dtype=int)
         side_ends = np.array([sides[m] for m in side_at], dtype=int).reshape(-1, 2)
+        # A node the mesh itself puts out of the part, a side's middle on a straight-sided
+        # mesh, on its chord, off a concave face, isn't held to be in: its inner node, halved
+        # toward it, would leave the part as the solid's own node does, by the chord's sag.
+        judged = (inside(surface) if len(surface) else np.zeros(0, dtype=bool))
+        if apart is None:
+            judged[:] = True
+        allowed = np.zeros(len(surface))
+        if (~judged).any() and apart is not None:
+            allowed[~judged] = apart(surface[~judged]) + REACH_MM
         for _ in range(ROUNDS + 1):
             inner_at = surface + scale[:, None] * offsets
             if len(side_at):
@@ -313,6 +334,10 @@ def layer(points: np.ndarray, rows: np.ndarray, normals: np.ndarray, depth: np.n
             every = np.concatenate([points, new])
             least = lowest_jacobian(every[wedges]) if len(wedges) else np.zeros(0)
             out = ~inside(inner_at) if len(inner_at) else np.zeros(0, dtype=bool)
+            if (~judged).any() and apart is not None:
+                # A node the mesh puts out: its inner node out by no more than it is.
+                loose = np.flatnonzero(~judged & out)
+                out[loose] = apart(inner_at[loose]) > allowed[loose]
             leaves = np.array([out[ns].any() for ns in nodes_of], dtype=bool)
             turned = least <= 0
             bad = leaves | turned

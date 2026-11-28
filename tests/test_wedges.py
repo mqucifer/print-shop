@@ -5,6 +5,7 @@ them, each face's skin's depth, the mitre where two faces meet, and which triang
 from __future__ import annotations
 
 import math
+from collections.abc import Callable
 
 import numpy as np
 import pytest
@@ -125,9 +126,10 @@ def test_each_triangle_has_a_wedge_where_core_is_behind_its_skin_and_none_turned
     thin[0] = False
     some = wedges.layer(points, rows, normals, depth, kinds, thin, anywhere)
     assert len(some.wedges) == 11 and some.thin == 1
-    # An inner node past the part takes every wedge it's in with it.
+    # An inner node past the part, in a void under its top face, takes every wedge it's in
+    # with it; the face's own nodes are in.
     outside = wedges.layer(points, rows, normals, depth, kinds, np.ones(12, dtype=bool),
-                           lambda p: p[:, 2] < 9.0)  # fmt: skip
+                           lambda p: (p[:, 2] < 9.0) | (p[:, 2] >= 10.0 - 1e-12))  # fmt: skip
     assert outside.outside > 0 and len(outside.wedges) + outside.outside == 12
 
 
@@ -185,3 +187,54 @@ def test_a_part_s_elements_and_wedges_read_exactly_by_its_layers() -> None:
     found = classify.exact(Cubed(), points[wired[:, :4]], deep.places[:, :6])  # type: ignore[arg-type]
     share = (found.core + found.in_wedges - found.wedges_core) / found.whole
     assert classify.exact_checked(Cubed(), found, share, 2.0).short > 0.05  # type: ignore[arg-type]
+
+
+def test_a_node_the_mesh_puts_out_of_the_part_keeps_its_wedges() -> None:
+    """A side's middle the mesh itself puts out of the part, on a straight-sided mesh's chord
+    off a concave face, isn't held to be in it: its inner node halved toward it would leave the
+    part as the solid's own node does, and on a real leg every such wedge was dropped. Its inner
+    node may be out by as much as it is, and 0.005 more, never further; and a node the mesh
+    puts in, whose inner node leaves, still takes its wedges with it."""
+    points, wired = cube()
+    rows, normals = wedges.faces_of(wired, points, load.MIDS)
+    depth, kinds, over = np.full(12, 0.5), np.zeros(12, dtype=int), np.ones(12, dtype=bool)
+    top = next(n for n in np.unique(rows[:, 3:]) if points[n, 2] == 10.0
+               and 0 < points[n, 0] < 10 and 0 < points[n, 1] < 10)  # fmt: skip
+
+    def out_round(centre: np.ndarray, radius: float) -> Callable[[np.ndarray], np.ndarray]:
+        return lambda p: np.linalg.norm(p - centre, axis=1) > radius
+
+    column = points[top, :2]
+
+    def out_by(node: float, below: float) -> Callable[[np.ndarray], np.ndarray]:
+        """Out of the part by `node` at the node, as the mesh put it, and by `below` under it,
+        at any depth; in elsewhere."""
+
+        def apart(p: np.ndarray) -> np.ndarray:
+            near = np.linalg.norm(p[:, :2] - column, axis=1) < 0.3
+            on = np.abs(p[:, 2] - 10.0) < 1e-9
+            return np.where(near & on, node, np.where(near & (p[:, 2] < 10.0), below, 0.0))
+
+        return apart
+
+    def inside_of(apart: Callable[[np.ndarray], np.ndarray]
+                  ) -> Callable[[np.ndarray], np.ndarray]:
+        return lambda p: apart(p) == 0
+
+    # The node out by 0.3, as a concave face's chord is; its inner node by 0.2, less: kept.
+    less = out_by(0.3, 0.2)
+    kept = wedges.layer(points, rows, normals, depth, kinds, over, inside_of(less), apart=less)
+    assert len(kept.wedges) == 12 and kept.outside == 0
+    # Without how far, every inner node is held to be in, the node's own out or not.
+    strict = wedges.layer(points, rows, normals, depth, kinds, over, inside_of(less))
+    assert strict.outside > 0
+    # Its inner node out by 1.0, at every depth, more than the node's 0.3 and 0.005: dropped.
+    more = out_by(0.3, 1.0)
+    dropped_deep = wedges.layer(points, rows, normals, depth, kinds, over, inside_of(more),
+                                apart=more)  # fmt: skip
+    assert dropped_deep.outside > 0
+    # Out within 0.499 of its inner node, its depth under it: the node is in, and its inner
+    # node out at every depth the halving tries, the last 0.498 under it.
+    under = points[top] - np.array([0.0, 0.0, 0.5])
+    dropped = wedges.layer(points, rows, normals, depth, kinds, over, out_round(under, 0.499))
+    assert dropped.outside > 0 and len(dropped.wedges) < 12
