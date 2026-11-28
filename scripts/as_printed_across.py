@@ -95,7 +95,6 @@ def core_read(self, part, cell, figures, numbers, way, first, second):
     held = np.flatnonzero(weights > 0)
     where, strain, weight, tag = middles[held], strains[held], weights[held], tags[held]
     turn = part.matrix()
-    own_way = way @ turn
     k = [p.name for p in self.assembly.parts].index(part.name)
     layered = self.cores[part.name]
     span = layered.high - layered.low
@@ -124,9 +123,11 @@ def core_read(self, part, cell, figures, numbers, way, first, second):
         total = sum(v[0] for v in by.values()) or 1.0
 
         def figure(tensor):
+            # The strains are in the assembly's axes, as `load` reads them, so across its
+            # layers is along the layers' way there, not the part's own.
             if what == "stretch":
                 return 100 * float(np.abs(np.linalg.eigvalsh(tensor)).max())
-            return 100 * float(own_way @ tensor @ own_way)
+            return 100 * float(way @ tensor @ way)
 
         own = centre
         height = (float(own[layered.layers]) - layered.low) / span if span else 0.0

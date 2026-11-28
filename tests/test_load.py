@@ -15,7 +15,7 @@ from typing import Any
 import numpy as np
 import pytest
 
-from print_shop.bench import assembly, dovetail, host, through, way_in
+from print_shop.bench import assembly, dovetail, host, load, through, way_in
 from print_shop.bench.load import (
     MIDS,
     _gmsh_errors,
@@ -1644,3 +1644,46 @@ def test_a_triangle_taken_by_its_corners_lies_on_the_face_or_is_left_out() -> No
     up = np.array([0, 0, 1.0])
     assert lies_on(flat, flat.mean(axis=0), up, 0.0)
     assert not lies_on(flat + [0, 0, 0.01], flat.mean(axis=0), up, 0.0)
+
+
+def _read_with(core: dict[str, object]) -> dict[str, object]:
+    base = {"cell_mm": 1.2, "cell": "the part", "across_layers_pct": 0.1,
+            "across_limit_pct": 0.481, "stretch_pct": 0.2, "stretch_limit_pct": 1.51,
+            "near_limit": [{"at": [0.0, 0.0, 0.0], "reading": "across", "pct": 0.5,
+                            "mesh_mm": 20.0},
+                           {"at": [5.0, 5.0, 5.0], "reading": "stretch", "pct": 1.3,
+                            "mesh_mm": 20.0}]}  # fmt: skip
+    return {"parts": {"leg": {"cores": [{**base, **core}]}}}
+
+
+def test_a_core_read_near_its_limit_in_coarse_elements_is_meshed_again_finer() -> None:
+    """mqucifer/print-shop#363: where a printed core's worst reading is within
+    `REFINE_MARGIN` of its limit, either side, the verdict hangs on it, and every place its cell
+    reads near its limit in coarse elements (`_Model._near_limit`) is meshed again finer, at
+    `REFINE_SIZE_CELLS` of its cell, no finer than `HELD_FINEST`, out `REFINE_CELLS` cells
+    or `HELD_ZONE`, whichever is more, each
+    with what it read first. Far from its limit, or where that's no finer than the mesh, it's
+    read as it was."""
+    near = max(load.REFINE_SIZE_CELLS * 1.2, load.HELD_FINEST)
+    reach = max(load.REFINE_CELLS * 1.2, load.HELD_ZONE)
+    # Over its limit, as a real leg's core across its layers read: both places.
+    over = _read_with({"across_layers_pct": 0.55})
+    found = load.refined(over, 20.0)
+    assert [p[:3] for p in found] == [([0.0, 0.0, 0.0], near, reach),
+                                      ([5.0, 5.0, 5.0], near, reach)]
+    why = found[0][3]
+    assert why["reading"] == "across" and why["first_pct"] == 0.5
+    assert why["limit_pct"] == 0.481 and why["first_cell_mesh_mm"] == 20.0
+    assert found[1][3]["limit_pct"] == 1.51
+    # Under its limit within the margin: the same.
+    assert len(load.refined(_read_with({"stretch_pct": 1.2}), 20.0)) == 2
+    # Far from it either way: the verdict doesn't hang on it.
+    assert load.refined(_read_with({}), 20.0) == []
+    assert load.refined(_read_with({"across_layers_pct": 1.5}), 20.0) == []
+    # No place near its limit in coarse elements: read as it was.
+    assert load.refined(_read_with({"across_layers_pct": 0.55, "near_limit": []}), 20.0) == []
+    # A mesh no coarser than its aim already.
+    assert load.refined(over, near) == []
+    # A solid part, or one with no cell: nothing.
+    assert load.refined({"parts": {"leg": {"part": {}}}}, 20.0) == []
+    assert load.refined(_read_with({"cell_mm": 0, "across_layers_pct": 0.55}), 20.0) == []

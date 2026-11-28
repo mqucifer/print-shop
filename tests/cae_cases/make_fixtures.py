@@ -1241,6 +1241,25 @@ def bowed() -> None:
     (out / "bowed-at.json").write_text(json.dumps(at))
 
 
+#: The slotted bar (mqucifer/print-shop#363): 120 by 20 by 20, held at x 0, a slot 4 wide and 12
+#: deep across its top at its middle, printed at 60% grid, its core's cell 1.36 mm.
+SLOT_AT, SLOT_WIDE, SLOT_DEEP = 58.0, 4.0, 12.0
+
+
+def slotted() -> None:
+    """The slotted bar (mqucifer/print-shop#363): loaded at its end, its core's worst cells lie
+    at the slot's inside corners, far from its held face, in elements of a coarse mesh many
+    times its cell, so read at the mesh's scale: where that's near its limit, it's meshed
+    again finer round them (`load.refined`)."""
+    out = Path("load")
+    bar = box((0, 0, 0), (120, 20, 20)).cut(
+        box((SLOT_AT, -1, 20 - SLOT_DEEP), (SLOT_AT + SLOT_WIDE, 21, 21)))
+    save(bar, out / "slotted.step")
+    row = {"name": "bar", "file": "slotted.step", "layers": "z",
+           "print": {**PRINT, "walls": 2, "infill": 60}}
+    assembly(out / "printed-slotted.json", [row], held=[{"plane": "x=0", "how": "fixed"}])
+
+
 #: The webbed bosses (mqucifer/print-shop#363): two round bosses 12 across and 20 tall, their
 #: axes 40 apart, joined by a web between them, 1.75 thick, its core 0.12 mm across between its
 #: 2 walls, under what Orca's opening leaves infill in, and 2.0 thick, 0.37 mm, over it.
@@ -1346,6 +1365,7 @@ def main() -> None:
     capped()
     printed()
     bowed()
+    slotted()
     webbed()
     tile()
     throughs()

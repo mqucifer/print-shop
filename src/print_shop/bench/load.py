@@ -568,6 +568,11 @@ class _Model:
         #: Each printed part read by its layers (`_cores`, mqucifer/print-shop#363): none for a
         #: part read solid.
         self.cores = cores or {}
+        #: Places a printed part's core is meshed finer round, each its middle in the
+        #: assembly's axes, the size there and how far that reaches each way, in mm: where its
+        #: worst cell held too few elements for its reading to be its cell's (`refined`,
+        #: mqucifer/print-shop#363).
+        self.refine_at: list[Refine] = []
         #: Each mixed or core element's step of core share, 0 for skin, `classify.STEPS` for
         #: core, -1 for a part read solid; and each printed part's cells as read (`_classify`).
         self.element_step: np.ndarray | None = None
@@ -733,35 +738,62 @@ class _Model:
 
     def _held_fine(self, sizes: str) -> str:
         """gmsh's local sizes, `sizes`, and the held faces of an assembly with a printed part
-        meshed finer (`held_mesh`), growing to the mesh's own past their zone: the least of
-        them all."""
+        meshed finer (`held_mesh`), and each place in `refine_at` (`refined`), each growing
+        to the mesh's own past its zone: the least of them all."""
         fine = self.held_mesh()
         held = [*self.fixed, *sum(self.standing.values(), [])]
-        if fine is None or not held:
-            return sizes
-        near, zone = fine
-        surfaces = sorted({int(self._face_name(face).removeprefix("Face")) for face in held})
         taken = [int(n) for n in re.findall(r"^Field\[(\d+)\]", sizes, re.M)]
-        distance = max(taken, default=0) + 1
-        threshold = distance + 1
-        lines = [
-            "// the held faces, meshed at the printed parts' finest cell (mqucifer/print-shop#363)",
-            f"Field[{distance}] = Distance;",
-            f"Field[{distance}].SurfacesList = {{{', '.join(map(str, surfaces))}}};",
-            f"Field[{distance}].Sampling = {close_faces.SAMPLING};",
-            f"Field[{threshold}] = Threshold;",
-            f"Field[{threshold}].InField = {distance};",
-            f"Field[{threshold}].SizeMin = {near:.6g};",
-            f"Field[{threshold}].SizeMax = {self.size:.6g};",
-            f"Field[{threshold}].DistMin = {zone:.6g};",
-            f"Field[{threshold}].DistMax = {zone + close_faces.GRADE * (self.size - near):.6g};",
-            f"Field[{threshold}].StopAtDistMax = 1;",
-        ]
+        number = max(taken, default=0) + 1
+        lines: list[str] = []
+        least_of: list[int] = []
+        if fine is not None and held:
+            near, zone = fine
+            surfaces = sorted({int(self._face_name(face).removeprefix("Face")) for face in held})
+            distance, threshold = number, number + 1
+            number += 2
+            lines += [
+                "// the held faces, meshed at the printed parts' finest cell "
+                "(mqucifer/print-shop#363)",
+                f"Field[{distance}] = Distance;",
+                f"Field[{distance}].SurfacesList = {{{', '.join(map(str, surfaces))}}};",
+                f"Field[{distance}].Sampling = {close_faces.SAMPLING};",
+                f"Field[{threshold}] = Threshold;",
+                f"Field[{threshold}].InField = {distance};",
+                f"Field[{threshold}].SizeMin = {near:.6g};",
+                f"Field[{threshold}].SizeMax = {self.size:.6g};",
+                f"Field[{threshold}].DistMin = {zone:.6g};",
+                f"Field[{threshold}].DistMax = "
+                f"{zone + close_faces.GRADE * (self.size - near):.6g};",
+                f"Field[{threshold}].StopAtDistMax = 1;",
+            ]
+            least_of.append(threshold)
+        for middle, near, half, _ in self.refine_at:
+            if near >= self.size:
+                continue
+            lines += [
+                "// a core's worst cell, meshed at its cell (mqucifer/print-shop#363)",
+                f"Field[{number}] = Box;",
+                f"Field[{number}].VIn = {near:.6g};",
+                f"Field[{number}].VOut = {self.size:.6g};",
+                *(f"Field[{number}].{axis}Min = {middle[k] - half:.6g};\n"
+                  f"Field[{number}].{axis}Max = {middle[k] + half:.6g};"
+                  for k, axis in enumerate("XYZ")),
+                f"Field[{number}].Thickness = {close_faces.GRADE * (self.size - near):.6g};",
+            ]
+            least_of.append(number)
+            number += 1
+        if not least_of:
+            return sizes
         least = re.search(r"^Field\[(\d+)\] = Min;\nField\[\1\]\.FieldsList = \{([^}]*)\};",
                           sizes, re.M)  # fmt: skip
         if least is None:
-            return "\n".join([*lines, f"Background Field = {threshold};", ""]) + sizes
-        listed = f"{least.group(2)}, {threshold}"
+            if len(least_of) == 1:
+                return "\n".join([*lines, f"Background Field = {least_of[0]};", ""]) + sizes
+            lines += [f"Field[{number}] = Min;",
+                      f"Field[{number}].FieldsList = {{{', '.join(map(str, least_of))}}};",
+                      f"Background Field = {number};", ""]
+            return "\n".join(lines) + sizes
+        listed = ", ".join([least.group(2), *map(str, least_of)])
         joined = sizes.replace(least.group(0), f"Field[{least.group(1)}] = Min;\n"
                                f"Field[{least.group(1)}].FieldsList = {{{listed}}};")
         return "\n".join(lines) + "\n" + joined
@@ -2387,7 +2419,7 @@ class _Model:
                                             cell.settings.layer_height)
         size = infill.cell_mm(figures.pattern, figures.density_pct, spacing)
         peak_across = peak_stretch = 0.0
-        middles, means, weights = [], [], []
+        middles, means, weights, owners = [], [], [], []
         for number in numbers:
             hit = np.flatnonzero(self.element_core == number)
             for chunk in range(0, len(hit), CHUNK):
@@ -2421,6 +2453,7 @@ class _Model:
                 middles.append(((part_places * groups[..., None]).sum(axis=2)
                                 / safe[..., None])[live])  # fmt: skip
                 weights.append((self.element_core_mm3[some][:, None] * many / total)[live])
+                owners.append(np.broadcast_to(some[:, None], live.shape)[live])
         if not weights:
             averaged = classify.Averaged(np.zeros((1, 3, 3)), np.zeros((1, 3)), np.zeros(1))
         else:
@@ -2434,9 +2467,79 @@ class _Model:
             read[key] = _list(averaged.at[row], 3)
             read[fill] = round(float(averaged.fill[row]), 3)
         read["cell_mm"] = round(size, 3)
+        # How many elements each worst cell's average is of, and how big they are, as a
+        # regular tetrahedron of their volume's edge: coarser than its cell, and it's read at
+        # the mesh's scale, not its cell's (`refined`).
+        if weights:
+            own = (np.concatenate(middles) - at) @ turn
+            whose = np.concatenate(owners)
+            weighed = np.concatenate(weights) > 0
+            for key in ("across", "stretch"):
+                centre = (np.asarray(read[f"{key}_at"], dtype=float) - at) @ turn
+                window = weighed & np.all((own - centre >= -size / 2)
+                                          & (own - centre < size / 2), axis=1)  # fmt: skip
+                them = np.unique(whose[window])
+                read[f"{key}_cell_elements"] = int(len(them))
+                corners = self.points[self._wired()[them][:, :4]]
+                volume = np.abs(np.linalg.det(corners[:, 1:] - corners[:, :1])) / 6
+                read[f"{key}_cell_mesh_mm"] = (
+                    round(float(np.mean(np.cbrt(6 * math.sqrt(2) * volume))), 3)
+                    if len(them) else None)
+            read["near_limit"] = self._near_limit(averaged, whose, way, read, size)
         read["at_elements_across_layers_pct"] = 100 * max(peak_across, 0.0)
         read["at_elements_stretch_pct"] = 100 * peak_stretch
         return read
+
+    def _near_limit(self, averaged: Any, whose: np.ndarray, way: np.ndarray,
+                    read: dict[str, Any], cell: float) -> list[dict[str, Any]]:
+        """Each place a core's cell reads within `REFINE_MARGIN` of its limit, across its
+        layers or its stretch any way, in elements more than `REFINE_OVER` times what it
+        would be meshed at (`refined`): one for each box `REFINE_CELLS` cells or `HELD_ZONE`
+        across they fall in, the highest first, `REFINE_MOST` at the most. Its place in the
+        assembly's axes, which it read, how much, and its element's size."""
+        if not len(averaged.rows):
+            return []
+        import FreeCAD as App
+        import Part
+
+        held_faces = [*self.fixed, *sum(self.standing.values(), [])]
+        zone = (self.held_mesh() or (0.0, 0.0))[1]
+        near = max(REFINE_SIZE_CELLS * cell, HELD_FINEST)
+        reach = max(REFINE_CELLS * cell, HELD_ZONE)
+        element = whose[averaged.rows]
+        corners = self.points[self._wired()[element][:, :4]]
+        volume = np.abs(np.linalg.det(corners[:, 1:] - corners[:, :1])) / 6
+        sized = np.cbrt(6 * math.sqrt(2) * volume)
+        across = 100 * np.einsum("i,nij,j->n", way, averaged.strain, way)
+        stretch = 100 * np.abs(np.linalg.eigvalsh(averaged.strain)).max(axis=1)
+        found: dict[tuple[int, ...], dict[str, Any]] = {}
+        by_held: dict[tuple[int, ...], bool] = {}
+        for key, value, limit in (("across", across, read.get("across_limit_pct")),
+                                  ("stretch", stretch, read.get("stretch_limit_pct"))):
+            if not limit:
+                continue
+            share = value / float(limit)
+            hit = np.flatnonzero((share >= 1 - REFINE_MARGIN) & (sized > REFINE_OVER * near))
+            for row in hit[np.argsort(-share[hit])]:
+                box = tuple(np.floor(averaged.at[row] / reach).astype(int).tolist())
+                if box in found and found[box]["share"] >= share[row]:
+                    continue
+                if zone and held_faces:
+                    # Within a held face's zone, it's meshed as the held face is: told once
+                    # for each box, by its first row, the highest.
+                    if box not in by_held:
+                        vertex = Part.Vertex(App.Vector(*averaged.at[row]))
+                        by_held[box] = min(f.distToShape(vertex)[0]
+                                           for f in held_faces) <= zone  # fmt: skip
+                    if by_held[box]:
+                        continue
+                found[box] = {"at": _list(averaged.at[row], 3), "reading": key,
+                              "pct": round(float(value[row]), 4), "share": float(share[row]),
+                              "mesh_mm": round(float(sized[row]), 3)}
+        ordered = sorted(found.values(), key=lambda f: -f["share"])[:REFINE_MOST]
+        for one in ordered:
+            one.pop("share")
+        return ordered
 
     def _read_rows(self, part: PartAt, rows: np.ndarray) -> dict[str, Any]:
         """The worst pull across its layers and largest stretch any way, of a part's `rows`."""
@@ -2818,6 +2921,19 @@ HELD_CELLS = 2.0
 HELD_FINEST = 1.0
 HELD_DEPTH = 2.0
 HELD_ZONE = 3.0
+#: Where a printed core's worst reading is within `REFINE_MARGIN` of its limit, the verdict
+#: hangs on it, and each place its cell reads that near its limit in elements more than
+#: `REFINE_OVER` times what it'd be meshed at is meshed again finer round it (`refined`,
+#: mqucifer/print-shop#363): at `REFINE_SIZE_CELLS` of its cell, no finer than `HELD_FINEST`,
+#: out `REFINE_CELLS` cells or `HELD_ZONE` each way, whichever is more, `REFINE_MOST` places
+#: at the most, the highest first. Half its cell, as at a corner where three faces meet inside
+#: it, a slotted bar's, two meshes read its cell within 6% of each other; at its cell, 16%; at
+#: twice it, as a held face is meshed, 37%. Within a held face's zone it's meshed as held.
+REFINE_MARGIN = 0.25
+REFINE_OVER = 1.5
+REFINE_SIZE_CELLS = 0.5
+REFINE_CELLS = 3.0
+REFINE_MOST = 24
 #: Whether a part read as printed is solved by CalculiX's iterative solver from the start
 #: (`_Model.solve`, mqucifer/print-shop#363). It isn't: the direct solver reads the planted beam
 #: faster, and the iterative one solves it where the direct one meets the container's memory.
@@ -3138,8 +3254,10 @@ def _solved(
     spread: bool = True,
     cores: dict[str, list[Any]] | None = None,
     coarser_of: tuple[list[Any], int] | None = None,
+    refine: list[Refine] | None = None,
 ) -> dict[str, Any]:
-    """One solve at one mesh, and everything read from it. Where gmsh can't curve every
+    """One solve at one mesh, and everything read from it, meshed finer round each place in
+    `refine` (`refined`). Where gmsh can't curve every
     element's sides onto the parts' faces without turning one inside out, as on a traced
     glass frame's many small curves and sharp corners (mqucifer/print-shop#295), it's meshed
     again with them straight, and `straight` says why: every mesh that solves curved is as it
@@ -3152,6 +3270,7 @@ def _solved(
     App.ParamGet("User parameter:BaseApp/Preferences/Mod/Fem/Gmsh").SetInt("NumOfThreads", 1)
     def model(straight: bool) -> _Model:
         made = _Model(assembly, placed, args, size, straight, two_pass, spread, cores)
+        made.refine_at = list(refine or [])
         if weighed is not None:
             made.weighed = weighed
         coarser(made, coarser_of)
@@ -3181,6 +3300,66 @@ def _solved(
         raise
     found["straight"] = why
     return found
+
+
+#: A place a printed core is meshed finer round (`refined`): its middle in the assembly's axes,
+#: the size there, how far that reaches each way, in mm, and why: its worst cell's reading, its
+#: limit and its elements' size as first read.
+Refine = tuple[list[float], float, float, dict[str, Any]]
+
+
+def refined(solved: dict[str, Any], size: float) -> list[Refine]:
+    """Where a read's printed cores are meshed finer and read again (mqucifer/print-shop#363):
+    where a core's worst reading, across its layers or its stretch, is within `REFINE_MARGIN`
+    of its limit, so the verdict hangs on it, every place its cell reads within that of its
+    limit in elements more than `REFINE_OVER` times what it would be meshed at, so read at the
+    mesh's scale and not its cell's (`_Model._near_limit`): all of them, so the worst isn't
+    only moved to the next. Each place is meshed at `HELD_CELLS` of its cell, no finer than
+    `HELD_FINEST`, as a held face is, out `REFINE_CELLS` cells or `HELD_ZONE` mm each way,
+    whichever is more; none where that's no finer than the mesh. Elsewhere a read is meshed as
+    it was."""
+    places: list[Refine] = []
+    for name, part in solved.get("parts", {}).items():
+        for core in part.get("cores", []) or []:
+            cell = float(core.get("cell_mm") or 0)
+            if cell <= 0:
+                continue
+            near = max(REFINE_SIZE_CELLS * cell, HELD_FINEST)
+            if near >= size:
+                continue
+            hangs = False
+            for value, limit in (("across_layers_pct", "across_limit_pct"),
+                                 ("stretch_pct", "stretch_limit_pct")):
+                reading, most = core.get(value), core.get(limit)
+                if reading and most and abs(float(reading) / float(most) - 1) <= REFINE_MARGIN:
+                    hangs = True
+            if not hangs:
+                continue
+            for one in core.get("near_limit") or []:
+                why = {"part": name, "cell": core.get("cell"), "reading": one["reading"],
+                       "first_pct": one["pct"],
+                       "limit_pct": core.get(f"{one['reading']}_limit_pct"),
+                       "first_cell_mesh_mm": one["mesh_mm"]}
+                places.append((list(one["at"]), near, max(REFINE_CELLS * cell, HELD_ZONE), why))
+    return places
+
+
+def refined_said(places: list[Refine] | None) -> str:
+    """What the reply says of a read meshed again finer round its cores' worst cells, and what
+    each read first."""
+    if not places:
+        return ""
+    sizes = sorted({round(near, 3) for _, near, _, _ in places})
+    reach = max(half for _, _, half, _ in places)
+    first = "; ".join(
+        f"{why['part']}'s core {'across its layers' if why['reading'] == 'across' else 'stretch'}"
+        f" first {why['first_pct']:.3f}% of {why['limit_pct']}% in "
+        f"{why['first_cell_mesh_mm']:g} mm elements" for _, _, _, why in places)
+    return (f"; meshed again, both meshes, at {', '.join(f'{n:g}' for n in sizes)} mm within "
+            f"{reach:g} mm of {len(places)} place(s), where a printed core's worst cell was in "
+            f"elements more than {REFINE_OVER:g} times that and within "
+            f"{100 * REFINE_MARGIN:g}% of its limit, so read at the mesh's scale and not its "
+            f"cell's ({first})")
 
 
 def coarser(model: _Model, of: tuple[list[Any], int] | None) -> None:
@@ -3555,18 +3734,31 @@ def _run(
         if one is not None:
             one.whole_began = time.time()
         fine = _solved(assembly, placed, args, size, cores=cores)
+        places = refined(fine, size)
+        if places:
+            # A core's worst cell held too few elements for its reading to be its cell's,
+            # and near its limit: meshed again finer round it, and read again, both meshes.
+            with step("meshing again finer round a printed core's worst cells"):
+                pass
+            fine = {**_solved(assembly, placed, args, size, cores=cores, refine=places),
+                    "refined": places}
         if one is not None:
             one.whole_read()
             one.check_coarser(round(size * COARSER, 3))
         coarse = _solved(
-            assembly, placed, args, round(size * COARSER, 3), cores=cores, coarser_of=fine["closes"]
+            assembly, placed, args, round(size * COARSER, 3), cores=cores,
+            coarser_of=fine["closes"], refine=places,
         )
     force = float(sum(np.linalg.norm(one["force"]) for one in fine["raw_loads"]))
+    if fine.get("refined"):
+        report.numbers["refined"] = [{"at": at, "mesh_mm": near, "reach_mm": half, **why}
+                                     for at, near, half, why in fine["refined"]]  # fmt: skip
     meshed = (
         f"a mesh of at most {size:g} mm ({fine['nodes']} nodes, {fine['elements']} elements, "
         f"meshed in {fine['mesh_s']} s and solved in {fine['solve_s']} s)"
         + _straight_said(fine)
         + (f"; {fine['iterated']}" if fine.get("iterated") else "")
+        + refined_said(fine.get("refined"))
         if two_pass is None
         else "in two passes, each one's meshes below"
     )

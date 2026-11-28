@@ -24,7 +24,7 @@ from typing import Any
 import numpy as np
 import pytest
 
-from print_shop.bench import as_printed, host, infill
+from print_shop.bench import as_printed, host, infill, load
 from print_shop.bench.assembly import MATERIALS
 from print_shop.bench.printed import Settings
 
@@ -556,7 +556,7 @@ def test_a_chamfered_tile_s_sloped_faces_read_as_printed(cae: Any) -> None:
 
 def test_parts_beside_a_printed_one_keep_elements_of_their_own(cae: Any) -> None:
     """The printed tile with a solid pin bonded in each hole: each pin keeps elements of its own
-    and is read, as a real tile's eight neighbours weren't when its faces were meshed at its
+    and is read, as a real tile's neighbours weren't when its faces were meshed at its
     walls (mqucifer/print-shop#363); its skin's wedges lie on the faces it meets them by too."""
     pinned = cae("load", "load/printed-tile-pinned.json", "--weight", "1", "--at", "55,55,8")
     assert pinned.verdict != "NO ANSWER", pinned.text
@@ -591,3 +591,33 @@ def test_each_layer_read_from_the_mesh_orca_slices_is_the_b_rep_s_within_its_cho
         assert read["layers"] == 12, (name, read)
         assert read["apart_mm"] <= SLICED_APART_MM, (name, read)
         assert read["area_pct"] <= SLICED_AREA_PCT, (name, read)
+
+
+#: How far apart the slotted bar's two meshes may read its core's worst cells once meshed again
+#: round them (`load.refined`), as a share of the finer's.
+SLOT_AGREE = 0.10
+
+
+def test_a_core_read_near_its_limit_in_coarse_elements_is_meshed_again_round_it(cae: Any) -> None:
+    """mqucifer/print-shop#363: the slotted bar's core is worst at the slot's inside corners,
+    far from its held face, in elements of a 10 mm mesh many times its 1.36 mm cell, so its
+    cells were read at the mesh's scale, and its two meshes straddled its limit. Near its limit,
+    it's meshed again round every such place, both meshes, at half its cell, no finer than
+    1 mm, and the reply says so and what each read first; then its worst cells are in elements
+    at that, and the two meshes read them within `SLOT_AGREE` of each other."""
+    answer = cae("load", "load/printed-slotted.json", "--weight", "4", "--at", "115,10,20",
+                 "--mesh", "10")  # fmt: skip
+    assert answer.verdict != "NO ANSWER", answer.text
+    assert "meshed again, both meshes" in answer.text, answer.text
+    places = answer.numbers["refined"]
+    core = answer.numbers["parts"]["bar"]["cores"][0]
+    near = max(load.REFINE_SIZE_CELLS * core["cell_mm"], load.HELD_FINEST)
+    assert places and len(places) <= load.REFINE_MOST
+    for place in places:
+        assert place["mesh_mm"] == pytest.approx(near)
+        assert place["first_cell_mesh_mm"] > load.REFINE_OVER * near
+    for key in ("across", "stretch"):
+        assert core[f"{key}_cell_mesh_mm"] <= load.REFINE_OVER * near, core
+    for fine, coarse in (("across_layers_pct", "coarse_across_layers_pct"),
+                         ("stretch_pct", "coarse_stretch_pct")):
+        assert core[coarse] == pytest.approx(core[fine], rel=SLOT_AGREE), core

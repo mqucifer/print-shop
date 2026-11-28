@@ -876,6 +876,8 @@ class Averaged:
     strain: np.ndarray
     at: np.ndarray
     fill: np.ndarray
+    #: Each place's entry, by its number in what was averaged.
+    rows: np.ndarray = field(default_factory=lambda: np.zeros(0, dtype=int))
 
 
 # Exact, layer by layer
@@ -1037,7 +1039,8 @@ def element_averaged(middles: np.ndarray, strains: np.ndarray, weights: np.ndarr
     does, whatever the part's size."""
     held = np.flatnonzero(weights > 0)
     if not len(held):
-        return Averaged(np.zeros((0, 3, 3)), np.zeros((0, 3)), np.zeros(0))
+        return Averaged(np.zeros((0, 3, 3)), np.zeros((0, 3)), np.zeros(0),
+                        np.zeros(0, dtype=int))
     where, strain, weight = middles[held], strains[held], weights[held]
     # Voxels half a cell across: the 27 round one hold every place within its cell, and
     # little more.
@@ -1089,4 +1092,4 @@ def element_averaged(middles: np.ndarray, strains: np.ndarray, weights: np.ndarr
         for mine, theirs in pairs(rows):
             np.maximum.at(fullest, mine, fill[theirs])
     read = fill >= FULLEST * fullest
-    return Averaged(averaged[read], where[read], fill[read])
+    return Averaged(averaged[read], where[read], fill[read], held[read])

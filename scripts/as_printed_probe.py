@@ -50,6 +50,7 @@ STEPS = (
     ("taking the dovetail", "taking a dovetail apart"),
     ("meshing and solving the joined parts", "meshing and solving"),
     ("meshing again straight-sided", "meshing again straight-sided"),
+    ("meshing again finer round", "meshing again finer round a core's worst cells"),
     ("gmsh's mesh of the joined parts", "gmsh's mesh"),
     ("finding faces closer", "finding close faces"),
     ("reading each element of the printed parts", "reading each element by its layers"),
@@ -163,6 +164,13 @@ def main(argv: list[str]) -> int:
         return 0
     record = json.loads((work / f"{saved.group(1)}.json").read_text())
     numbers = record.get("numbers", {})
+    refined = numbers.get("refined") or []
+    if refined:
+        print(f"meshed again finer round {len(refined)} core cell(s), at "
+              f"{sorted({r['mesh_mm'] for r in refined})} mm within "
+              f"{max(r['reach_mm'] for r in refined)} mm; first read: "
+              + "; ".join(f"{r['reading']} {r['first_pct']}% of {r['limit_pct']}% in "
+                          f"{r['first_cell_mesh_mm']} mm elements" for r in refined), flush=True)
     for name, part in numbers.get("parts", {}).items():
         k = names.index(name) + 1 if name in names else 0
         if part.get("printed"):
@@ -178,7 +186,10 @@ def main(argv: list[str]) -> int:
                   f"stretch {core.get('stretch_pct', 0):.3f}% of "
                   f"{core.get('stretch_limit_pct', 0):.3g}% "
                   f"({core.get('coarse_stretch_pct', 0):.3f}% on the coarser mesh), its cell "
-                  f"{core.get('across_cell_fill')} and {core.get('stretch_cell_fill')} core; "
+                  f"{core.get('across_cell_fill')} and {core.get('stretch_cell_fill')} core, of "
+                  f"{core.get('across_cell_elements')} and {core.get('stretch_cell_elements')} "
+                  f"elements of {core.get('across_cell_mesh_mm')} and "
+                  f"{core.get('stretch_cell_mesh_mm')} mm; "
                   f"at its elements {core.get('at_elements_across_layers_pct', 0):.3f}% and "
                   f"{core.get('at_elements_stretch_pct', 0):.3f}%", flush=True)
     for name, cells in numbers.get("printed", {}).items():
