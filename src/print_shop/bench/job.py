@@ -69,7 +69,7 @@ class BenchJob:
         """A job of `args` over `files` in `folder`, with the command's own limits."""
         words = list(args)
         return cls(tuple(words), folder, tuple(files), host.memory_for(words),
-                   host.timeout_for(words))
+                   host.timeout_for(words, folder))
 
 
 @dataclass(frozen=True)

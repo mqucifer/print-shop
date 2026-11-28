@@ -328,3 +328,29 @@ def test_a_load_reading_a_part_as_printed_is_told_and_keeps_load_s_own_limits(
     assert not host.reads_printed(["clearance", "printed.json"], tmp_path)
     assert host.memory_for(printed) == host.memory_for(solid) == host.MEMORY
     assert host.timeout_for(printed) == host.timeout_for(solid)
+    assert host.timeout_for(printed, tmp_path) == host.timeout_for(solid, tmp_path) == host.TIMEOUT
+
+
+def test_a_printed_read_of_an_assembly_with_a_through_joint_is_given_the_hour(
+    tmp_path: Path,
+) -> None:
+    """mqucifer/print-shop#363: a `load` that reads a part as printed in an assembly with a
+    `through` joint is given `TWO_PASSES`' limit from the start, judging its bolts as a solid
+    read does, with the direct solve a part read as printed needs; its memory `load`'s own. A
+    solid one, or a printed one with no through joint, keeps `TIMEOUT`."""
+    joint = {"between": ["a", "b"], "kind": "through"}
+    (tmp_path / "printed.json").write_text(json.dumps(
+        {"parts": [{"name": "a", "print": {"walls": 2}}, {"name": "b"}], "joints": [joint]}))
+    (tmp_path / "solid.json").write_text(json.dumps(
+        {"parts": [{"name": "a"}, {"name": "b"}], "joints": [joint]}))
+    (tmp_path / "glued.json").write_text(json.dumps(
+        {"parts": [{"name": "a", "print": {"walls": 2}}, {"name": "b"}],
+         "joints": [{**joint, "kind": "bonded"}]}))
+    words = ["--weight", "1", "--at", "0,0,0"]
+    assert host.reads_printed_through(["load", "printed.json", *words], tmp_path)
+    assert host.timeout_for(["load", "printed.json", *words], tmp_path) == host.TWO_PASSES
+    assert host.offered(["load", "printed.json", *words], tmp_path) is None
+    assert host.timeout_for(["load", "solid.json", *words], tmp_path) == host.TIMEOUT
+    assert host.timeout_for(["load", "glued.json", *words], tmp_path) == host.TIMEOUT
+    assert host.timeout_for(["load", "printed.json", *words]) == host.TIMEOUT
+    assert host.memory_for(["load", "printed.json", *words]) == host.MEMORY

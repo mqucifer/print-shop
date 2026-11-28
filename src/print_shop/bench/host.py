@@ -21,6 +21,7 @@ import threading
 import time
 import uuid
 from pathlib import Path
+from typing import Any
 
 IMAGE = "print-shop/bench:0.15"
 BASE = (
@@ -256,12 +257,38 @@ def helper(module: str, args: list[str]) -> list[str]:
     return ["python", "-I", "-c", entry, *args]
 
 
-def timeout_for(args: list[str]) -> int:
+def timeout_for(args: list[str], folder: Path | None = None) -> int:
     """How long a bench command may run: `TIMEOUT`, or its own in `TIMEOUTS`, or `TWO_PASSES`
-    for a `load` that asks for two passes with `--parts`."""
-    if asks_two_passes(args):
+    for a `load` that asks for two passes with `--parts`, or that reads a part as printed in an
+    assembly, in `folder`, with a through joint (`reads_printed_through`)."""
+    if asks_two_passes(args) or reads_printed_through(args, folder):
         return TWO_PASSES
     return TIMEOUTS.get(command_word(args) or "", TIMEOUT)
+
+
+def reads_printed_through(args: list[str], folder: Path | None) -> bool:
+    """Whether a bench command is a `load` that reads a part as printed (`reads_printed`) in an
+    assembly with a `through` joint: given `TWO_PASSES`' limit from the start, its memory
+    `load`'s own (mqucifer/print-shop#363). Judging each bolted joint, its bolts' ways and
+    their readings, is the most of such a read's time, as it is of a solid read of it; with
+    the direct solve and its correction a part read as printed needs, a real tile of a few
+    bolts read in one pass ran past `TIMEOUT`."""
+    if not reads_printed(args, folder) or folder is None:
+        return False
+    data = _assembly(args, folder)
+    joints = data.get("joints", []) if isinstance(data, dict) else []
+    return any(isinstance(j, dict) and j.get("kind") == "through" for j in joints)
+
+
+def _assembly(args: list[str], folder: Path) -> Any:
+    word = command_word(args) or ""
+    file = next((a for a in args[args.index(word) + 1 :] if a.endswith(".json")), None)
+    if file is None:
+        return None
+    try:
+        return json.loads((Path(folder) / file).read_text())
+    except (OSError, ValueError):
+        return None
 
 
 def reads_printed(args: list[str], folder: Path | None) -> bool:
@@ -294,11 +321,11 @@ def memory_for(args: list[str]) -> str:
     return TWO_PASSES_MEMORY if asks_two_passes(args) else MEMORY
 
 
-def offered(args: list[str]) -> int | None:
+def offered(args: list[str], folder: Path | None = None) -> int | None:
     """The longer limit a bench command may take up as it runs, or None: `TWO_PASSES` for a
     `load` that may come to two passes, or a `clearance` whose exact reads may run past
     `TIMEOUT`, where it isn't already given it."""
-    if command_word(args) in OFFERED and timeout_for(args) < TWO_PASSES:
+    if command_word(args) in OFFERED and timeout_for(args, folder) < TWO_PASSES:
         return TWO_PASSES
     return None
 
@@ -322,8 +349,8 @@ def run(
     name = name or f"print-bench-{uuid.uuid4().hex[:12]}"
     longer = None
     if timeout is None:
-        timeout = TIMEOUT if python else timeout_for(args)
-        longer = None if python else offered(args)
+        timeout = TIMEOUT if python else timeout_for(args, work)
+        longer = None if python else offered(args, work)
     if python and image == CAE_IMAGE:
         start = "import sys, runpy; sys.path.append('/opt/conda/lib'); del sys.argv[0]; "
         start += "runpy.run_path(sys.argv[0], run_name='__main__')"

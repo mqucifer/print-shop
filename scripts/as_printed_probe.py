@@ -119,7 +119,7 @@ def main(argv: list[str]) -> int:
     args = ["load", *argv]
     printed = host.reads_printed(args, work)
     print(f"read as printed: {'yes' if printed else 'no'}; limits "
-          f"{host.memory_for(args)} and {limit or host.timeout_for(args)} s", flush=True)
+          f"{host.memory_for(args)} and {limit or host.timeout_for(args, work)} s", flush=True)
     names = [str(p.get("name")) for p in json.loads((work / argv[0]).read_text()).get("parts", [])]
     began = time.time()
     trace: list[str] = []
