@@ -1713,7 +1713,109 @@ def test_the_bands_probe_gives_each_mesh_s_counts_as_it_was_set_up() -> None:
         "1234567 nodes",
         "bench: memory 948.1 current=3736000000 peak=3900000000",
     ]
-    assert probe.set_ups(trace) == [
-        "the mesh set up at 948.1 s: 812345 elements, 1234567 nodes; the container held 3.48 GiB "
-        "at its start"
+    trace += [
+        "bench: step 950.0 writing CalculiX's input: 812345 elements, 1234567 nodes",
+        "bench: memory 950.0 current=3800000000 peak=3900000000",
     ]
+    assert probe.set_ups(trace) == [
+        "setting the mesh up in load's own process at 948.1 s: 812345 elements, 1234567 nodes; "
+        "the container held 3.48 GiB at its start",
+        "writing CalculiX's input at 950.0 s: 812345 elements, 1234567 nodes; the container held "
+        "3.54 GiB at its start",
+    ]
+
+
+def _counted(two_pass: bool, falls: bool) -> Any:
+    import types
+
+    return types.SimpleNamespace(
+        size=3.0, straight=True, two_pass=two_pass, solids=[1, 2], _falls_back=lambda: falls
+    )
+
+
+@pytest.mark.parametrize("falls", [False, True])
+def test_writing_calculix_s_input_and_reading_its_results_are_held_to_the_room_first(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, falls: bool
+) -> None:
+    """The design run's assembly on mqucifer/print-shop#376, its set-up checked, was killed
+    writing CalculiX's input in `load`'s own process: FreeCAD's writer took 3.10 to 3.13 KB a
+    node (4.36 an element) on two meshes that solved, and its reader of the results 3.39 to
+    3.52 (4.72 to 4.94). Each is held to the room before it's begun, by the mesh's counts: low,
+    a tenth under the least, where the try is all there is; and where a lower bound can follow,
+    a half above the most. Where it won't fit, the whole is unread for memory."""
+    import types
+
+    from print_shop.bench import cae
+
+    fem = types.SimpleNamespace(NodeCount=1000, VolumeCount=700)
+    for need, what in ((load._Model._write_need, "to write CalculiX's input with its loads"),
+                       (load._Model._read_need, "to read CalculiX's results back")):  # fmt: skip
+        want = need(_counted(True, falls), fem)
+        if falls:
+            assert want == pytest.approx(1.5 * max(
+                1000 * (load.WRITE_NODE_HIGH if "write" in what else load.READ_NODE_HIGH),
+                700 * (load.WRITE_ELEMENT_HIGH if "write" in what else load.READ_ELEMENT_HIGH),
+            ))  # fmt: skip
+        else:
+            assert want == pytest.approx(0.9 * min(
+                1000 * (load.WRITE_NODE if "write" in what else load.READ_NODE),
+                700 * (load.WRITE_ELEMENT if "write" in what else load.READ_ELEMENT),
+            ))  # fmt: skip
+        monkeypatch.setattr(cae, "room", lambda files=True, want=want: want - 1)
+        with pytest.raises(load._Unread) as met:
+            load._Model._fits(_counted(True, falls), fem, want, what)
+        assert met.value.memory and what in met.value.evidence
+        assert ("may not fit" in met.value.evidence) is falls
+        monkeypatch.setattr(cae, "room", lambda files=True, want=want: want)
+        load._Model._fits(_counted(True, falls), fem, want, what)
+
+
+def test_calculix_s_results_are_read_back_only_where_they_fit_and_as_a_step(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Where CalculiX left no results file, as where it was stopped, FreeCAD's reader is asked
+    as before and finds none. Where it left one, its need is held to the room first, and it's
+    read as a step of its own, giving the mesh's counts."""
+    import types
+
+    from print_shop.bench import cae, progress
+
+    steps: list[str] = []
+    monkeypatch.setattr(
+        progress, "_say", lambda kind, text: steps.append(text) if kind == host.STEP_LINE else None
+    )
+    read: list[bool] = []
+    fea = types.SimpleNamespace(
+        inp_file_name=str(tmp_path / "solve.inp"), load_results=lambda: read.append(True)
+    )
+    model: Any = _counted(False, False)
+    model.fem = types.SimpleNamespace(NodeCount=1000, VolumeCount=700)
+    model._read_need = lambda fem: 10**9
+    model._fits = lambda fem, need, what: load._Model._fits(model, fem, need, what)
+    monkeypatch.setattr(cae, "room", lambda files=True: 0)
+    load._Model._results_back(model, fea)
+    assert read == [True] and steps == [], "no file: asked as before"
+    (tmp_path / "solve.frd").write_text("x")
+    with pytest.raises(load._Unread):
+        load._Model._results_back(model, fea)
+    assert read == [True]
+    monkeypatch.setattr(cae, "room", lambda files=True: 10**10)
+    load._Model._results_back(model, fea)
+    assert read == [True, True]
+    assert steps[0] == "reading CalculiX's results back: 700 elements, 1000 nodes"
+
+
+def test_a_solve_past_the_memory_says_how_long_each_of_calculix_s_tries_ran() -> None:
+    """The operator: on a large assembly the direct solver and then the iterative one may each
+    be tried and stopped before the band's read, so the reply gives each try's seconds."""
+    import types
+
+    model: Any = types.SimpleNamespace(
+        fem=types.SimpleNamespace(VolumeCount=500_000, NodeCount=900_000),
+        shape=types.SimpleNamespace(Volume=1e6), size=5.0,
+        tries=[("direct", 412.4), ("iterative", 1290.6)],
+    )  # fmt: skip
+    said = load._Model._too_big(model, 4 * 2**30)
+    assert said.memory
+    ran = "CalculiX's direct solver ran 412 s and its iterative one 1291 s, each stopped there"
+    assert ran in said.evidence, said.evidence

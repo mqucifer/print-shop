@@ -170,6 +170,17 @@ SET_UP_NODE = 335
 SET_UP_FACES = 660
 SET_UP_NODE_HIGH = 650
 SET_UP_FACES_HIGH = 1110
+#: What FreeCAD's writer of CalculiX's input takes in `load`'s own process at its peak, and its
+#: reader of CalculiX's results, in bytes a node, or an element, as if either alone: on two
+#: meshes that solved in the image, of 356,359 and 531,542 elements, the writer 3,100 to 3,130 a
+#: node, or 4,360 an element, and the reader 3,390 to 3,520, or 4,720 to 4,940 (a design run's
+#: assembly on mqucifer/print-shop#376 was killed writing its input, its set-up checked). Both
+#: meshes had the same nodes to an element, so each need is taken both ways: low, a tenth under
+#: the less, and where a lower bound can follow, a half above the more (`_Model._solve_need`).
+WRITE_NODE, WRITE_ELEMENT = 3100, 4360
+WRITE_NODE_HIGH, WRITE_ELEMENT_HIGH = 3130, 4360
+READ_NODE, READ_ELEMENT = 3390, 4720
+READ_NODE_HIGH, READ_ELEMENT_HIGH = 3520, 4940
 #: How a mesh whose elements' sides are straight is said where a step names it.
 STRAIGHT = ", its elements straight-sided"
 #: A face of a part read without its glass band is where the band met it where a point inside it
@@ -1009,14 +1020,24 @@ class _Model:
         if wrong:
             raise NoAnswer(f"the solve couldn't be set up: {wrong[:300]}")
         began = time.time()
-        fea.write_inp_file()
-        if self.core_solids:
-            self._stiffnesses(fea.inp_file_name)
-        self._add_to(fea.inp_file_name)
+        # FreeCAD's writer, in this process, held to the room first (mqucifer/print-shop#376).
+        self._fits(fem, self._write_need(fem), "to write CalculiX's input with its loads")
+        with step(
+            f"writing CalculiX's input: {fem.VolumeCount} elements, {fem.NodeCount} nodes"
+        ):
+            fea.write_inp_file()
+            if self.core_solids:
+                self._stiffnesses(fea.inp_file_name)
+            self._add_to(fea.inp_file_name)
         kills = oom_kills()
+        #: Each of CalculiX's tries, and how long it ran, in s, for the reply where they meet
+        #: the memory (the operator, mqucifer/print-shop#376).
+        self.tries: list[tuple[str, float]] = []
         with step("CalculiX's solve of the joined parts"):
+            solving = time.time()
             _ccx(fea, self.size)
-            fea.load_results()
+            self.tries.append(("direct", time.time() - solving))
+        self._results_back(fea)
         self.solve_s = round(time.time() - began, 2)
         results = [o for o in analysis.Group if o.isDerivedFrom("Fem::FemResultObject")]
         if "nonpositive jacobian" in str(getattr(fea, "ccx_stdout", "")):
@@ -1104,6 +1125,52 @@ class _Model:
             "by its own count: so it isn't set up"
             + (", as held high, where a lower bound can follow, it may not fit" if high else "")
         )
+
+    def _write_need(self, fem: Any) -> float:
+        return _solve_need(
+            fem, self._falls_back(), (WRITE_NODE, WRITE_ELEMENT),
+            (WRITE_NODE_HIGH, WRITE_ELEMENT_HIGH),
+        )  # fmt: skip
+
+    def _read_need(self, fem: Any) -> float:
+        return _solve_need(
+            fem, self._falls_back(), (READ_NODE, READ_ELEMENT),
+            (READ_NODE_HIGH, READ_ELEMENT_HIGH),
+        )  # fmt: skip
+
+    def _fits(self, fem: Any, need: float, what: str) -> None:
+        """Whether a step of `load`'s own process, `what`, its `need` in bytes, fits the
+        container's room (mqucifer/print-shop#376): where it won't, the whole is unread for
+        memory, before anything's begun. FreeCAD's own code aborts where it meets the memory,
+        so this is asked first. Off the container, nothing's asked."""
+        high = self._falls_back()
+        give_back()
+        left = cae.room(files=not high)
+        if left is None or left >= need:
+            return
+        _memory_unread(
+            f"the mesh of the joined parts at a mesh of at most {self.size:g} mm"
+            f"{STRAIGHT if self.straight else ''}, {fem.VolumeCount:,} elements and "
+            f"{fem.NodeCount:,} nodes, takes about {need / 2**30:.2f} GiB {what} in load's own "
+            f"process, and the container's memory has {max(left, 0) / 2**30:.2f} GiB left, by "
+            "its own count: so it isn't done"
+            + (", as held high, where a lower bound can follow, it may not fit" if high else "")
+        )
+
+    def _results_back(self, fea: Any) -> None:
+        """CalculiX's results read back into FreeCAD, in this process: where it left a results
+        file, its need held to the room first (`_fits`), as a step of its own with the mesh's
+        counts. Where it left none, as where it was stopped, FreeCAD's reader finds none, as
+        before."""
+        fem = self.fem
+        if not os.path.exists(os.path.splitext(fea.inp_file_name)[0] + ".frd"):
+            fea.load_results()
+            return
+        self._fits(fem, self._read_need(fem), "to read CalculiX's results back")
+        with step(
+            f"reading CalculiX's results back: {fem.VolumeCount} elements, {fem.NodeCount} nodes"
+        ):
+            fea.load_results()
 
     def _falls_back(self) -> bool:
         """Whether a lower bound can follow where the whole is unread: a part names its glass
@@ -1432,8 +1499,10 @@ class _Model:
             job = path if run == 0 else path.with_name(f"{path.stem}_{run}.inp")
             job.write_text(text)
             fea.inp_file_name = str(job)
+            solving = time.time()
             ccx_one_thread(fea)
-            fea.load_results()
+            self.tries.append(("iterative", time.time() - solving))
+            self._results_back(fea)
             results = [o for o in analysis.Group if o.isDerivedFrom("Fem::FemResultObject")]
             if not results or not results[-1].NodeStrainXX:
                 raise self._too_big(limit)
@@ -1616,6 +1685,15 @@ class _Model:
             if finer > alone
             else "give a coarser --mesh, or read fewer of the parts at once"
         )
+        tries = getattr(self, "tries", [])
+        if tries:
+            evidence += (
+                "; CalculiX's "
+                + " and its ".join(f"{kind} solver ran {seconds:.0f} s" if k == 0 else
+                                   f"{kind} one {seconds:.0f} s"
+                                   for k, (kind, seconds) in enumerate(tries))
+                + (", each stopped there" if len(tries) > 1 else ", stopped there")
+            )  # fmt: skip
         return _Unread(
             f"nothing of the assembly is read, as it's past what the container's memory solves: "
             f"{to_do}. {evidence}. Every part, joint and bolt of it is left unread",
@@ -2495,6 +2573,18 @@ class _Unparted(NoAnswer):
     def __init__(self, said: str, empty: list[str]) -> None:
         super().__init__(said)
         self.empty = empty
+
+
+def _solve_need(
+    fem: Any, falls_back: bool, low: tuple[int, int], high: tuple[int, int]
+) -> float:
+    """A step's need by the mesh's counts, from what it took a node and an element, each as if
+    alone (`WRITE_NODE` and the rest): where a lower bound can follow, a half above the more of
+    the two; anywhere else, a tenth under the less (mqucifer/print-shop#376)."""
+    nodes, elements = int(fem.NodeCount), int(fem.VolumeCount)
+    if falls_back:
+        return 1.5 * max(nodes * high[0], elements * high[1])
+    return 0.9 * min(nodes * low[0], elements * low[1])
 
 
 def _memory_unread(evidence: str) -> NoReturn:
