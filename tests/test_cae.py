@@ -2742,3 +2742,37 @@ def test_parts_where_the_first_pass_s_mesh_won_t_fit_read_back_reads_a_glass_ban
     assert forced["why"].startswith(
         "read as a lower bound, frame with its glass band left out, the band unread: "
     ), forced["why"]
+
+
+@pytest.mark.assembly
+@pytest.mark.bands
+def test_a_band_s_read_whose_direct_solve_meets_the_memory_is_solved_iteratively(
+    cae: Any, plain_frame: Path
+) -> None:
+    """The operator, on a design run's assembly on mqucifer/print-shop#376: its band's own read
+    met the memory in CalculiX's direct solve, and as nothing follows it, it's solved again by
+    the iterative solver and corrected, as two passes are. Planted on the plain banded frame
+    (`cae_cases/band_iterative_forced.py`): the band's first direct solve meets the memory,
+    really, and the band's read is solved iteratively, says so, and reads as the same band's
+    read by the direct solver does (`band_forced.py`), within the corrections' residual."""
+    args = ["load", f"{plain_frame.name}/joined.json", "--weight", "1", "--at", PLATE_AT]
+    direct = _forced(cae, "band_forced.py", args)
+    assert direct["verdict"] == "OK", direct["text"]
+    assert direct["numbers"]["lower_bound"]["solvers"] == {"mesh": "direct", "coarser": "direct"}
+    iterated = _forced(cae, "band_iterative_forced.py", args)
+    assert iterated["verdict"] == "OK", iterated["text"]
+    assert "killed" not in iterated["text"]
+    lower = iterated["numbers"]["lower_bound"]
+    assert lower["solvers"] == {"mesh": "iterative, corrected", "coarser": "direct"}, lower
+    assert "CalculiX's direct solver met the container's memory" in iterated["text"]
+    one, other = iterated["numbers"], direct["numbers"]
+    assert one["moves_mm"] == pytest.approx(other["moves_mm"], rel=1e-4)
+    for name in ("frame", "block"):
+        for key in ("across_layers_pct", "stretch_pct"):
+            assert one["parts"][name][key] == pytest.approx(
+                other["parts"][name][key], rel=1e-3
+            ), (name, key)
+    assert np.allclose(
+        one["joints"]["frame+block"]["force_n"], other["joints"]["frame+block"]["force_n"],
+        atol=1e-4 * one["force_n"],
+    )  # fmt: skip

@@ -1055,7 +1055,10 @@ class _Model:
                 f"turned inside out{where}. One with a curved side on a small hole or a tight "
                 "round can be: give a finer --mesh"
             )
-        if (not results or not results[0].NodeStrainXX) and self.two_pass:
+        # Two passes, and a glass band's read, which nothing follows (the operator, on a design
+        # run's assembly on mqucifer/print-shop#376), are solved again iteratively where the
+        # direct solver met the memory.
+        if (not results or not results[0].NodeStrainXX) and (self.two_pass or bool(_bands)):
             full = memory_met(kills)
             if full is not None:
                 self._iterated(fea, analysis, full)
@@ -1721,7 +1724,9 @@ class _Model:
         moved = self.printed if self.core_solids and self.printed is not None else self.moved
         forces = element_forces(self.points[wired], moved[wired], *self._stiff())
         owned = self._owned(wired, self.row, self.points)
-        if not self.two_pass:
+        # Solved iteratively, the elements' balance is what the corrections hold to `RESIDUAL`
+        # (`_iterated`), from the same wiring, checked as it's read (`_wired`).
+        if not self.two_pass and self.iterated is None:
             self._balanced(wired, owned)
         self.part_rows = {name: np.unique(wired[owned[k]]) for k, name in enumerate(names)}
         if self.element_core is not None:
@@ -2783,6 +2788,8 @@ _placed_now: list[Any] = []
 #: What each part's glass band took from it, where the parts are placed without their bands, by
 #: the part's name (`_placed`, mqucifer/print-shop#375).
 _bands: dict[str, Band] = {}
+#: Which of CalculiX's solvers read the last read's mesh and its coarser one (`_run`).
+_solvers: list[str] = []
 
 
 def keep(shapes: list[Any]) -> None:
@@ -3283,6 +3290,9 @@ def _band_read(
         # How long the try took, and the band's read (mqucifer/print-shop#301).
         "tried_s": round(tried if tried_s is None else tried_s, 1),
         "band_s": round(time.time() - band_began, 1),
+        # And which of CalculiX's solvers read it, at the mesh and the coarser one: the
+        # iterative where the direct met the memory (mqucifer/print-shop#376).
+        "solvers": dict(zip(("mesh", "coarser"), _solvers, strict=False)),
         # Lifted, each band's weight kept, in g (mqucifer/print-shop#375), and the joints whose
         # load statics fixes, and those whose share isn't a bound (the operator's review).
         **(
@@ -3459,11 +3469,16 @@ def _run(
         coarse = _solved(
             assembly, placed, args, round(size * COARSER, 3), cores=cores, coarser_of=fine["closes"]
         )
+    # Which of CalculiX's solvers read each mesh, for a glass band's read (mqucifer/print-shop#376).
+    _solvers[:] = [
+        "iterative, corrected" if one.get("iterated") else "direct" for one in (fine, coarse)
+    ]
     force = float(sum(np.linalg.norm(one["force"]) for one in fine["raw_loads"]))
     meshed = (
         f"a mesh of at most {size:g} mm ({fine['nodes']} nodes, {fine['elements']} elements, "
         f"meshed in {fine['mesh_s']} s and solved in {fine['solve_s']} s)"
         + _straight_said(fine)
+        + (f"; {fine['iterated']}" if fine.get("iterated") else "")
         if two_pass is None
         else "in two passes, each one's meshes below"
     )
@@ -3586,8 +3601,9 @@ def _run(
     )
     report.second(
         f"the same solve on a mesh of at most {coarse['mesh_mm']:g} mm ({coarse['nodes']} nodes"
-        f"{_straight_said(coarse)}): "
-        f"the loaded places move {moves}"
+        f"{_straight_said(coarse)}"
+        + (f"; {coarse['iterated']}" if two_pass is None and coarse.get("iterated") else "")
+        + f"): the loaded places move {moves}"
     )
     report.second(
         f"the held faces' reaction, as CalculiX sums it: {_xyz(fine['reaction'])} N, against the "

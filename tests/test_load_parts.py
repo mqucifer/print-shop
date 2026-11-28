@@ -1016,6 +1016,8 @@ def _two_passes_then(
         report.line(f"read {'without bands' if without_bands else two_pass}")
         if two_pass is not None and stopped is not None:
             raise stopped
+        if without_bands:
+            load._solvers[:] = ["iterative, corrected", "direct"]
         if without_bands and args.lift is not None:
             report.numbers["loads"] = [
                 {"part": "frame", "grams": 30.0, "band_grams": 12.5, "band_mm2": 400.0}
@@ -1058,6 +1060,7 @@ def test_parts_on_a_glass_band_that_meets_the_time_reads_its_lower_bound_and_say
     lower = report.numbers["lower_bound"]
     assert lower["parts"] == ["frame"]
     assert lower["why"] == f"read in two passes, as --parts asks: {late}"
+    assert lower["solvers"] == {"mesh": "iterative, corrected", "coarser": "direct"}
     assert "weight_kept_g" not in lower
     assert report.why.startswith(
         "read as a lower bound, frame with its glass band left out, the band unread: "
