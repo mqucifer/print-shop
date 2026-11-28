@@ -71,6 +71,7 @@ from typing import Any
 
 import numpy as np
 
+from . import cae
 from .assembly import AXES, read
 from .cae import freecad
 from .limits import apart, over, said
@@ -583,6 +584,17 @@ def overhang(triangles: np.ndarray, up: np.ndarray, near: float) -> dict[str, An
 
 
 def run(args: Any, report: Report) -> None:
+    """`optimise`, with its mesh and solve files, written by `load`'s model in the scratch
+    folder on disk, cleared at its end whatever stopped it, and a killed command's at its start,
+    as `load` does (the operator's review of mqucifer/print-shop#376)."""
+    cae.clear_stale()
+    try:
+        _optimise(args, report)
+    finally:
+        cae.clear_own()
+
+
+def _optimise(args: Any, report: Report) -> None:
     freecad("optimise")
     if args.weight is None or args.weight <= 0 or not args.at:
         raise NoAnswer(

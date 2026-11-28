@@ -1672,20 +1672,77 @@ def test_a_set_up_that_won_t_fit_is_the_whole_unread_for_memory(
     assert refused.value.memory and "takes about 3.00 GiB read back" in refused.value.evidence
 
 
-def test_a_step_that_meets_python_s_memory_is_the_whole_unread_for_it() -> None:
+@pytest.mark.parametrize(
+    ("said", "left", "memory"),
+    [
+        ("Unable to allocate 1.50 GiB for an array with shape (9,) and data type float64",
+         2**29, True),
+        ("Unable to allocate 7.28 TiB for an array with shape (9,) and data type float64",
+         2**30, False),
+        ("Unable to allocate 1.50 GiB for an array with shape (9,) and data type float64",
+         2**31, False),
+        ("", 0, True),
+        ("", 2**31, False),
+        ("", None, False),
+    ],
+)  # fmt: skip
+def test_a_step_that_meets_python_s_memory_is_unread_for_it_only_where_the_room_is_short(
+    monkeypatch: pytest.MonkeyPatch, said: str, left: int | None, memory: bool
+) -> None:
     """Where `load`'s own Python meets the memory in a step, the whole is unread for it, saying
-    the step, so two passes or the band's read can follow."""
-    with pytest.raises(load._Unread) as said, load.step("meshing and solving the joined parts"):
-        raise MemoryError()
-    assert said.value.memory
-    assert said.value.evidence.startswith(
-        "load's own process met the container's memory, meshing and solving the joined parts"
-    ), said.value.evidence
+    the step, so two passes or the band's read can follow; but only where the container's room
+    is short of it (the operator's review of mqucifer/print-shop#376): what numpy asked for, where
+    it says, is within the container's limit and past what's left, or where it doesn't say,
+    nothing's left. Anything else, as an array of terabytes or off the container, is a plain
+    error, said as one, never taken for the memory."""
+    from print_shop.bench import cae
+
+    monkeypatch.setattr(cae, "room", lambda files=True: left)
+    monkeypatch.setattr(cae, "memory_max", lambda: 4 * 2**30 if left is not None else None)
+    with pytest.raises(NoAnswer) as stopped, load.step("meshing and solving the joined parts"):
+        raise MemoryError(said) if said else MemoryError()
+    assert isinstance(stopped.value, load._Unread) is memory
+    if isinstance(stopped.value, load._Unread):
+        assert stopped.value.memory
+        assert stopped.value.evidence.startswith(
+            "load's own process met the container's memory, meshing and solving the joined parts"
+        ), stopped.value.evidence
+    else:
+        assert str(stopped.value).startswith(
+            "load stopped meshing and solving the joined parts: MemoryError"
+        ), str(stopped.value)
     with pytest.raises(NoAnswer) as other, load.step("reading"):
         raise RuntimeError("something else")
     assert not isinstance(other.value, load._Unread)
 
 
+def test_optimise_clears_its_scratch_at_its_end_and_a_killed_command_s_at_its_start(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """`optimise` solves with `load`'s model, so its mesh and solve files go in the same scratch
+    folder (the operator's review): it clears its own at its end, whatever stopped it, and a
+    killed command's at its start, as `load` does."""
+    import os
+
+    from print_shop.bench import cae, optimise
+
+    monkeypatch.setattr(cae, "DISK", tmp_path)
+    monkeypatch.setattr(cae, "_own", [])
+    root = tmp_path / cae.SCRATCH
+    root.mkdir()
+    (root / "load-old").mkdir()
+    os.utime(root / "load-old", (1.0, 1.0))
+    made: list[Path] = []
+
+    def failing(args: Any, report: Report) -> None:
+        assert not (root / "load-old").exists(), "a killed command's, cleared first"
+        made.append(Path(cae.scratch("load-")))
+        raise NoAnswer("stopped")
+
+    monkeypatch.setattr(optimise, "_optimise", failing)
+    with pytest.raises(NoAnswer):
+        optimise.run(object(), Report("optimise", []))
+    assert made and not made[0].exists() and not root.exists()
 def test_where_a_lower_bound_can_follow_a_mesh_s_need_is_held_high(tmp_path: Path) -> None:
     """The operator's ruling on the design run's assembly: a step let through that doesn't fit
     costs the container, and a step refused that would just have fitted costs only a lower

@@ -2501,7 +2501,10 @@ def step(what: str) -> Iterator[None]:
     except NoAnswer:
         raise
     except MemoryError as met:
-        # Python's own allocation failed: the whole unread for memory (mqucifer/print-shop#376).
+        # Python's own allocation failed: the whole unread for memory (mqucifer/print-shop#376),
+        # only where the container's room is short of it (the operator's review).
+        if not _short_of(met):
+            raise NoAnswer(f"load stopped {what}: MemoryError: {met}"[:500]) from met
         evidence = f"load's own process met the container's memory, {what}"
         raise _Unread(
             f"nothing of the assembly is read, as {evidence}. Every part, joint and bolt of it is "
@@ -2514,6 +2517,28 @@ def step(what: str) -> Iterator[None]:
     finally:
         forget()
         give_back()
+
+
+#: numpy's words for what it couldn't allocate, and each unit's bytes.
+ASKED = re.compile(r"Unable to allocate ([\d.]+) (B|KiB|MiB|GiB|TiB|PiB|EiB)\b")
+UNITS = {"B": 1, "KiB": 2**10, "MiB": 2**20, "GiB": 2**30, "TiB": 2**40, "PiB": 2**50,
+         "EiB": 2**60}  # fmt: skip
+
+
+def _short_of(met: MemoryError) -> bool:
+    """Whether a `MemoryError` was the container's memory: off the container, never; where
+    numpy says what it asked for, where that's within the container's limit and past its room;
+    and where it doesn't say, where the room is gone. An array no container could hold is a
+    plain error (the operator's review of mqucifer/print-shop#376)."""
+    left = cae.room()
+    if left is None:
+        return False
+    found = ASKED.search(str(met))
+    if found is None:
+        return left <= 0
+    asked = float(found.group(1)) * UNITS[found.group(2)]
+    most = cae.memory_max()
+    return most is not None and asked <= most and asked > left
 
 
 #: gmsh's lines that only sum up its errors.

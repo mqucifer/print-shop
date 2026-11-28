@@ -104,6 +104,15 @@ def room(cgroup: Path | None = None, files: bool = True) -> int | None:
     return int(most) - now + spare - ROOM_MARGIN
 
 
+def memory_max(cgroup: Path | None = None) -> int | None:
+    """The container's memory limit, in bytes; None off the container, or with none."""
+    try:
+        most = ((CGROUP if cgroup is None else cgroup) / "memory.max").read_text().strip()
+    except OSError:
+        return None
+    return int(most) if most.isdigit() else None
+
+
 def scratch(prefix: str) -> str:
     """A new folder for a mesh's or a solve's files, `prefix` one of `SCRATCH_KINDS`: in the
     scratch folder on disk, where /tmp is the container's memory, so what's written there never
