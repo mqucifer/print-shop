@@ -258,10 +258,11 @@ class Slots:
 
     @contextmanager
     def take(self, memory_mb: int = 0, cpus: int = 1, kind: str | None = None,
-             group: str | None = None) -> Iterator[tuple[int, ...]]:
+             group: str | None = None,
+             group_mb: int | None = None) -> Iterator[tuple[int, ...]]:
         """Hold `memory_mb` and `cpus` while the block runs, and give it its cores where they're
-        stated. `kind` and `group` are for a pool of hosts (`pool.Pool`): one host runs every
-        kind and every group.
+        stated. `kind`, `group` and `group_mb` are for a pool of hosts (`pool.Pool`): one host
+        runs every kind and every group.
 
         Raises:
             ValueError: If the budget can't hold it at all, saying what it holds.

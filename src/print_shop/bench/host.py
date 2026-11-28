@@ -165,6 +165,7 @@ def container(
     labels: dict[str, str] | None = None,
     by_id: bool = False,
     deadline: int | None = None,
+    pull: bool = True,
 ) -> list[str]:
     """The `docker run` for a command over a working directory, in either image under the same
     limits, but for the memory a command may be given (`memory_for`). It holds no secret. `env`
@@ -175,7 +176,8 @@ def container(
     in place of `work` and this checkout's package, and `cpuset` the cores it's pinned to. It
     runs the image `by_id`, the ID checked here, never a tag that may since have moved; it's
     `labels`ed with its memory, so any process can count it without inspecting it; and a
-    `deadline` kills it inside its container (`timeout`), whatever became of this host."""
+    `deadline` kills it inside its container (`timeout`), whatever became of this host. Where
+    not `pull`, Docker never fetches an image it hasn't (`--pull never`)."""
     memory = MEMORY if memory is None else memory
     found_id = image_id(image)
     if by_id and found_id is None:
@@ -192,6 +194,7 @@ def container(
     return [
         *docker,
         "run",
+        *([] if pull else ["--pull", "never"]),
         "--rm",
         "--name",
         name,
@@ -324,6 +327,7 @@ def run(
     labels: dict[str, str] | None = None,
     by_id: bool = False,
     margin: int | None = None,
+    pull: bool = True,
 ) -> subprocess.CompletedProcess[str]:
     """Run a bench command, or a script with `python=True`, in a container over `work`. A command
     runs in its own image; a script in the first, or in `image`, where `CAE_IMAGE`'s Python has
@@ -366,6 +370,7 @@ def run(
         labels=labels,
         by_id=by_id,
         deadline=None if margin is None else max(timeout, longer or 0) + margin,
+        pull=pull,
     )
     done, limit, could = _waited(argv, timeout, longer)
     if done is None:

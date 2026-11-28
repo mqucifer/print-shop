@@ -65,3 +65,6 @@ def test_a_job_run_the_remotes_way_reads_as_it_does_here(tmp_path: Path) -> None
     assert theirs["ran"]["cpus_pinned"] == "0-1"
     assert theirs["ran"]["code"] == mine["ran"]["code"]
     assert there.ours_left() == [] and there.left == [] and there.over == []
+    # Its hold went with it, and nothing of its own is left for a later study to clear.
+    assert not there.held() and not there._holds
+    assert there.clear_stale() == []

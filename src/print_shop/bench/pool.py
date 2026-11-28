@@ -45,7 +45,11 @@ from .budget import LOOK_AGAIN, Budget, Slots, megabytes
 from .job import HERE, BenchJob, HostLost, JobResult, Runner, run_here, stop_here
 from .remote import NoRoom, RanPastThere, Remote
 
-__all__ = ["Place", "Pool"]
+__all__ = ["NoPlace", "Place", "Pool"]
+
+
+class NoPlace(ValueError):
+    """No host's budget holds a job at all: the study's, never the part's answer."""
 
 
 @dataclass
@@ -147,15 +151,16 @@ class Pool:
 
     @contextmanager
     def take(self, memory_mb: int = 0, cpus: int = 1, kind: str | None = None,
-             group: str | None = None) -> Iterator[tuple[int, ...]]:
+             group: str | None = None,
+             group_mb: int | None = None) -> Iterator[tuple[int, ...]]:
         """Hold `memory_mb` and `cpus` on a host while the block runs, and give it its cores
         where they're stated: here for anything that isn't a bench job (`kind` None, as a
         slice), else on the fastest host with room for it now; or, in a `group` (a candidate's
-        cases), on the host its first job took, while that host takes jobs. `run` runs its job
-        there.
+        cases), on the host its first job took, while that host takes jobs: only ever one
+        whose budget holds the group's largest job, `group_mb`. `run` runs its job there.
 
         Raises:
-            ValueError: If no host's budget can hold it at all.
+            NoPlace: If no host's budget can hold it at all.
         """
         lock = None
         if group is not None:
@@ -164,7 +169,7 @@ class Pool:
             # One of a group's jobs is placed at a time, so its first sets the host for all.
             lock.acquire()
         try:
-            held = self._place(memory_mb, cpus, kind, group)
+            held = self._place(memory_mb, cpus, kind, group, group_mb or memory_mb)
         finally:
             if lock is not None:
                 lock.release()
@@ -185,25 +190,30 @@ class Pool:
                 held.place.no_room_until = 0.0
                 self._lock.notify_all()
 
-    def _place(self, memory_mb: int, cpus: int, kind: str | None,
-               group: str | None) -> _Held:
+    def _place(self, memory_mb: int, cpus: int, kind: str | None, group: str | None,
+               group_mb: int) -> _Held:
         while True:
             avoid = self._avoided()
             with self._lock:
                 seen = sum(p.slots.ended for p in self.places)
                 pinned = self._groups.get(group) if group is not None else None
-                if pinned is not None and any(p.name == pinned and (p.down or p.name in avoid)
-                                              for p in self.places):
-                    pinned = None
-                places = [p for p in self.places if not p.down and p.name not in avoid
-                          and (pinned is None or p.name == pinned)
+                usable = [p for p in self.places if not p.down and p.name not in avoid
                           and (kind is not None or p.remote is None)
                           and memory_mb <= p.slots.budget.free_memory_mb
                           and p.slots.budget.free_cpus >= 1]
+                places = [p for p in usable if p.name == pinned]
+                if not places:
+                    # Not set yet, or its host can't take this one: set where every job of the
+                    # group fits, else wherever this one does, said as it moves (`said`).
+                    places = ([p for p in usable if group_mb <= p.slots.budget.free_memory_mb]
+                              if group is not None else usable) or usable
             if not places:
-                self.places[0].slots.refuse_past(memory_mb)
-                raise ValueError(f"no host takes a job of {memory_mb} MiB: "
-                                 + "; ".join(f"{p.name} {p.down}" for p in self.places[1:]))
+                try:
+                    self.places[0].slots.refuse_past(memory_mb)
+                except ValueError as exc:
+                    raise NoPlace(str(exc)) from exc
+                raise NoPlace(f"no host takes a job of {memory_mb} MiB: "
+                              + "; ".join(f"{p.name} {p.down}" for p in self.places[1:]))
             held = next((h for p in self._order(places, kind)
                          if (h := self._try(p, memory_mb, cpus, kind)) is not None), None)
             if held is not None:

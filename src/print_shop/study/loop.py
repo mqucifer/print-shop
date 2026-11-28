@@ -51,7 +51,8 @@ from print_shop.bench.as_printed import wall_thickness
 from print_shop.bench.assembly import Material
 from print_shop.bench.budget import LOAD_CORES, SLICE_CORES, Budget, Slots, megabytes
 from print_shop.bench.job import HostLost
-from print_shop.bench.pool import Pool
+from print_shop.bench.job import Stopped as JobStopped
+from print_shop.bench.pool import NoPlace, Pool
 from print_shop.bench.printed import Settings
 from print_shop.core.state import Orientation
 from print_shop.expert.client import CutOff, LLMConfig, Stopped, TimedOut, chat_with_tools
@@ -323,7 +324,10 @@ def read_candidate(part: StudyPart, candidate: Candidate,
         return reading
     sliced = reading.sliced
 
-    def one(case: Case) -> CaseRead | None:
+    # The most memory any of its cases takes: its cases are read on one host, which holds it.
+    largest = max((_load_memory(c) for c in part.cases), default=0)
+
+    def one(case: Case) -> CaseRead | str | None:
         # Its kind, which a pool of hosts measures each host's speed by: the same command for
         # every candidate under the case (`bench.pool`).
         kind = shlex.join(["load", *case.args])
@@ -332,11 +336,17 @@ def read_candidate(part: StudyPart, candidate: Candidate,
                 # Every case of a candidate on one host: the last digits of a figure may
                 # differ between hosts' processors, never within one (`bench.pool`).
                 with part.slots.take(_load_memory(case), LOAD_CORES, kind=kind,
-                                     group=candidate.name):
+                                     group=candidate.name, group_mb=largest):
                     if cancel is not None and cancel.is_set():
                         return None
                     record = part.loading(candidate, sliced, case, out / case.name)
                 break
+            except JobStopped:
+                # Stopped before it began: cut off with the study, never the part's answer.
+                return None
+            except NoPlace as exc:
+                # The study's budget, never the part's answer: the candidate isn't read.
+                return f"not read: no host could take its {case.name}: {exc}"[:400]
             except HostLost as exc:
                 # The host failed it, or was too slow for its limit: no answer of the part's
                 # own, so it runs again on another, which the pool now gives it.
@@ -355,7 +365,10 @@ def read_candidate(part: StudyPart, candidate: Candidate,
         # Cut off by the study's end under some of its cases: not a failure, not read.
         reading.error = CUT_OFF
         return reading
-    reading.cases = [c for c in found if c is not None]
+    if unplaced := [c for c in found if isinstance(c, str)]:
+        reading.error = unplaced[0]
+        return reading
+    reading.cases = [c for c in found if isinstance(c, CaseRead)]
     return reading
 
 

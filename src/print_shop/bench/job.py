@@ -24,12 +24,16 @@ from pathlib import Path
 
 from . import host
 
-__all__ = ["HERE", "BenchJob", "HostLost", "JobResult", "Runner", "run_here", "running_here",
-           "saved_files", "stop_here"]
+__all__ = ["HERE", "BenchJob", "HostLost", "JobResult", "Runner", "Stopped", "run_here",
+           "running_here", "saved_files", "stop_here"]
 
 #: What a job's record calls this host (`report.how_it_ran`'s `host`): a remote is called by its
 #: name in the settings (`remote.RemoteHost`).
 HERE = "here"
+
+
+class Stopped(RuntimeError):
+    """The study was stopped before the job started: cut off, never the part's answer."""
 
 
 class HostLost(RuntimeError):

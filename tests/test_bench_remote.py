@@ -291,7 +291,7 @@ def test_what_its_running_jobs_hold_already_is_out_of_memfree(tmp_path: Path) ->
     root = tmp_path / "spark"
     there = _remote(root)
     name = there.reserve(3072)
-    (root / "running").mkdir()
+    (root / "running").mkdir(exist_ok=True)
     (root / "running" / name).write_text("3g")
     _meminfo(root, free_gib=14.9)
     with pytest.raises(NoRoom):
@@ -763,3 +763,163 @@ def test_a_group_whose_host_went_down_moves_and_says_so(tmp_path: Path) -> None:
     with pool.take(3072, 2, kind="load b", group="c1"):
         assert pool.where() == "here"
     assert "c1's cases were read on more than one host: here, spark" in pool.said()
+
+
+# --------------------------------------------------------------------------
+# The re-review's fixes
+# --------------------------------------------------------------------------
+
+
+def _beside(root: Path) -> Remote:
+    """Another process's remote, on the same made-up host."""
+    found = stated({"BENCH_HOSTS": "spark", "BENCH_HOST_SPARK_SSH": "spark",
+                    "BENCH_HOST_SPARK_CORES": "0-3", "BENCH_HOST_SPARK_MEMORY": "6g",
+                    "BENCH_HOST_SPARK_FLOOR": "10g"})[0]
+    return Remote(found, (sys.executable, str(FAKE), str(root)))
+
+
+def test_a_job_holds_its_memory_on_the_host_from_its_reservation_to_its_end(
+    tmp_path: Path,
+) -> None:
+    """From the moment it's reserved, through its files going over, to its end, another
+    process counts the job at its whole limit: by one labelled container of its own."""
+    root = tmp_path / "spark"
+    there = _remote(root)
+    _meminfo(root, free_gib=15.5)
+    (root / "slow_in").write_text("1.5")
+    name = there.reserve(3072)
+    with pytest.raises(NoRoom, match="3.0 GiB other bench containers there hold"):
+        _beside(root).reserve(3072)
+    ran = threading.Thread(target=there.run, args=(_job(tmp_path / "job"), (0, 1), name))
+    ran.start()
+    time.sleep(0.6)
+    with pytest.raises(NoRoom, match="3.0 GiB other bench containers there hold"):
+        _beside(root).reserve(3072)
+    ran.join()
+    assert _beside(root).reserve(3072), "its hold ended with it"
+
+
+def test_a_candidate_is_never_set_on_a_host_that_cant_hold_its_largest_case(
+    tmp_path: Path,
+) -> None:
+    """A candidate whose largest case is a 4g `load --parts` isn't set on a host of 3g, though
+    its first case of 3g would fit there: it waits for a host that holds all of them."""
+    root = tmp_path / "spark"
+    pool = Pool(Slots(Budget(8 * 1024, 2)), [_remote(root, memory="3g", cores="0-1")],
+                here_runner=_here)
+    here_full = threading.Event()
+
+    def hold_here() -> None:
+        with pool.take(3072, 2, kind="x"):
+            here_full.set()
+            time.sleep(0.5)
+
+    holding = threading.Thread(target=hold_here)
+    holding.start()
+    here_full.wait(timeout=30)
+    with pool.take(3072, 2, kind="load a", group="c1", group_mb=4096):
+        assert pool.where() == "here"
+    with pool.take(4096, 2, kind="load b --parts", group="c1", group_mb=4096):
+        assert pool.where() == "here"
+    holding.join()
+
+
+def test_a_placement_that_fails_is_never_the_parts_answer(
+    part: StudyPart, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,  # noqa: F811
+) -> None:
+    from print_shop.bench.pool import NoPlace
+
+    pool = Pool(Slots(Budget(4 * 1024, 4)), [], here_runner=_here)
+    real = pool.take
+
+    def take(memory_mb: int = 0, cpus: int = 1, kind: str | None = None,
+             **more: Any) -> Any:
+        if kind is not None and "--lift" in kind:
+            raise NoPlace("no host takes a job of 3072 MiB: made up")
+        return real(memory_mb, cpus, kind, **more)
+
+    monkeypatch.setattr(pool, "take", take)
+    part.slots = pool
+    part.loading = BenchLoad(tmp_path / "assembly.json", "bar", pool.run)
+    result = run(StudyLoop(chat=_script()), part)
+    for reading in result.readings:
+        assert reading.error.startswith("not read: no host could take"), reading.error
+        assert not any(c.verdict == "NO ANSWER" for c in reading.cases)
+
+
+def test_a_job_stopped_before_it_started_is_cut_off_not_the_parts(
+    part: StudyPart, tmp_path: Path,  # noqa: F811
+) -> None:
+    from print_shop.bench.job import Stopped
+    from print_shop.study.candidate import Candidate
+    from print_shop.study.loop import CUT_OFF, read_candidate
+
+    def stopped(*_: Any) -> dict[str, Any]:
+        raise Stopped("the study was stopped before it started")
+
+    part.loading = stopped
+    reading = read_candidate(part, Candidate("c1", part.defaults))
+    assert reading.error == CUT_OFF, [c.why for c in reading.cases]
+
+
+def test_every_volume_is_labelled_and_stale_ones_are_cleared_before_a_study(
+    tmp_path: Path,
+) -> None:
+    """Only print-shop's, past the longest deadline, whose job's container is gone; each one
+    said."""
+    root = tmp_path / "spark"
+    there = _remote(root)
+    there.run(_job(tmp_path / "job"), (0, 1))
+    made = [e for e in _log(root) if e.get("volume") == "create"]
+    assert made and all({"print-shop.bench.job", "print-shop.bench.created"}
+                        <= set(e["labels"]) for e in made)
+    old = int(time.time()) - remote.STALE_S - 60
+    for name, job, created in (("print-bench-aaaaaaaaaaaa-work", "print-bench-aaaaaaaaaaaa", old),
+                               ("print-bench-bbbbbbbbbbbb-work", "print-bench-bbbbbbbbbbbb", old),
+                               ("print-bench-cccccccccccc-work", "print-bench-cccccccccccc",
+                                int(time.time()))):
+        (root / "volumes" / name).mkdir()
+        (root / "volumes" / f"{name}.labels").write_text(json.dumps(
+            {"print-shop.bench.job": job, "print-shop.bench.created": str(created)}))
+    (root / "volumes" / "model-weights").mkdir()
+    (root / "running").mkdir(exist_ok=True)
+    (root / "running" / "print-bench-bbbbbbbbbbbb").write_text("3072")
+    assert there.clear_stale() == ["print-bench-aaaaaaaaaaaa-work"]
+    left = sorted(p.name for p in (root / "volumes").iterdir() if p.is_dir())
+    assert left == ["model-weights", "print-bench-bbbbbbbbbbbb-work",
+                    "print-bench-cccccccccccc-work"]
+
+
+def test_a_job_is_killed_where_the_hosts_disk_falls_under_its_floor_as_it_runs(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = tmp_path / "spark"
+    there = _remote(root)
+    monkeypatch.setattr(remote, "DISK_LOOK", 0.2)
+    (root / "delay").write_text("5")
+    threading.Timer(0.8, lambda: (root / "df_free").write_text(str(int(1 * host.GB)))).start()
+    began = time.monotonic()
+    with pytest.raises(HostLost, match="Docker disk fell to 1.0 GB"):
+        there.run(_job(tmp_path / "job"), (0, 1))
+    assert time.monotonic() - began < 4, "killed, not waited for"
+    assert any(e.get("kill") for e in _log(root))
+
+
+def test_other_processes_jobs_count_at_their_disk_bound(tmp_path: Path) -> None:
+    root = tmp_path / "spark"
+    there = _remote(root)
+    room = host.FLOOR_GB + 2 * remote.WORK_GB + 0.5
+    (root / "df_free").write_text(str(int(room * host.GB)))
+    assert there.reserve(3072), "its own and one more"
+    (root / "others").write_text("print-bench-aaaaaaaaaaaa 3072\n")
+    with pytest.raises(NoRoom, match="Docker disk"):
+        _beside(root).reserve(3072)
+
+
+def test_every_run_there_never_pulls(tmp_path: Path) -> None:
+    root = tmp_path / "spark"
+    there = _remote(root)
+    there.reserve(3072)
+    there.run(_job(tmp_path / "job"), (0, 1))
+    runs = [e["argv"] for e in _log(root) if e.get("argv", [""])[0] == "run"]
+    assert runs and all(a[1:3] == ["--pull", "never"] for a in runs)

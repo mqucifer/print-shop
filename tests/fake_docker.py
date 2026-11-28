@@ -29,8 +29,8 @@ from pathlib import Path
 from typing import Any
 
 #: The options of `docker run` that take a value.
-VALUED = {"--name", "--label", "--network", "--cpus", "--cpuset-cpus", "--memory", "--memory-swap",
-          "--pids-limit", "--tmpfs", "--cap-drop", "--cap-add", "--security-opt",
+VALUED = {"--name", "--label", "--pull", "--network", "--cpus", "--cpuset-cpus", "--memory",
+          "--memory-swap", "--pids-limit", "--tmpfs", "--cap-drop", "--cap-add", "--security-opt",
           "--log-driver", "--ulimit", "--user", "-e", "-v", "-w"}
 PLENTY = "MemTotal: 127000000 kB\nMemFree: 40000000 kB\nMemAvailable: 90000000 kB\n"
 
@@ -125,6 +125,15 @@ def _run(argv: list[str], root: Path) -> int:
             return 125
     if command[:1] == ["timeout"]:
         command = command[4:]
+    labels = dict(e.split("=", 1) for e in options.get("--label", []))
+    said = f"{labels.get('print-shop.bench.memory', '')} {labels.get('print-shop.bench.disk', '')}"
+    running = root / "running"
+    running.mkdir(exist_ok=True)
+    if "-d" in flags:
+        # A hold: it runs, as `sleep` does, until it's removed.
+        (running / options["--name"][0]).write_text(said.strip())
+        print("0" * 64)
+        return 0
     mounts = _mounts(options.get("-v", []), root)
     for target, folder in mounts.items():
         if not folder.is_dir():
@@ -181,10 +190,7 @@ def _run(argv: list[str], root: Path) -> int:
     args = command[command.index("-c") + 2:]
     env = dict(e.split("=", 1) for e in options.get("-e", []))
     name = options["--name"][0]
-    running = root / "running"
-    running.mkdir(exist_ok=True)
-    labels = dict(e.split("=", 1) for e in options.get("--label", []))
-    (running / name).write_text(next(iter(labels.values()), ""))
+    (running / name).write_text(said.strip())
     try:
         if (root / "drop").exists():
             (root / "drop").unlink()
@@ -193,13 +199,17 @@ def _run(argv: list[str], root: Path) -> int:
             return 255
         delay = root / "delay"
         if delay.exists():
-            time.sleep(float(delay.read_text()))
+            until = time.monotonic() + float(delay.read_text())
+            while time.monotonic() < until:
+                if (root / "killed" / name).exists():
+                    return 137
+                time.sleep(0.05)
         code, said = bench(args, mounts["/work"], env)
         if not (root / "silent").exists():
             print(said, end="")
         return code
     finally:
-        (running / name).unlink()
+        (running / name).unlink(missing_ok=True)
 
 
 def main(argv: list[str]) -> int:
@@ -222,27 +232,45 @@ def main(argv: list[str]) -> int:
                 return 1
             print(images[image])
             return 0
-        case ["volume", "create", name]:
+        case ["volume", "create", *rest]:
+            name = rest[-1]
+            labels = dict(rest[k + 1].split("=", 1) for k, w in enumerate(rest)
+                          if w == "--label")
             (root / "volumes" / name).mkdir(parents=True)
-            _log(root, {"volume": "create", "name": name})
+            (root / "volumes" / f"{name}.labels").write_text(json.dumps(labels))
+            _log(root, {"volume": "create", "name": name, "labels": labels})
             print(name)
             return 0
         case ["volume", "rm", "-f", *names]:
             for name in names:
                 shutil.rmtree(root / "volumes" / name, ignore_errors=True)
+                (root / "volumes" / f"{name}.labels").unlink(missing_ok=True)
             _log(root, {"volume": "rm", "names": names})
+            return 0
+        case ["volume", "ls", "--filter", _, "--format", _]:
+            for path in sorted((root / "volumes").glob("*.labels")):
+                labels = json.loads(path.read_text())
+                if "print-shop.bench.job" in labels:
+                    print(f"{path.name.removesuffix('.labels')} {labels['print-shop.bench.job']} "
+                          f"{labels.get('print-shop.bench.created', '')}")
             return 0
         case ["volume", "ls", *_]:
             for folder in sorted((root / "volumes").glob("*")):
-                print(folder.name)
+                if folder.is_dir():
+                    print(folder.name)
             return 0
         case ["rm", "-f", *names]:
+            for name in names:
+                (root / "running" / name).unlink(missing_ok=True)
             _log(root, {"rm": names})
             return 0
         case ["kill", name]:
+            (root / "killed").mkdir(exist_ok=True)
+            (root / "killed" / name).write_text("")
+            (root / "running" / name).unlink(missing_ok=True)
             _log(root, {"kill": name})
             return 0
-        case ["ps", "--filter", _, "--format", _]:
+        case ["ps", "-a", "--filter", _, "--format", _] | ["ps", "--filter", _, "--format", _]:
             others = root / "others"
             if others.exists():
                 print(others.read_text(), end="")

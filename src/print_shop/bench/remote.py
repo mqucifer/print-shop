@@ -47,16 +47,18 @@ import re
 import subprocess
 import tarfile
 import threading
+import time
 import uuid
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 
 from . import host
 from .budget import megabytes
-from .job import HERE, BenchJob, HostLost, JobResult, saved_files
+from .job import HERE, BenchJob, HostLost, JobResult, Stopped, saved_files
 
 __all__ = ["HOSTS", "NoRoom", "RanPastThere", "Remote", "RemoteHost", "Stopped", "cores_of",
            "cpuset", "send", "stated"]
+# `Stopped` is the job's own (`job.Stopped`), said here too, where a remote raises it.
 
 #: The setting that names the remote hosts, and each one's own keys after
 #: `BENCH_HOST_<NAME>_`.
@@ -95,6 +97,19 @@ WORK_GB = int(host.MAX_FILE) / host.GB
 DEADLINE_MARGIN = 300
 #: How a command stopped at its limit replies (`host.past`).
 RAN_PAST = "verdict: NO ANSWER: it ran past the"
+#: The label each holds its disk bound by, in GB; one with none counts at `WORK_GB`.
+DISK_LABEL = "print-shop.bench.disk"
+#: The labels each of its volumes carries: whose, the job's container's name, and when it was
+#: made, in s since the epoch.
+OWNER_LABEL, JOB_LABEL, CREATED_LABEL = ("print-shop.bench.owner", "print-shop.bench.job",
+                                         "print-shop.bench.created")
+#: The longest a job's hold may last, in s: its longest limit and deadline, its files there and
+#: back. A volume older than this whose job's container is gone was left by a process that
+#: ended without removing it, and is removed before a study starts there (`clear_stale`).
+STALE_S = host.TWO_PASSES + DEADLINE_MARGIN + 2 * HELPER_TIMEOUT
+#: How often its Docker disk is read while its jobs run, in s: one that falls under the floor
+#: has them killed (`Remote.run`).
+DISK_LOOK = 30.0
 
 _NAME = re.compile(r"[a-z][a-z0-9]{0,30}")
 #: An SSH target as ~/.ssh/config or `user@host` names it: never an option, never a command.
@@ -194,8 +209,6 @@ class RanPastThere(HostLost):
     NO ANSWER. The host stays in use."""
 
 
-class Stopped(RuntimeError):
-    """The study was stopped before the job started."""
 
 
 def _user() -> tuple[int, int]:
@@ -286,7 +299,7 @@ class Remote:
         self.host = stated
         #: Its `docker`: over SSH, or as a test gives it.
         self.docker = docker or stated.docker()
-        self._lock = threading.Lock()
+        self._lock = threading.RLock()
         #: The containers this process has reserved or is running there, by name: each one's
         #: memory limit in MiB.
         self._held: dict[str, int] = {}
@@ -295,6 +308,13 @@ class Remote:
         self.left: list[str] = []
         self.over: list[str] = []
         self._stopped = threading.Event()
+        #: Its jobs whose containers are running now, and those killed as its disk fell under
+        #: its floor, each with why; and the thread that watches its disk while they run.
+        self._running: set[str] = set()
+        self._killed: dict[str, str] = {}
+        self._watching: threading.Thread | None = None
+        #: The jobs whose holds are still up (`_hold`).
+        self._holds: set[str] = set()
 
     @property
     def name(self) -> str:
@@ -333,12 +353,20 @@ class Remote:
         theirs = self.image_id(host.IMAGE)
         if theirs is None:
             return None
-        done = self._call("run", "--rm", "--name", self._new(), *self._helper(), theirs,
+        done = self._run("--rm", "--name", self._new(), *self._helper(), theirs,
                           "df", "-B1", "/")
         return int(done.stdout.decode().splitlines()[-1].split()[3]) / host.GB
 
-    def _helper(self) -> tuple[str, ...]:
-        return (*HELPER, "--label", f"{MEMORY_LABEL}=256")
+    def _run(self, *args: str, data: bytes | None = None, timeout: float = 120,
+             check: bool = True) -> subprocess.CompletedProcess[bytes]:
+        """`docker run` there, never pulling an image it hasn't."""
+        return self._call("run", "--pull", "never", *args, data=data, timeout=timeout,
+                          check=check)
+
+    def _helper(self, memory_mb: int = 256) -> tuple[str, ...]:
+        """A small container's limits, and what any process counts it at: a job's own helpers
+        at nothing, its hold holding its memory and disk for it."""
+        return (*HELPER, "--label", f"{MEMORY_LABEL}={memory_mb}", "--label", f"{DISK_LABEL}=0")
 
     def _bench_image(self) -> str:
         """The bench's image by the ID this host has, which the host's was checked against."""
@@ -373,7 +401,7 @@ class Remote:
         """The host's MemFree now, in MiB, and its Docker disk's free space, in GB: read in one
         container of its own."""
         uid, gid = _user()
-        done = self._call("run", "--rm", "--name", self._new(), *self._helper(), "--user",
+        done = self._run("--rm", "--name", self._new(), *self._helper(), "--user",
                           f"{uid}:{gid}", self._bench_image(), "sh", "-c",
                           "cat /proc/meminfo && df -B1 /")
         text = done.stdout.decode(errors="replace")
@@ -388,18 +416,30 @@ class Remote:
 
     def others_mb(self, held: dict[str, int]) -> int:
         """The memory limits, in MiB, of the bench containers on the host that aren't this
-        process's: another study's, or a run by hand. By their names and labels alone
-        (`docker ps`, `MEMORY_LABEL`), the bench's prefix only; one with no label counts at
-        `UNLABELLED_MB`."""
+        process's: another study's, or a run by hand (`others`)."""
+        return self.others(held)[0]
+
+    def others(self, held: dict[str, int]) -> tuple[int, float]:
+        """What the bench containers on the host that aren't this process's hold: their memory
+        limits in MiB, and their disk bounds in GB. By their names and labels alone (`docker
+        ps`, `MEMORY_LABEL`, `DISK_LABEL`), the bench's prefix only; one with no label counts at
+        `UNLABELLED_MB` and `WORK_GB`."""
         done = self._call("ps", "--filter", f"name={PREFIX}", "--format",
-                          f'{{{{.Names}}}} {{{{.Label "{MEMORY_LABEL}"}}}}')
-        total = 0
+                          f'{{{{.Names}}}} {{{{.Label "{MEMORY_LABEL}"}}}} '
+                          f'{{{{.Label "{DISK_LABEL}"}}}}')
+        memory, disk = 0, 0.0
         for line in done.stdout.decode(errors="replace").splitlines():
-            name, _, label = line.strip().partition(" ")
+            name, *labels = line.split()
             if not name.startswith(PREFIX) or any(name.startswith(h) for h in held):
                 continue
-            total += int(label) if label.strip().isdigit() else UNLABELLED_MB
-        return total
+            mb = labels[0] if labels else ""
+            gb = labels[1] if len(labels) > 1 else ""
+            memory += int(mb) if mb.isdigit() else UNLABELLED_MB
+            try:
+                disk += float(gb)
+            except ValueError:
+                disk += WORK_GB
+        return memory, disk
 
     def _still_to_take(self, held: dict[str, int]) -> int:
         """What this process's jobs there may take yet, in MiB: each one's limit less what it
@@ -430,26 +470,59 @@ class Remote:
         with self._lock:
             free, disk = self.probe()
             pending = self._still_to_take(self._held)
-            others = self.others_mb(self._held)
-            need = self.host.floor_mb + memory_mb + pending + others
-            if free < need:
-                raise NoRoom(f"{self.name}'s MemFree is {free / 1024:.1f} GiB, under its floor "
-                             f"of {self.host.floor_mb / 1024:.1f} GiB plus the job's "
-                             f"{memory_mb / 1024:.1f} GiB, {pending / 1024:.1f} GiB this "
-                             f"study's other jobs there may take yet and {others / 1024:.1f} "
-                             "GiB other bench containers there hold")
-            room = host.FLOOR_GB + WORK_GB * (len(self._held) + 1)
-            if disk < room:
-                raise NoRoom(f"{self.name}'s Docker disk has {disk:.1f} GB free, under its "
-                             f"floor of {host.FLOOR_GB} GB plus {WORK_GB:.1f} GB for each of "
-                             "this study's jobs there")
+            self._room(free, disk, memory_mb, pending, self.others(self._held), len(self._held) + 1)
             name = self._new()
+            # Held from now to its end by a container of its own, labelled with its memory and
+            # disk: so another process counts it whole while its files go over, before its own
+            # container starts. Then counted again, now another's hold made at the same moment
+            # shows, and let go where the two together don't fit.
+            self._hold(name, memory_mb)
             self._held[name] = memory_mb
+            try:
+                self._room(free, disk, memory_mb, pending, self.others(self._held), len(self._held))
+            except NoRoom:
+                self._held.pop(name, None)
+                self._holds.discard(name)
+                self._call("rm", "-f", f"{name}-hold", check=False, timeout=60)
+                raise
             return name
 
+    def _room(self, free: int, disk: float, memory_mb: int, pending: int,
+              others: tuple[int, float], jobs: int) -> None:
+        """Raises NoRoom where the host's MemFree or its Docker disk, as read, doesn't hold one
+        more job of `memory_mb` over their floors."""
+        need = self.host.floor_mb + memory_mb + pending + others[0]
+        if free < need:
+            raise NoRoom(f"{self.name}'s MemFree is {free / 1024:.1f} GiB, under its floor "
+                         f"of {self.host.floor_mb / 1024:.1f} GiB plus the job's "
+                         f"{memory_mb / 1024:.1f} GiB, {pending / 1024:.1f} GiB this "
+                         f"study's other jobs there may take yet and {others[0] / 1024:.1f} "
+                         "GiB other bench containers there hold")
+        room = host.FLOOR_GB + WORK_GB * jobs + others[1]
+        if disk < room:
+            raise NoRoom(f"{self.name}'s Docker disk has {disk:.1f} GB free, under its "
+                         f"floor of {host.FLOOR_GB} GB plus {WORK_GB:.1f} GB for each of "
+                         f"this study's jobs there and {others[1]:.1f} GB other bench jobs "
+                         "there may write")
+
+    def _hold(self, name: str, memory_mb: int) -> None:
+        """A container that holds a job's memory and disk on the host, by its labels, until the
+        job ends (`_clear`) or `STALE_S` passes."""
+        uid, gid = _user()
+        self._run("-d", "--rm", "--name", f"{name}-hold", *HELPER,
+                  "--label", f"{MEMORY_LABEL}={memory_mb}", "--label", f"{DISK_LABEL}={WORK_GB}",
+                  "--user", f"{uid}:{gid}", self._bench_image(), "sleep", str(STALE_S))
+        with self._lock:
+            self._holds.add(name)
+
     def release(self, name: str) -> None:
+        """Let a reservation go: its hold too, where its job never ran to remove it."""
         with self._lock:
             self._held.pop(name, None)
+            holding = name in self._holds
+            self._holds.discard(name)
+        if holding:
+            self._call("rm", "-f", f"{name}-hold", check=False, timeout=60)
 
     def held(self) -> set[str]:
         with self._lock:
@@ -476,13 +549,18 @@ class Remote:
         name = name or self._new()
         volumes = (f"{name}-work", f"{name}-code")
         memory_mb = megabytes(job.memory or host.MEMORY)
-        with self._lock:
-            self._held.setdefault(name, memory_mb)
         said = f"`{' '.join(job.args)}`"
+        with self._lock:
+            reserved = name in self._held
+            self._held.setdefault(name, memory_mb)
         try:
+            if not reserved:
+                self._hold(name, memory_mb)
             for volume in volumes:
-                self._call("volume", "create", volume)
-            self._call("run", "--rm", "-i", "--name", f"{name}-in", *self._helper(), "--user",
+                self._call("volume", "create", "--label", f"{OWNER_LABEL}=print-shop",
+                           "--label", f"{JOB_LABEL}={name}",
+                           "--label", f"{CREATED_LABEL}={int(time.time())}", volume)
+            self._run("--rm", "-i", "--name", f"{name}-in", *self._helper(0), "--user",
                        "0:0", "--cap-add", "CHOWN", "--cap-add", "FOWNER",
                        "-v", f"{volumes[0]}:/mnt/work", "-v", f"{volumes[1]}:/mnt/code",
                        self._bench_image(), "tar", "-x", "--numeric-owner", "-C", "/mnt",
@@ -490,11 +568,19 @@ class Remote:
             if self._stopped.is_set():
                 # Stopped while its files went over: it never starts.
                 raise Stopped(f"the study was stopped before {said} started")
-            done = host.run(list(job.args), job.folder, timeout=job.timeout or None, name=name,
-                            docker=self.docker, mounts=volumes, cpuset=cpuset(cores),
-                            more_env={"BENCH_HOST": self.name},
-                            labels={MEMORY_LABEL: str(memory_mb)}, by_id=True,
-                            margin=DEADLINE_MARGIN)
+            self._watch(name)
+            try:
+                done = host.run(list(job.args), job.folder, timeout=job.timeout or None,
+                                name=name, docker=self.docker, mounts=volumes,
+                                cpuset=cpuset(cores), more_env={"BENCH_HOST": self.name},
+                                labels={MEMORY_LABEL: "0", DISK_LABEL: "0"}, by_id=True,
+                                margin=DEADLINE_MARGIN, pull=False)
+            finally:
+                with self._lock:
+                    self._running.discard(name)
+                    killed = self._killed.pop(name, None)
+            if killed is not None:
+                raise HostLost(f"{self.name} killed {said}: {killed}")
             if done.returncode in DOCKER_CODES or not done.stdout.strip():
                 why = (done.stderr or "").strip().splitlines()[-1:] or ["no reply"]
                 raise HostLost(f"{self.name} failed {said} (exit {done.returncode}): "
@@ -506,7 +592,7 @@ class Remote:
                 raise HostLost(f"{self.name} stopped answering while it ran {said}")
             if saved:
                 uid, gid = _user()
-                out = self._call("run", "--rm", "--name", f"{name}-out", *self._helper(),
+                out = self._run("--rm", "--name", f"{name}-out", *self._helper(0),
                                  "--user", f"{uid}:{gid}", "-v", f"{volumes[0]}:/work:ro",
                                  self._bench_image(), "sh", "-c",
                                  'du -sk /work >&2 && exec tar -c -C /work -f - -- "$@"', "sh",
@@ -516,6 +602,60 @@ class Remote:
             return JobResult(done.returncode, done.stdout, done.stderr, saved, self.name)
         finally:
             self._clear(name, volumes)
+
+    def _watch(self, name: str) -> None:
+        """Count `name` as running, and watch the host's Docker disk while any job of this
+        process's runs there: where it falls under `host.FLOOR_GB`, each is killed, and said."""
+        with self._lock:
+            self._running.add(name)
+            if self._watching is not None and self._watching.is_alive():
+                return
+            self._watching = threading.Thread(target=self._watch_disk, daemon=True,
+                                              name=f"disk-{self.name}")
+            self._watching.start()
+
+    def _watch_disk(self) -> None:
+        while True:
+            time.sleep(DISK_LOOK)
+            with self._lock:
+                if not self._running:
+                    self._watching = None
+                    return
+            try:
+                _, disk = self.probe()
+            except HostLost:
+                continue
+            if disk >= host.FLOOR_GB:
+                continue
+            with self._lock:
+                names = sorted(self._running)
+                for name in names:
+                    self._killed[name] = (f"its Docker disk fell to {disk:.1f} GB, under its "
+                                          f"floor of {host.FLOOR_GB} GB, as it ran")
+            for name in names:
+                self._call("kill", name, check=False, timeout=60)
+
+    def clear_stale(self) -> list[str]:
+        """Remove print-shop's volumes on the host that a process left (its label's), older
+        than `STALE_S`, whose job's container is gone; and say which, by name. Nothing else."""
+        listed = self._call("volume", "ls", "--filter", f"label={JOB_LABEL}", "--format",
+                            f'{{{{.Name}}}} {{{{.Label "{JOB_LABEL}"}}}} '
+                            f'{{{{.Label "{CREATED_LABEL}"}}}}')
+        alive = set(self._call("ps", "-a", "--filter", f"name={PREFIX}", "--format",
+                               "{{.Names}}").stdout.decode(errors="replace").split())
+        now, mine = time.time(), self.held()
+        stale = []
+        for line in listed.stdout.decode(errors="replace").splitlines():
+            words = line.split()
+            if len(words) != 3 or not words[0].startswith(PREFIX) or not words[2].isdigit():
+                continue
+            volume, job, made = words
+            if (now - int(made) > STALE_S and job not in mine
+                    and not any(a.startswith(job) for a in alive)):
+                stale.append(volume)
+        if stale:
+            self._call("volume", "rm", "-f", *stale, check=False, timeout=120)
+        return stale
 
     def _sized(self, stderr: bytes, said: str) -> None:
         """Say a job whose /work came to more than `WORK_GB`, as `du -sk` gave it."""
@@ -528,7 +668,10 @@ class Remote:
     def _clear(self, name: str, volumes: tuple[str, str]) -> None:
         """Remove a job's container, where it's still there, and its volumes: its own, by name."""
         try:
-            self._call("rm", "-f", name, f"{name}-in", f"{name}-out", check=False, timeout=60)
+            self._call("rm", "-f", name, f"{name}-in", f"{name}-out", f"{name}-hold",
+                       check=False, timeout=60)
+            with self._lock:
+                self._holds.discard(name)
             gone = self._call("volume", "rm", "-f", *volumes, check=False, timeout=60)
             if gone.returncode != 0:
                 raise HostLost(gone.stderr.decode(errors="replace").strip()[-200:])
