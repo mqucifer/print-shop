@@ -10,13 +10,14 @@ Run from the folder the assembly is in, with the words `load` would be given:
 It copies the assembly and the files it names into a folder of its own and runs `load` there in
 the bench's second image, under an hour's limit, watching each core's strain being averaged
 over its cell (`classify.element_averaged`). For each mesh and each printed part's core, at its
-worst cell across its layers, it says: where that cell is along the part's height, as a share
-of it; how far it is from a held face, in cells; the kind of the part's face nearest it, how far
-off and how far that face leans toward the layers; and what the cell's average is made of, by
-each blend its elements' cores are read from (all core, a laminate across a face, a column
-along an edge, in series), each one's share of the cell's weight and its mean strain across the
-layers, and for a laminate how far its face leans. And how far apart the two meshes' worst
-cells are, in cells. Nothing of any part's name, shape or place is printed.
+worst cell across its layers and at its worst stretch, each as `load` picked it, it says: where
+that cell is along the part's height, as a share of it; how far it is from a held face, in
+cells; the kind of the part's face nearest it, how far off, and how far that face leans toward
+the layers; and what the cell's average is made of, by each blend its elements' cores are read
+from (all core, a laminate across a face, a column along an edge, in series), each one's share
+of the cell's weight and its mean strain across the layers or its stretch, and for a laminate
+how far its face leans. And how far apart the two meshes' worst cells are, in cells. Nothing
+of any part's name, shape or place is printed.
 """
 
 from __future__ import annotations
@@ -51,6 +52,7 @@ GROUPS = []
 TAGS = []
 CAUGHT = []
 FOUND = []
+READS = []
 original_strain, original_averaged = classify.core_strain, classify.element_averaged
 original_classify = load._Model._classify
 
@@ -94,51 +96,57 @@ def core_read(self, part, cell, figures, numbers, way, first, second):
     where, strain, weight, tag = middles[held], strains[held], weights[held], tags[held]
     turn = part.matrix()
     own_way = way @ turn
-    across = np.einsum("i,nij,j->n", own_way, averaged.strain, own_way)
-    worst = int(across.argmax())
-    # The averaged rows are its fullest cells', their places turned back to the assembly's
-    # axes by `_core_read`; the entries are in the part's own.
-    centre = (np.asarray(averaged.at[worst]) - np.array(part.at, dtype=float)) @ turn
-    window = np.all((where - centre >= -size / 2) & (where - centre < size / 2), axis=1)
-    entries = np.einsum("i,nij,j->n", own_way, strain[window], own_way)
-    by = {}
-    for t, w, a in zip(tag[window], weight[window], entries):
-        kind, share, given = GROUPS[int(t)]
-        name = "all core" if share >= 1 else KINDS[kind]
-        if name == "a laminate" and given is not None:
-            lean = abs(float(np.asarray(given) @ way))
-            name += " across a face " + ("flat to the layers" if lean > 0.9 else
-                                         "leaning to them" if lean > 0.3 else "upright")
-        held_by = by.setdefault(name, [0.0, 0.0, 0])
-        held_by[0] += float(w)
-        held_by[1] += float(w) * float(a)
-        held_by[2] += 1
-    total = sum(v[0] for v in by.values()) or 1.0
-    # Where it is: along the part's height, from a held face, by its nearest face.
     k = [p.name for p in self.assembly.parts].index(part.name)
     layered = self.cores[part.name]
-    at = np.asarray(averaged.at[worst])
-    own = (at - np.array(part.at, dtype=float)) @ turn
     span = layered.high - layered.low
-    height = (float(own[layered.layers]) - layered.low) / span if span else 0.0
-    vertex = Part.Vertex(App.Vector(*at))
     faces = list(self.solids[k].Faces)
-    nearest = min(faces, key=lambda f: f.distToShape(vertex)[0])
-    off, pairs, _ = nearest.distToShape(vertex)
-    u, v = nearest.Surface.parameter(pairs[0][0])
-    normal = nearest.normalAt(u, v)
-    lean = abs(float(np.array([normal.x, normal.y, normal.z]) @ way))
     held_faces = [*self.fixed, *sum(self.standing.values(), [])]
-    from_held = (min(f.distToShape(vertex)[0] for f in held_faces) / size
-                 if held_faces else float("inf"))
-    FOUND.append({
-        "across_pct": 100 * float(across[worst]), "cell_mm": float(size),
-        "height": height, "from_held_cells": float(from_held),
-        "nearest": type(nearest.Surface).__name__, "nearest_lean": lean,
-        "to_face_cells": float(off / size), "at": at.tolist(), "entries": int(window.sum()),
-        "by": {name: [w / total, 100 * s / w if w else 0.0, n]
-               for name, (w, s, n) in by.items()},
-    })
+    READS.append(len(READS) + 1)
+    for what, value_key, at_key, fill_key in (
+            ("across its layers", "across_layers_pct", "across_at", "across_cell_fill"),
+            ("stretch", "stretch_pct", "stretch_at", "stretch_cell_fill")):
+        at = np.asarray(read[at_key], dtype=float)
+        # Its cell as `load` picked it, in the part's own axes, as the entries are.
+        centre = (at - np.array(part.at, dtype=float)) @ turn
+        window = np.all((where - centre >= -size / 2) & (where - centre < size / 2), axis=1)
+        by = {}
+        for t, w, one in zip(tag[window], weight[window], strain[window]):
+            kind, share, given = GROUPS[int(t)]
+            name = "all core" if share >= 1 else KINDS[kind]
+            if name == "a laminate" and given is not None:
+                lean = abs(float(np.asarray(given) @ way))
+                name += " across a face " + ("flat to the layers" if lean > 0.9 else
+                                             "leaning to them" if lean > 0.3 else "upright")
+            held_by = by.setdefault(name, [0.0, np.zeros((3, 3)), 0])
+            held_by[0] += float(w)
+            held_by[1] = held_by[1] + float(w) * one
+            held_by[2] += 1
+        total = sum(v[0] for v in by.values()) or 1.0
+
+        def figure(tensor):
+            if what == "stretch":
+                return 100 * float(np.abs(np.linalg.eigvalsh(tensor)).max())
+            return 100 * float(own_way @ tensor @ own_way)
+
+        own = centre
+        height = (float(own[layered.layers]) - layered.low) / span if span else 0.0
+        vertex = Part.Vertex(App.Vector(*at))
+        nearest = min(faces, key=lambda f: f.distToShape(vertex)[0])
+        off, pairs, _ = nearest.distToShape(vertex)
+        u, v = nearest.Surface.parameter(pairs[0][0])
+        normal = nearest.normalAt(u, v)
+        lean = abs(float(np.array([normal.x, normal.y, normal.z]) @ way))
+        from_held = (min(f.distToShape(vertex)[0] for f in held_faces) / size
+                     if held_faces else float("inf"))
+        FOUND.append({
+            "read": READS[-1], "what": what, "pct": float(read[value_key]),
+            "fill": read.get(fill_key), "cell_mm": float(size), "height": height,
+            "from_held_cells": float(from_held), "nearest": type(nearest.Surface).__name__,
+            "nearest_lean": lean, "to_face_cells": float(off / size), "at": at.tolist(),
+            "entries": int(window.sum()),
+            "by": {name: [w / total, figure(t / w) if w else 0.0, n]
+                   for name, (w, t, n) in by.items()},
+        })
     return read
 
 
@@ -173,11 +181,13 @@ def main(argv: list[str]) -> int:
             print("nothing watched")
             return 1
         found = json.loads(found_file.read_text())
+        reads = sorted({one["read"] for one in found})
         meshes = ("the mesh", "the coarser mesh")
-        for number, one in enumerate(found):
-            mesh = meshes[number] if len(found) == 2 else f"read {number + 1}"
-            print(f"{mesh}: the core's worst cell across its layers, {one['across_pct']:.3f}%, "
-                  f"of {one['entries']} entries")
+        for one in found:
+            mesh = (meshes[reads.index(one["read"])] if len(reads) == 2
+                    else f"core read {one['read']}")
+            print(f"{mesh}: the core's worst cell, {one['what']}, {one['pct']:.3f}%, its cell "
+                  f"{one['fill']} core, of {one['entries']} entries")
             print(f"  along the part's height {one['height']:.2f} of it; "
                   f"{one['from_held_cells']:.1f} cells from a held face; its nearest face a "
                   f"{one['nearest']}, {one['to_face_cells']:.2f} cells off, leaning "
@@ -185,10 +195,14 @@ def main(argv: list[str]) -> int:
             ordered = sorted(one["by"].items(), key=lambda kv: -kv[1][0])
             for name, (share, mean, count) in ordered:
                 print(f"  {name}: {100 * share:.0f}% of its weight, {count} entries, its mean "
-                      f"across the layers {mean:.3f}%")
-        if len(found) == 2:
-            apart = np.linalg.norm(np.array(found[0]["at"]) - np.array(found[1]["at"]))
-            print(f"the two meshes' worst cells {apart / found[0]['cell_mm']:.1f} cells apart")
+                      f"{one['what']} {mean:.3f}%")
+        if len(reads) == 2:
+            for what in ("across its layers", "stretch"):
+                two = [one for one in found if one["what"] == what]
+                if len(two) == 2:
+                    apart = np.linalg.norm(np.array(two[0]["at"]) - np.array(two[1]["at"]))
+                    print(f"the two meshes' worst cells, {what}, "
+                          f"{apart / two[0]['cell_mm']:.1f} cells apart")
     finally:
         shutil.rmtree(work, ignore_errors=True)
     return 0
