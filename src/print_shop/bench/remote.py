@@ -119,7 +119,7 @@ WORK_GB = int(host.MAX_FILE) / host.GB
 #: it can't outlive the study that started it, whatever became of this host.
 DEADLINE_MARGIN = 300
 #: How a command stopped at its limit replies (`host.past`).
-RAN_PAST = "verdict: NO ANSWER: it ran past the"
+RAN_PAST = host.RAN_PAST
 #: The label each holds its disk bound by, in GB; one with none counts at `WORK_GB`.
 DISK_LABEL = "print-shop.bench.disk"
 #: The labels each of its volumes carries: whose, the job's container's name, and when it was

@@ -95,14 +95,23 @@ class Met:
     at: str
     killed: bool = False
     host: str = HERE
+    #: Whether it met the memory on the way, and was then stopped at its time limit, as a read
+    #: that went on to a slower way, before it could say its answer.
+    stopped: bool = False
 
     @classmethod
-    def of(cls, said: list[str], host_name: str = HERE) -> Met | None:
-        """The last `host.MET_LINE` of what a command said, or None."""
+    def of(cls, said: list[str], host_name: str = HERE, ended: bool = True) -> Met | None:
+        """What a command said it met, or None: its last `host.MET_LINE` said as it ended
+        (`final=1`, or a host's of a kill). Where it didn't end of itself, as one stopped at its
+        time limit, `ended` False, the last it said as it met the memory on the way
+        (`final=0`): the memory is still what held it, so it's offered more. A command that
+        ended with a whole read said only the latter, and is never offered."""
         lines = [line for line in said if line.startswith(host.MET_LINE + " ")]
-        if not lines:
+        finals = [line for line in lines if " final=0 " not in line]
+        chosen = finals[-1:] or ([] if ended else lines[-1:])
+        if not chosen:
             return None
-        first, _, rest = lines[-1][len(host.MET_LINE) + 1 :].partition(" ")
+        first, _, rest = chosen[0][len(host.MET_LINE) + 1 :].partition(" ")
         fields, _, at = rest.partition(" at ")
         found = dict(f.split("=", 1) for f in fields.split() if "=" in f)
 
@@ -111,7 +120,8 @@ class Met:
             return int(value) if value.isdigit() else None
 
         return cls(number("limit"), number("peak"), number("need"), number("room"),
-                   at.strip() or "where it last said", first == host.MET_KILLED, host_name)
+                   at.strip() or "where it last said", first == host.MET_KILLED, host_name,
+                   stopped=not finals)
 
     def said(self) -> str:
         """What it met, in words: `on here, meshing ...: need 5.2 GiB, room 3.0 GiB of its
@@ -121,14 +131,16 @@ class Met:
                if self.need is not None or self.room is not None
                else "the kernel stopped a process of it for memory, by the container's own count")
         return (f"on {self.host}, {self.at}: {how}, of its container's {_gib(self.limit)}, "
-                f"at most {_gib(self.peak)} held")
+                f"at most {_gib(self.peak)} held"
+                + (", and it was stopped at its time limit after" if self.stopped else ""))
 
     def told(self) -> str:
         """It as `OFFERED` carries it: `host=here limit=... peak=... need=... room=... killed=0
         at STEP`."""
         counts = {"limit": self.limit, "peak": self.peak, "need": self.need, "room": self.room}
         fields = " ".join(f"{k}={'-' if v is None else v}" for k, v in counts.items())
-        return f"host={self.host} {fields} killed={int(self.killed)} at {self.at}"
+        return (f"host={self.host} {fields} killed={int(self.killed)} "
+                f"stopped={int(self.stopped)} at {self.at}")
 
 
 def reads(folder: Path, saved: tuple[str, ...] | list[str]) -> int:
@@ -265,7 +277,7 @@ def run_here(job: BenchJob) -> JobResult:
         with _LOCK:
             _RUNNING.discard(name)
     return JobResult(done.returncode, done.stdout, done.stderr, saved_files(done.stdout),
-                     met=Met.of(said))
+                     met=Met.of(said, ended=not done.stdout.startswith(host.RAN_PAST)))
 
 
 def running_here() -> set[str]:

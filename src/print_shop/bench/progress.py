@@ -16,12 +16,13 @@ Each line is the line's kind, the seconds since the command began, and what it s
   own, and what's in /tmp, which is memory; and from this process's C library, what it has in
   use and what it has freed but kept, which no other process, as gmsh or CalculiX, can use.
   `-` where the kernel or the C library keeps no count.
-- `bench: met 812.4 limit=4294967296 peak=4290000000 need=5100000000 room=3000000000 at
-  meshing ...`, once, as the command ends (mqucifer/print-shop#380): its read met the
-  container's memory on the way to its answer, by the cgroup's own count or a check of a step's
-  need against its room (`met`), and the answer isn't the whole read: its limit, the most it
-  held, and the need and room where a check said them, in bytes, and the step it was in. The
-  host may offer the same command to a host with more memory (`bench/offer.py`).
+- `bench: met 812.4 limit=4294967296 peak=4290000000 need=5100000000 room=3000000000 final=0
+  at meshing ...` (mqucifer/print-shop#380): its read met the container's memory, by the
+  cgroup's own count or a check of a step's need against its room (`met`): its limit, the most
+  it held, and the need and room where a check said them, in bytes, and the step it was in.
+  Said as it's met, `final=0`, and again as the command ends, `final=1`, where the answer isn't
+  the whole read. The host offers the same command to a host with more memory where the last is
+  said, or where the first is and the command was stopped at its time limit (`job.Met.of`).
 
 Standard library only.
 """
@@ -189,8 +190,10 @@ def met(need: float | None = None, room: float | None = None,
         cgroup: Path | None = None) -> None:
     """Keep that the read met the container's memory now (mqucifer/print-shop#380): by the
     cgroup's own count, or where a step's `need` was held against its `room`, in bytes. The
-    container's limit and the step it's in are kept with it. `say_met` says it as the command
-    ends."""
+    container's limit and the step it's in are kept with it, and said now, `final=0`: so where
+    the command is stopped at its time limit after, as a read that went on to a slower way,
+    the host still knows it met the memory on the way. `say_met` says it again as the command
+    ends, `final=1`, where the answer isn't the whole read."""
     cgroup = CGROUP if cgroup is None else cgroup
     _met.clear()
     _met.update({
@@ -199,6 +202,14 @@ def met(need: float | None = None, room: float | None = None,
         "room": None if room is None else int(room),
         "at": _steps[-1] if _steps else "between steps",
     })
+    _say_met(cgroup, final=False)
+
+
+def _say_met(cgroup: Path, final: bool) -> None:
+    counts = {"limit": _met["limit"], "peak": _number(cgroup, "memory.peak"),
+              "need": _met["need"], "room": _met["room"]}
+    fields = " ".join(f"{k}={'-' if v is None else v}" for k, v in counts.items())
+    _say(MET_LINE, f"{fields} final={int(final)} at {_met['at']}")
 
 
 def forget_met() -> None:
@@ -214,9 +225,5 @@ def say_met(cgroup: Path | None = None) -> None:
     the most the container held, the need and room where they were said, and the step."""
     if not _met:
         return
-    cgroup = CGROUP if cgroup is None else cgroup
-    counts = {"limit": _met["limit"], "peak": _number(cgroup, "memory.peak"),
-              "need": _met["need"], "room": _met["room"]}
-    fields = " ".join(f"{k}={'-' if v is None else v}" for k, v in counts.items())
-    _say(MET_LINE, f"{fields} at {_met['at']}")
+    _say_met(CGROUP if cgroup is None else cgroup, final=True)
     _met.clear()

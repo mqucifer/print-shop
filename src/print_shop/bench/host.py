@@ -526,6 +526,10 @@ def _where(said: list[str]) -> str:
     return f". Where it was: {what}, from {seconds} s in"
 
 
+#: How a command stopped at its limit replies (`past`).
+RAN_PAST = "verdict: NO ANSWER: it ran past the"
+
+
 def past(limit: int, could: bool, said: list[str] | None = None) -> str:
     """The verdict of a command stopped at its limit; and where it was a `load`'s one pass, of
     an assembly two passes could read (`ABLE`), and they weren't started, what would read it

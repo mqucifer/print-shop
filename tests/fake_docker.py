@@ -25,7 +25,9 @@ stopped it for memory, at its own clock's time; `events` answers for the contain
 `ROOT/oom` whose name starts with the one asked about, as a name filter can match, and whose
 time is in the window asked, by its clock: `CLOCK_BEHIND` s behind this host's, as another host's
 may be, and said by `info`.
-`ROOT/in_fails` makes the helper's `tar -x` say what it holds on its stderr and exit 2.
+`ROOT/in_fails` makes the helper's `tar -x` say what it holds on its stderr and exit 2. An
+assembly that plants `stalls` as well says it met its memory on the way and then runs until
+it's killed, as a read that goes on to a slower way and runs past its time limit.
 
 Standard library only, and nothing of the tests' own: it runs as a program of its own.
 """
@@ -63,16 +65,17 @@ def _mib(size: str) -> int:
         size) // 2**20
 
 
-def met(args: list[str], work: Path, memory: str | None) -> str | None:
+def met(args: list[str], work: Path, memory: str | None, final: bool = True) -> str | None:
     """The `bench: met` line a planted `load` says where its `need_mb` is past its container's
-    `memory`, or None."""
+    `memory`, or None: as it ends, or, not `final`, as it meets it on the way."""
     raw = json.loads((work / args[1]).read_text())
     need = raw.get("need_mb")
     if need is None or memory is None or _mib(memory) >= int(need):
         return None
     limit = _mib(memory) * 2**20
     return (f"bench: met 12.0 limit={limit} peak={limit - 2**20} need={int(need) * 2**20} "
-            f"room={limit - 300 * 2**20} at meshing pass 1's whole, at a mesh of at most 5 mm")
+            f"room={limit - 300 * 2**20} final={int(final)} at meshing pass 1's whole, at a mesh "
+            "of at most 5 mm")
 
 
 def bench(args: list[str], work: Path, env: dict[str, str],
@@ -269,6 +272,15 @@ def _run(argv: list[str], root: Path) -> int:
                 stopped = (root / "oom_name").read_text() if (root / "oom_name").exists() else name
                 with (root / "oom").open("a") as events:
                     events.write(f"{stopped.replace('NAME', name)} {_clock()}\n")
+            return 137
+        raw = json.loads((mounts["/work"] / args[1]).read_text())
+        on_the_way = met(args, mounts["/work"], memory, final=False)
+        if raw.get("stalls") and on_the_way is not None:
+            # Met on the way, then a slower way that doesn't end: stopped at its time limit.
+            print(on_the_way, file=sys.stderr, flush=True)
+            until = time.monotonic() + 60
+            while time.monotonic() < until and not (root / "killed" / name).exists():
+                time.sleep(0.05)
             return 137
         code, said = bench(args, mounts["/work"], env, memory)
         if not (root / "silent").exists():

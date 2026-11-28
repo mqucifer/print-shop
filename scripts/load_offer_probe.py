@@ -15,7 +15,8 @@ the same files, in the host's larger memory, within its budget and over its floo
 codes, words, kinds, seconds and memory: for each read, the exit code and the verdict's word,
 never its reasons; whether it read the whole, a glass band's lower bound, or nothing; how its
 read met the memory, as a kind (`killed`, `the cgroup's count`, `a step's need against its
-room`), with the container's limit, the most it held, and the need and room where a check said
+room`, each `on the way, and then stopped at its time limit` where it went on and ran out of
+time), with the container's limit, the most it held, and the need and room where a check said
 them, in GiB; and where the offer went, as a kind (`read there`, `read there, no more than its
 first answer`, `no host states more`, `no host took it`, `the host failed it`, `stopping`), with
 each failure's kind (the step, and SSH's or Docker's part, as `running it: docker's exit 125`,
@@ -64,8 +65,10 @@ def met_said(met: Met | None) -> str:
         return "met the memory: no"
     kind = ("killed" if met.killed else "a step's need against its room"
             if met.need is not None or met.room is not None else "the cgroup's count")
-    return (f"met the memory: yes, by {kind}; limit {_gib(met.limit)}, at most {_gib(met.peak)} "
-            f"held, need {_gib(met.need)}, room {_gib(met.room)}")
+    return (f"met the memory: yes, by {kind}"
+            + (", on the way, and then stopped at its time limit" if met.stopped else "")
+            + f"; limit {_gib(met.limit)}, at most {_gib(met.peak)} held, need {_gib(met.need)}, "
+            f"room {_gib(met.room)}")
 
 
 def reply_said(where: str, done: JobResult, record: dict[str, Any], seconds: float) -> list[str]:

@@ -360,8 +360,9 @@ class Box:
             # Met only where Docker says the kernel stopped a process of its own for memory.
             if host.oom_killed(("docker",), name, time.monotonic() - began):
                 met = Met.of([host.killed_met(said, memory or host.MEMORY)])
-        elif not timed_out:
-            met = Met.of(said)
+        else:
+            # Stopped at its limit, what it said it met on the way counts (`Met.of`).
+            met = Met.of(said, ended=not timed_out)
         return Ran(code, text, seconds, size[1], timed_out, met=met)
 
 

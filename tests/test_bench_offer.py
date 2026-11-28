@@ -152,10 +152,15 @@ def test_load_says_once_as_it_ends_that_its_read_met_the_memory(
             assert after == "raise"
         lines = [line for line in capsys.readouterr().err.splitlines()
                  if line.startswith(host.MET_LINE + " ")]
-        assert len(lines) == (1 if says else 0), after
+        # Said as it's met, on the way; and again as it ends, where the answer isn't whole.
+        assert " final=0 " in lines[0] and len(lines) == (2 if says else 1), after
         if says:
             met = Met.of(lines)
             assert met == Met(4 * GIB, 4 * GIB - 5, 5 * GIB, 3 * GIB, "meshing pass 1's whole")
+        else:
+            assert Met.of(lines) is None, "read whole: never offered"
+            stopped = Met.of(lines, ended=False)
+            assert stopped is not None and stopped.stopped and stopped.need == 5 * GIB
     monkeypatch.setattr(load, "_read", lambda args, given: None)
     load.run(None, Report("load", []))
     assert host.MET_LINE not in capsys.readouterr().err, "nothing met, nothing said"
@@ -177,7 +182,8 @@ def test_what_it_met_is_told_to_the_host_with_more_and_its_reply_says_both() -> 
     met = Met(4 * GIB, 4 * GIB - 5, 5 * GIB, 3 * GIB, "meshing pass 1's whole")
     told = report.offered(met.told())
     assert told == {"host": "here", "limit": 4 * GIB, "peak": 4 * GIB - 5, "need": 5 * GIB,
-                    "room": 3 * GIB, "killed": False, "at": "meshing pass 1's whole"}
+                    "room": 3 * GIB, "killed": False, "stopped": False,
+                    "at": "meshing pass 1's whole"}
     line = report.offered_said({"host": "spark", "memory_max": str(8 * GIB),
                                 "memory_peak": str(6 * GIB), "offered": told})
     assert line == (
@@ -669,8 +675,9 @@ def test_a_pre_check_that_refuses_a_step_says_its_need_and_room(
     with pytest.raises(load._Unread):
         load._memory_unread("a made-up mesh's set-up", need=5 * GIB, room=GIB)
     progress.say_met()
-    (line,) = [x for x in capsys.readouterr().err.splitlines() if x.startswith(host.MET_LINE)]
-    met = Met.of([line])
+    lines = [x for x in capsys.readouterr().err.splitlines() if x.startswith(host.MET_LINE)]
+    assert len(lines) == 2, "as it's met, and as it ends"
+    met = Met.of(lines)
     assert met is not None and (met.need, met.room, met.limit) == (5 * GIB, GIB, 4 * GIB)
 
 
@@ -831,3 +838,34 @@ def test_an_oom_is_its_containers_own_by_its_whole_name_and_the_daemons_clock(
     assert job.run_here(planted).met is not None, "its own, an hour behind this host's clock"
     now = host.daemon_time(docker)
     assert now is not None and abs(now - (time.time() - fake_docker.CLOCK_BEHIND)) < 60
+
+
+
+def test_a_read_that_met_its_memory_on_the_way_and_ran_out_of_time_is_offered(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Its read met the memory and went on a slower way that ran past its time limit, so it was
+    stopped before it could say its answer (as a band's direct solve met the memory and its
+    iterative one ran to the hour). What it said as it met the memory is kept: it's offered
+    spark's 8g, and reads there, its record saying it was stopped here after."""
+    here = tmp_path / "here-docker"
+    here.mkdir()
+    (here / "images.json").write_text(json.dumps({"tag": host.CAE_IMAGE}))
+    monkeypatch.setattr(job, "DOCKER", (sys.executable, str(FAKE), str(here)))
+    root = tmp_path / "spark"
+    pool = Pool(Slots(Budget(4 * 1024, 4)), [_remote(root)], here_runner=job.run_here)
+    planted = _planted(tmp_path / "job")
+    raw = json.loads((planted.folder / "study-assembly.json").read_text())
+    raw["stalls"] = True
+    (planted.folder / "study-assembly.json").write_text(json.dumps(raw))
+    planted = dataclasses.replace(planted, timeout=2)
+    with pool.take(3072, 2, kind="load standing"):
+        done = pool.run(planted)
+    assert done.host == "spark" and done.returncode == 0
+    told = _record(planted.folder, done)["ran"]["offered"]
+    met = report.offered(told)
+    assert met is not None and met["stopped"] and met["need"] == NEED_MB * 2**20
+    assert "and it was stopped at its time limit after" in pool.said()
+    stopped_here = job.run_here(planted)
+    assert stopped_here.stdout.startswith(host.RAN_PAST)
+    assert stopped_here.met is not None and stopped_here.met.stopped

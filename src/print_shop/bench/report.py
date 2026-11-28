@@ -90,7 +90,7 @@ def offered(text: str | None) -> dict[str, Any] | None:
     numbers = {k: int(found[k]) if found.get(k, "-").isdigit() else None
                for k in ("limit", "peak", "need", "room")}
     return {"host": found.get("host"), **numbers, "killed": found.get("killed") == "1",
-            "at": at.strip()}
+            "stopped": found.get("stopped") == "1", "at": at.strip()}
 
 
 def _gib(count: Any) -> str:
@@ -113,7 +113,9 @@ def offered_said(ran: dict[str, Any]) -> str:
     return (
         f"\noffered: read on {ran.get('host')} in its {_gib(ran.get('memory_max'))}, the same "
         f"command with the same checks, as on {met['host']} its read met its container's "
-        f"{_gib(met['limit'])} at {met['at']}: {how}, at most {_gib(met['peak'])} held. On "
+        f"{_gib(met['limit'])} at {met['at']}: {how}, at most {_gib(met['peak'])} held"
+        + (", and it was stopped at its time limit after" if met.get("stopped") else "")
+        + ". On "
         f"{ran.get('host')} it held at most {_gib(ran.get('memory_peak'))} of its "
         f"{_gib(ran.get('memory_max'))}"
     )
