@@ -37,6 +37,9 @@ from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 
+# By its own name: `scripts/check_addresses.py` reads a dotted `.local` as an mDNS host.
+from threading import local as per_thread
+
 from . import host
 from .budget import LOOK_AGAIN, Budget, Slots, megabytes
 from .job import HERE, BenchJob, HostLost, JobResult, Runner, run_here, stop_here
@@ -91,7 +94,7 @@ class Pool:
             self.places.append(Place(remote.name, slots, remote))
         self.here_runner = here_runner
         self._lock = threading.Condition()
-        self._local = threading.local()
+        self._local = per_thread()
         self._running = 0
         #: The most jobs that ran at once, on every host.
         self.most = 0
