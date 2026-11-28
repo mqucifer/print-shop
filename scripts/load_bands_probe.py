@@ -10,7 +10,8 @@ It runs the `load` as the bench does, in the second image, under the bench's own
 command, and prints only counts, kinds, seconds and memory: the exit code and the verdict's word,
 never its reasons; whether the container was killed; whether the whole was read, in one pass or
 two, or each band left out, under a weight or lifted with its weight kept; what stopped the
-whole, as a kind (`time`, `memory meshing`, `memory solving`, `no mesh`, `unparted`, `other`),
+whole, as a kind (`time`, `memory meshing`, `memory reading the mesh back`, `memory setting
+the mesh up`, `memory in load's own process`, `memory solving`, `no mesh`, `unparted`, `other`),
 never its words; how many parts were read without their band and how many of those had their
 band's weight hung from where it met them; the try's and the band's seconds; and each step as
 `load_trace.py` says it. No figure of a part, joint, load or mesh size is printed, and the reply
@@ -35,6 +36,9 @@ from print_shop.bench import host  # noqa: E402
 KINDS = (
     ("time", re.compile(r"met the container's time|wouldn't end inside the container's")),
     ("memory meshing", re.compile(r"gmsh made no mesh.*met the container's memory")),
+    ("memory reading the mesh back", re.compile(r"GiB read back, where the container's memory")),
+    ("memory setting the mesh up", re.compile(r"to set up in load's own process")),
+    ("memory in load's own process", re.compile(r"load's own process met the container's memory")),
     ("memory solving", re.compile(r"met the container's memory")),
     ("unparted", re.compile(r"no element of its own|in none of the parts")),
     ("no mesh", re.compile(r"gmsh made no mesh")),

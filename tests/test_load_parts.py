@@ -1311,6 +1311,18 @@ def test_the_bands_probe_says_how_it_was_read_and_what_stopped_the_whole_by_kind
         "time, 3600 s"
     ) == ["memory solving", "time"]
     assert probe.kinds("the mesh gives block no element of its own") == ["unparted"]
+    assert probe.kinds(
+        "read in two passes, as --parts asks: gmsh meshed the joined parts at a mesh of at most "
+        "7 mm, and its mesh takes about 2.10 GiB read back, where the container's memory has "
+        "0.40 GiB left, by its own count: so it isn't read back"
+    ) == ["memory reading the mesh back"]
+    assert probe.kinds(
+        "the mesh of the joined parts at a mesh of at most 7 mm, 9 elements and 9 nodes, takes "
+        "about 0.70 GiB to set up in load's own process, and the container's memory has 0.10 GiB"
+    ) == ["memory setting the mesh up"]
+    assert probe.kinds(
+        "load's own process met the container's memory, reading the joint a+b"
+    ) == ["memory in load's own process"]
     assert probe.kinds("gmsh made no mesh of the joined parts: it gave no reason") == ["no mesh"]
     assert probe.summary({"numbers": {"parts": {"a": {}}, "two_passes": {}}}) == [
         "read: the whole, in two passes"
