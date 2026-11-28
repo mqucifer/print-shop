@@ -163,7 +163,7 @@ def bar(answer: Answer, walls: int, density: int) -> None:
     assert answer.numbers["moves_mm"] == pytest.approx(sandwich(walls, density), rel=AGREE)
     # Its core averaged over its own cell, never under the section's own arithmetic at its root.
     core = beam["cores"][0]
-    assert core["stretch_pct"] >= 0.9 * core_at_root(walls, density), core
+    assert core["stretch_pct"] >= core_at_root(walls, density), core
     assert core["cell_mm"] == pytest.approx(infill.cell_mm(
         "grid", density, as_printed.wall_thickness(1, 0.45, 0.2)), abs=1e-3)
     printed = answer.numbers["printed"]["beam"][0]
@@ -280,7 +280,7 @@ def test_a_core_truly_overloaded_at_its_root_fails_there(cae: Any) -> None:
     assert heavy.verdict == "FAIL", heavy.text
     core = heavy.numbers["parts"]["beam"]["cores"][0]
     assert core["stretch_pct"] > core["stretch_limit_pct"], core
-    assert core["stretch_pct"] >= 0.9 * core_at_root(2, 20, kg), core
+    assert core["stretch_pct"] >= core_at_root(2, 20, kg), core
     assert core["stretch_at"][0] < 10, core
     assert "the part beam's core in the part is stretched" in heavy.text
 
@@ -396,7 +396,7 @@ def test_a_core_pulled_across_its_layers_is_read_at_its_own_elements(cae: Any) -
     """A block 40 x 40 x 10 held on its bed face and pulled up by 50 kg over its top: its core,
     read over its own cell, is no less than a column of shells and core beside its walls says
     on average: the walls and the column stretch alike, the column's shells and core in
-    series."""
+    series; and no less than CalculiX's own mean at a node of its core."""
     pulled = cae("load", "load/printed-pulled.json", "--weight", "50", "--at", "20,20,10",
                  "--over", "40", "--toward", "+z")
     assert pulled.verdict == "OK", pulled.text
@@ -409,6 +409,9 @@ def test_a_core_pulled_across_its_layers_is_read_at_its_own_elements(cae: Any) -
     column = 1.6 / MODULUS + 8.4 / across
     stretch = 50 * G / (inner / column + MODULUS * (40**2 - inner) / 10)
     assert core["across_layers_pct"] > 100 * stretch / column / across
+    # And no lower than CalculiX's own mean at a node of its core, as main held it: read over
+    # its cell, across its layers fitted and read at its edge, never half a cell in.
+    assert core["across_layers_pct"] >= core["averaged_across_layers_pct"] - 1e-9, core
 
 
 @pytest.mark.parametrize(

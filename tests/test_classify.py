@@ -10,7 +10,7 @@ import math
 import numpy as np
 import pytest
 
-from print_shop.bench import classify, infill
+from print_shop.bench import as_printed, classify, infill
 from print_shop.bench.assembly import MATERIALS
 from print_shop.bench.printed import Settings
 
@@ -237,3 +237,47 @@ def test_a_core_s_cell_is_its_lines_spacing_over_the_density_each_layer_holds() 
     assert infill.cell_mm("triangles", 20, 0.407) == pytest.approx(6.105)
     assert infill.cell_mm("grid", 60, 0.407) == pytest.approx(4.07 / 3)
 
+
+
+def _bent_core(cell: float, spacing: float = 1.25) -> tuple[np.ndarray, ...]:
+    """A beam's core 8.4 mm across its layers, from 0.6 to 9.0 mm, bent by a strain along it
+    that's linear across them: zero at its middle, 1e-3 at its top and bottom. Its places
+    `spacing` apart, as sub-tetrahedra's middles are, each weighted alike."""
+    xs = np.arange(spacing / 2, 40, spacing)
+    ys = np.arange(spacing / 2, 12, spacing)
+    zs = np.arange(0.6 + spacing / 2, 9.0, spacing)
+    where = np.array([[x, y, z] for x in xs for y in ys for z in zs])
+    strain = np.zeros((len(where), 3, 3))
+    strain[:, 0, 0] = 1e-3 * (where[:, 2] - 4.8) / 4.2
+    return where, strain, np.full(len(where), spacing**3)
+
+
+def test_a_core_bent_across_its_layers_reads_its_edge_not_half_a_cell_in() -> None:
+    """mqucifer/print-shop#363's review: a core's cell is a spacing in its layers' plane, so
+    across its layers the strain is the material's own. Averaged over a cube a cell across, a
+    linear bending field read half a cell in from the core's edge: 0.525 of the edge's strain
+    at a 4.07 mm cell. Fitted across the layers and read at the core's own edge, it reads its
+    edge's, to within the layers' own step."""
+    for cell in (4.07, 1.36):
+        where, strain, weight = _bent_core(cell)
+
+        def core_at(points: np.ndarray) -> np.ndarray:
+            return (points[:, 2] >= 0.6) & (points[:, 2] <= 9.0)
+
+        found = classify.element_averaged(where, strain, weight, cell, up=2, core_at=core_at,
+                                          step=0.2)  # fmt: skip
+        stretch = np.abs(found.strain[:, 0, 0]).max()
+        assert stretch >= 0.95e-3, (cell, stretch)
+        # And never more than it: the line is the field's own.
+        assert stretch <= 1.02e-3, (cell, stretch)
+
+
+def test_a_layer_that_can_t_be_read_fails_the_band_check_never_borrowed() -> None:
+    """mqucifer/print-shop#363's review: a layer GEOS can't read was read from its neighbour's
+    rings, and the check, held to those same rings, couldn't see it. It's unread, counted, and
+    the check fails on it; short or over past its limits, it fails as before."""
+    assert classify.Bands(4, 0.0, 0.0, 0).fails() is None
+    unread = classify.Bands(4, 0.0, 0.0, 1).fails()
+    assert unread is not None and "1 of its layers" in unread
+    assert classify.Bands(4, 1.5 * as_printed.SHORT, 0.0, 0).fails() is not None
+    assert classify.Bands(4, 0.0, 1.5 * as_printed.AGREE, 0).fails() is not None

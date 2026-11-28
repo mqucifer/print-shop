@@ -916,6 +916,14 @@ class _Model:
                         recovered.append(classify.core_strain(kind, skin, core, share, given))
             wedge_volume, _ = wedges.volumes(skin_layer.places)
             bands = classify.exact_checked(layered, found, held, classify.band_for(self.size))
+            # The mesh held to Orca's layers, or nothing is read (mqucifer/print-shop#363's
+            # review: computed and never enforced, a part would read stronger than printed).
+            wrong = bands.fails()
+            if wrong is not None:
+                raise NoAnswer(
+                    f"the part {part.name} can't be read as printed at a mesh of at most "
+                    f"{self.size:g} mm: {wrong}; its cores and skin are read from its layers, "
+                    "and a mesh that doesn't hold to them isn't read")
             # Its elements straight-sided between their corners, as their sections are taken,
             # against the mesh's own, curved onto the part's faces.
             curved = float(self._curved_volumes([elements[i] for i in mine]).sum())
@@ -975,6 +983,7 @@ class _Model:
                     "faces": skin_layer.triangles, "part_wedges": len(skin_layer.wedges),
                     "band_short_pct": round(100 * bands.short, 2),
                     "band_over_pct": round(100 * bands.over, 2),
+                    "band_misplaced_pct": round(100 * bands.misplaced, 2),
                 })
             self.printed_cells[part.name] = said
         self.element_step = steps
@@ -2457,9 +2466,19 @@ class _Model:
         if not weights:
             averaged = classify.Averaged(np.zeros((1, 3, 3)), np.zeros((1, 3)), np.zeros(1))
         else:
+            # Across its layers, the core's strain fitted as a line and read at its own
+            # edge, in the part's own axes, where its layers are (mqucifer/print-shop#363).
+            layered = self.cores[part.name]
+            number = next(i for i, c in enumerate(layered.cells) if c is cell)
+
+            def core_at(points: np.ndarray, layered: Any = layered,
+                        number: int = number) -> np.ndarray:
+                return np.asarray(layered.core(points, np.full(len(points), number)))
+
             averaged = classify.element_averaged(
                 (np.concatenate(middles) - at) @ turn, np.concatenate(means),
-                np.concatenate(weights), size)  # fmt: skip
+                np.concatenate(weights), size, up=layered.layers, core_at=core_at,
+                step=layered.height)  # fmt: skip
             averaged.at = averaged.at @ turn.T + at
         read: dict[str, Any] = dict(figures.read(averaged.strain, way, first, second))
         for key, fill in (("across_at", "across_cell_fill"), ("stretch_at", "stretch_cell_fill")):
@@ -4094,7 +4113,9 @@ def _as_printed(assembly: Assembly, report: Report, printed: dict[str, list[dict
                 f"layers' core in {cell['bands']} bands {cell['band_mm']:g} mm thick, short by "
                 f"{cell['band_short_pct']:.1f}% of a band at most, within "
                 f"{100 * as_printed.SHORT:.0f}%, and over by {cell['band_over_pct']:.1f}%, "
-                f"within {100 * as_printed.AGREE:.0f}%; its skin's strain read at its wedges' and "
+                f"within {100 * as_printed.AGREE:.0f}%, and in the wrong place by "
+                f"{cell.get('band_misplaced_pct', 0.0):.1f}%, element by element, within "
+                f"{100 * as_printed.SHORT:.0f}%; its skin's strain read at its wedges' and "
                 f"its elements' own points, and its core's averaged over its own cell, "
                 + (f"{cell['cell_mm']:.2f} mm each way" if cell.get("cell_mm") else "its lines'")
                 + ", over what of it is core: its stiffness is its cell's mean, so a peak "

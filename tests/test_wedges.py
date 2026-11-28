@@ -10,7 +10,7 @@ from collections.abc import Callable
 import numpy as np
 import pytest
 
-from print_shop.bench import classify, infill, load, wedges
+from print_shop.bench import as_printed, classify, infill, load, wedges
 
 #: The unit wedge, its depth 1 along z.
 UNIT = np.array([[[x, y, (z + 1) / 2] for x, y, z in wedges.NODES]])
@@ -238,3 +238,57 @@ def test_a_node_the_mesh_puts_out_of_the_part_keeps_its_wedges() -> None:
     under = points[top] - np.array([0.0, 0.0, 0.5])
     dropped = wedges.layer(points, rows, normals, depth, kinds, over, out_round(under, 0.499))
     assert dropped.outside > 0 and len(dropped.wedges) < 12
+
+
+class Shifted(Cubed):
+    """`Cubed`'s core moved 0.4 mm along x, its area in each layer the same."""
+
+    def _readable(self, layer: int, cell: object) -> list[np.ndarray]:
+        return [ring + np.array([0.4, 0.0]) for ring in super()._readable(layer, cell)]
+
+
+def _grid(n: int = 10, size: float = 10.0) -> np.ndarray:
+    """A cube `size` across cut into n³ cubes of six tetrahedra each (Kuhn's): their corners,
+    `[element, 4, 3]`."""
+    step = size / n
+    found = []
+    for i in range(n):
+        for j in range(n):
+            for k in range(n):
+                base = np.array([i, j, k], dtype=float) * step
+                for order in ((0, 1, 2), (0, 2, 1), (1, 0, 2), (1, 2, 0), (2, 0, 1), (2, 1, 0)):
+                    corner, path = base.copy(), [base.copy()]
+                    for axis in order:
+                        corner = corner.copy()
+                        corner[axis] += step
+                        path.append(corner)
+                    found.append(path)
+    return np.array(found)
+
+
+def test_a_wrong_core_is_caught_by_the_enforced_band_check() -> None:
+    """mqucifer/print-shop#363's review, main's planted wrong cuts for the read by layers: a
+    cube's mesh of 1 mm elements held to its layers passes; and each wrong core the model could
+    be given is caught, never passed: shifted 0.4 mm, its area each layer the same, which the
+    bands' totals can't see, so each element's share is held to its own exact core too; 4% of
+    it short, the unsafe side; a slab of its layers with none, as a ledge missed; and a layer
+    unread."""
+    corners = _grid()
+    none = np.zeros((0, 6, 3))
+    true = Cubed()
+    found = classify.exact(true, corners, none)  # type: ignore[arg-type]
+    share = np.clip(found.core / found.whole, 0, 1)
+    assert classify.exact_checked(true, found, share).fails() is None  # type: ignore[arg-type]
+    moved = classify.exact(Shifted(), corners, none)  # type: ignore[arg-type]
+    wrong = np.clip(moved.core / moved.whole, 0, 1)
+    shifted = classify.exact_checked(true, found, wrong)  # type: ignore[arg-type]
+    assert shifted.short <= as_printed.SHORT and shifted.over <= as_printed.AGREE, shifted
+    assert shifted.fails() is not None and "place" in str(shifted.fails()), shifted
+    short = classify.exact_checked(true, found, 0.96 * share)  # type: ignore[arg-type]
+    assert short.fails() is not None and "short" in str(short.fails()), short
+    ledge = share.copy()
+    ledge[found.spans[found.spans[:, 1] == 25, 0].astype(int)] = 0.0
+    assert classify.exact_checked(true, found, ledge).fails() is not None  # type: ignore[arg-type]
+    unread = Cubed()
+    unread.unread = {25}
+    assert classify.exact_checked(unread, found, share).fails() is not None  # type: ignore[arg-type]
