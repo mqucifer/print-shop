@@ -2513,26 +2513,61 @@ def _forced(cae: Any, script: str, args: list[str], timeout: int = host.TIMEOUT)
     return record
 
 
+#: The plain frame's panel width, in mm (`cae_cases/band_plate.py`), and a weight's place on its
+#: -x border's top, half way up.
+PLATE_W = 60
+PLATE_AT = f"-6,{0.625 * PLATE_W / 2:g},6"
+
+
+@pytest.fixture(scope="module")
+def plain_frame(cae: Any) -> Path:
+    """A plain frame round a panel, its panel named as its band, bored and bolted to a block as
+    the traced one is (`glass_joined.py`), in the folder `plate-WIDTH`."""
+    for script in ("band_plate.py", "glass_joined.py"):
+        shutil.copy(CASES / script, cae.work / script)
+    for argv in (["band_plate.py", str(PLATE_W), "plate.step"],
+                 ["glass_joined.py", "plate.step", f"plate-{PLATE_W}"]):  # fmt: skip
+        made = host.run(argv, cae.work, python=True, image=host.CAE_IMAGE)
+        assert made.returncode == 0, made.stdout + made.stderr
+    return Path(cae.work) / f"plate-{PLATE_W}"
+
+
+def _case(case: str, at: str) -> list[str]:
+    return ["--weight", "1", "--at", at] if case == "weight" else ["--lift", "block"]
+
+
 @pytest.mark.assembly
 @pytest.mark.bands
-@pytest.mark.parametrize("case", ["weight", "lift"])
-def test_parts_reads_a_glass_frame_whole_and_where_two_passes_meet_the_memory_its_band_s_bound(
-    cae: Any, small_glass: Path, case: str
+def test_parts_reads_a_banded_frame_whole_where_two_passes_can(
+    cae: Any, plain_frame: Path
 ) -> None:
-    """mqucifer/print-shop#375: `load --parts` on a glass frame bolted to a block, under a weight
-    and lifted by the block. Read whole in two passes, as asked: no bound, the band in. Then
-    with the first pass's mesher taking memory until the kernel stops it
-    (`cae_cases/mesh_memory_forced.py`): the container is left standing, as gmsh is the first to
-    go, the whole is unread for its memory, and the frame is read with its band left out, as
-    the one pass's two passes are followed. Under the weight it's a lower bound; lifted, the
-    band's weight is kept, and its figures are upper bounds."""
-    given = (["--weight", "1", "--at", BANDS_AT] if case == "weight"
-             else ["--lift", "block"])  # fmt: skip
-    args = ["load", f"{small_glass.name}/joined.json", *given, "--parts"]
-    whole = cae(*args)
+    """mqucifer/print-shop#375: a read that can be had whole is still read whole. A plain frame
+    whose panel is named as its band, bolted to a block, under `--parts` and a weight: two
+    passes read it whole, the band in, and nothing is a bound. Two passes refuse the traced
+    frame by their own checks, as what's evened out of its first pass's push, more than they
+    hold to: neither time nor memory, so it's said as it is. Lifted, two passes refuse this
+    frame too, on main as here, as the lifted block on its own doesn't balance in pass 2: so a
+    lift read whole is the one pass's, beside its bound, below."""
+    whole = cae("load", f"{plain_frame.name}/joined.json", *_case("weight", PLATE_AT), "--parts")
     assert whole.verdict == "OK", whole.text
     assert "lower_bound" not in whole.numbers, "a whole that reads is read whole"
     assert whole.numbers["two_passes"]["why"] == "asked for with --parts"
+    assert "read as a" not in whole.record["why"]
+
+
+@pytest.mark.assembly
+@pytest.mark.bands
+@pytest.mark.parametrize("case", ["weight", "lift"])
+def test_parts_where_two_passes_meet_the_memory_meshing_reads_a_glass_band_s_bound(
+    cae: Any, small_glass: Path, case: str
+) -> None:
+    """mqucifer/print-shop#375: `load --parts` on the traced glass frame bolted to a block, the
+    first pass's mesher taking memory until the kernel stops it
+    (`cae_cases/mesh_memory_forced.py`). The container is left standing, as gmsh is the first
+    to go, the whole is unread for its memory, and the frame is read with its band left out, as
+    the one pass's two passes are followed. Under the weight it's a lower bound; lifted, the
+    band's weight is kept, and the movement and each joint's share are upper bounds."""
+    args = ["load", f"{small_glass.name}/joined.json", *_case(case, BANDS_AT), "--parts"]
     forced = _forced(cae, "mesh_memory_forced.py", args, timeout=host.TWO_PASSES)
     assert forced["verdict"] == "OK", forced["text"]
     assert "killed" not in forced["text"]
@@ -2546,16 +2581,16 @@ def test_parts_reads_a_glass_frame_whole_and_where_two_passes_meet_the_memory_it
     )
     assert "two_passes" not in forced["numbers"], "the band's read is one pass"
     if case == "weight":
-        assert forced["why"].startswith("read as a lower bound, frame with its glass band left")
+        assert forced["why"].startswith(
+            "read as a lower bound, frame with its glass band left out, the band unread: "
+        ), forced["why"]
         assert "weight_kept_g" not in lower
         return
     assert forced["why"].startswith(
         "read as a bound, frame with its glass band's stiffness left out and its weight kept, "
         "the band unread: "
-    )
+    ), forced["why"]
     assert "are upper bounds under the full weight" in forced["text"]
-    # Every gram is kept: the band's put where it met the frame.
-    assert forced["numbers"]["force_n"] == pytest.approx(whole.numbers["force_n"], rel=1e-6)
     assert lower["weight_kept_g"]["frame"] > 0
 
 
@@ -2568,18 +2603,22 @@ def test_parts_reads_a_glass_band_s_lower_bound_where_two_passes_meet_the_time(
     two seconds of the hour, as if what's kept for the band took the rest
     (`cae_cases/reserve_forced.py`, whose one pass isn't run with `--parts`). They stop before
     their first pass, and the frame is read with its band left out, a lower bound, saying the
-    two passes met the container's time less what's kept for it."""
+    two passes met the container's time less what's kept for it, and that the band's unread."""
     args = ["load", f"{small_glass.name}/joined.json", "--weight", "1", "--at", BANDS_AT,
             "--parts"]  # fmt: skip
     forced = _forced(cae, "reserve_forced.py", args, timeout=host.TWO_PASSES)
     assert forced["verdict"] == "OK", forced["text"]
     lower = forced["numbers"]["lower_bound"]
     assert lower["parts"] == ["frame"]
+    # The forced clock keeps all but two seconds for the band, in place of the one pass's limit
+    # `--parts` keeps (`load_parts.ONE_PASS`, which `test_load_parts.py` reads).
     assert lower["why"].startswith(
         "read in two passes, as --parts asks: two passes met the container's time, 3600 s, less "
-        f"the {1.25 * 600:.0f} s kept for a glass band's lower bound"
     ), lower["why"]
-    assert forced["why"].startswith("read as a lower bound, frame with its glass band left")
+    assert " s kept for a glass band's lower bound" in lower["why"]
+    assert forced["why"].startswith(
+        "read as a lower bound, frame with its glass band left out, the band unread: "
+    ), forced["why"]
     assert forced["ran"]["limit_s"] == host.TWO_PASSES
 
 
