@@ -50,6 +50,8 @@ STEPS = (
     ("gmsh's mesh of the joined parts", "gmsh's mesh"),
     ("finding faces closer", "finding close faces"),
     ("reading each element of the printed parts", "reading each element by its layers"),
+    ("reading each element's core and its skin's wedges exactly",
+     "reading each element exactly by its layers' rings"),
     ("writing CalculiX's input", "writing CalculiX's input"),
     ("CalculiX's iterative solve", "CalculiX's iterative solve"),
     ("CalculiX's solve", "CalculiX's direct solve"),
