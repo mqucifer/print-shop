@@ -292,3 +292,61 @@ def test_a_wrong_core_is_caught_by_the_enforced_band_check() -> None:
     unread = Cubed()
     unread.unread = {25}
     assert classify.exact_checked(unread, found, share).fails() is not None  # type: ignore[arg-type]
+
+
+def test_each_boundary_triangle_s_element_is_the_one_it_s_a_face_of() -> None:
+    """mqucifer/print-shop#363's review: a wedge took off its triangle's cell's core while the
+    solid under it had its own element's; so each triangle's element (`face_elements`), in
+    `faces_of`'s order, is the one it's a face of, whose cell its wedge takes."""
+    points, wired = cube()
+    rows, _ = wedges.faces_of(wired, points, load.MIDS)
+    owners = wedges.face_elements(wired)
+    assert len(owners) == len(rows)
+    for face, e in zip(rows.tolist(), owners.tolist(), strict=True):
+        assert set(face) <= set(wired[e].tolist())
+
+
+class Strided(Cubed):
+    """`Cubed` read every fifth layer, its core's rings shrinking 0.2 mm a layer above z 5, as
+    beside a face leaning past what a layer may stand for."""
+
+    stride = 5
+
+    def read_at(self, layer: int) -> int:
+        return (layer // self.stride) * self.stride
+
+    def sparse(self, layer: int, cell: object) -> list[np.ndarray]:
+        at = (layer + 0.5) * self.height
+        if not 1 < at < 9:
+            return []
+        inset = 1.0 + max(0.0, at - 5.0) * 1.0
+        return [np.array([[inset, 1.0], [9, 1], [9, 9], [inset, 9]])]
+
+    def _readable(self, layer: int, cell: object) -> list[np.ndarray]:
+        return self.sparse(self.read_at(layer), cell)
+
+
+def test_a_layer_standing_for_others_is_checked_against_their_own_rings() -> None:
+    """mqucifer/print-shop#363's review: the band check was held to the same spaced rings the
+    read used, so a layer standing for others whose section moved couldn't be seen. Each band
+    has a layer read on its own, the farthest from the one standing for it, and the two's core
+    held within `as_printed.SHORT` of the layer."""
+    corners = _grid()
+    none = np.zeros((0, 6, 3))
+    true = Cubed()
+    found = classify.exact(true, corners, none)  # type: ignore[arg-type]
+    share = np.clip(found.core / found.whole, 0, 1)
+    assert classify.exact_checked(true, found, share).fails() is None  # type: ignore[arg-type]
+    strided = Strided()
+    read = classify.exact(strided, corners, none)  # type: ignore[arg-type]
+    shares = np.clip(read.core / read.whole, 0, 1)
+    bands = classify.exact_checked(strided, read, shares)  # type: ignore[arg-type]
+    assert bands.fails() is not None and "stand" in str(bands.fails()), bands
+    # Moving 0.4 mm along x for each mm up above z 5, its area the same: caught all the same.
+    moving = Strided()
+    moving.sparse = lambda layer, cell: [  # type: ignore[method-assign]
+        ring + np.array([0.4 * max(0.0, (layer + 0.5) * 0.2 - 5.0), 0.0])
+        for ring in Cubed._readable(moving, layer, cell)]  # fmt: skip
+    read = classify.exact(moving, corners, none)  # type: ignore[arg-type]
+    shares = np.clip(read.core / read.whole, 0, 1)
+    assert classify.exact_checked(moving, read, shares).fails() is not None  # type: ignore[arg-type]

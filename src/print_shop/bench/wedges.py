@@ -193,6 +193,23 @@ class Layer:
     said: list[str] = field(default_factory=list)
 
 
+def _kept(wired: np.ndarray) -> list[tuple[int, int]]:
+    """Each boundary face of `wired`'s elements, as its element and the corner it leaves out,
+    in the order `faces_of` gives them."""
+    seen: dict[tuple[int, ...], tuple[int, int]] = {}
+    for e, nodes in enumerate(wired[:, :4].tolist()):
+        for skip in range(4):
+            face = tuple(sorted(nodes[:skip] + nodes[skip + 1 :]))
+            seen[face] = (-1, -1) if face in seen else (e, skip)
+    return [(e, skip) for e, skip in seen.values() if e >= 0]
+
+
+def face_elements(wired: np.ndarray) -> np.ndarray:
+    """Each boundary triangle's element, in `faces_of`'s order: the one it's a face of, whose
+    cell its wedge takes off, as the solid under it has (mqucifer/print-shop#363's review)."""
+    return np.array([e for e, _ in _kept(wired)], dtype=int)
+
+
 def faces_of(wired: np.ndarray, points: np.ndarray, mids: tuple[tuple[int, int], ...]
              ) -> tuple[np.ndarray, np.ndarray]:
     """A part's boundary triangles from its ten-node elements, `wired` as rows of `points` with
@@ -200,12 +217,7 @@ def faces_of(wired: np.ndarray, points: np.ndarray, mids: tuple[tuple[int, int],
     rows, corners first then each side's middle, turned so its normal points out of the part,
     and that normal."""
     side = {frozenset(pair): 4 + k for k, pair in enumerate(mids)}
-    seen: dict[tuple[int, ...], tuple[int, int]] = {}
-    for e, nodes in enumerate(wired[:, :4].tolist()):
-        for skip in range(4):
-            face = tuple(sorted(nodes[:skip] + nodes[skip + 1 :]))
-            seen[face] = (-1, -1) if face in seen else (e, skip)
-    kept = [(e, skip) for e, skip in seen.values() if e >= 0]
+    kept = _kept(wired)
     rows = np.zeros((len(kept), 6), dtype=int)
     for k, (e, skip) in enumerate(kept):
         a, b, c = (i for i in range(4) if i != skip)

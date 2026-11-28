@@ -70,6 +70,30 @@ class Mesh:
         steep = np.abs(normal[:, self.axis]) >= lean * np.maximum(size, 1e-30)
         return np.column_stack([self.low[steep], self.high[steep]])
 
+    def leans(self, count: int, low: float, height: float, least: float = 0.0) -> np.ndarray:
+        """Each of `count` layers `height` thick from `low`, how far its section moves for its
+        height (mqucifer/print-shop#363's review): the most of the triangles that cross it,
+        each its lean's tangent from upright, its normal's share along the layers over its
+        share across them; those leaning less than `least` left out, as moving it too little
+        to matter. A flat triangle's is infinite."""
+        a, b, c = (self.points[self.triangles[:, i]] for i in range(3))
+        normal = np.cross(b - a, c - a)
+        size = np.maximum(np.linalg.norm(normal, axis=1), 1e-30)
+        along = np.abs(normal[:, self.axis]) / size
+        across = np.sqrt(np.maximum(1 - along**2, 0.0))
+        tangent = np.where(across > 1e-12, along / np.maximum(across, 1e-12), np.inf)
+        found = np.zeros(count)
+        mine = np.flatnonzero(tangent > least)
+        if not len(mine):
+            return found
+        first = np.clip(np.floor((self.low[mine] - low) / height).astype(int), 0, count - 1)
+        last = np.clip(np.floor((self.high[mine] - low) / height).astype(int), 0, count - 1)
+        many = last - first + 1
+        layer = np.repeat(first, many) + (np.arange(many.sum()) - np.repeat(np.cumsum(many) - many,
+                                                                           many))  # fmt: skip
+        np.maximum.at(found, layer, np.repeat(tangent[mine], many))
+        return found
+
     def section(self, at: float) -> Any:
         """The solid's section at `at` along its layers, as a Shapely geometry in its other two
         axes: each loop where the plane crosses its triangles, joined by the mesh's own edges,
@@ -196,9 +220,21 @@ def layer_rings(mesh: Mesh, at: float, walls: float, top: float, bottom: float, 
     return rings_of(inner)
 
 
-def profile(mesh: Mesh, at: float) -> tuple[float, ...]:
-    """A section's area, length and box to a micrometre, as what tells it from another."""
+#: How finely a section's rings tell it from another's (`profile`), in mm.
+PROFILE_MM = 1e-5
+
+
+def profile(mesh: Mesh, at: float) -> tuple[Any, ...]:
+    """What tells a section from another: its rings themselves, each point to `PROFILE_MM`,
+    as a hash (mqucifer/print-shop#363's review: by its area, length and box alone, a hole
+    drilled at 45° through a block reused the first layer's rings all the way up). Points on a
+    straight side between two others are left out first, as where a face's diagonal triangles
+    cut it at a point that slides along the side with the height, the same section."""
+    import shapely
+
     shape = mesh.section(at)
     if shape.is_empty:
         return ()
-    return tuple(round(float(v), 6) for v in (shape.area, shape.length, *shape.bounds))
+    plain = shapely.normalize(shape.simplify(PROFILE_MM / 10, preserve_topology=True))
+    rounded = np.round(shapely.get_coordinates(plain) / PROFILE_MM).astype(np.int64)
+    return (round(float(shape.area), 6), hash(rounded.tobytes()), len(rounded))

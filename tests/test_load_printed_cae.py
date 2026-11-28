@@ -446,10 +446,6 @@ def test_a_print_load_can_t_read_says_why_and_nothing_is_solved(
 
 #: The bowed bars of `make_fixtures.bowed` (mqucifer/print-shop#356).
 BOWED = ("bowed", "bowed-up", "bowed-notched")
-#: The bar bowed along its layers' core by its layers, in mm³: 24 million points 0.1 mm apart
-#: over its box, each read in its own layer (`classify.Layered.core`), inside the part by its
-#: section there (mqucifer/print-shop#363).
-BOWED_UP_CORE = 17567.3
 
 
 @pytest.mark.parametrize("name", BOWED)
@@ -471,10 +467,6 @@ def test_a_bowed_bar_reads_as_printed_between_solid_and_its_core_alone(
     cell = printed.numbers["printed"]["bar"][0]
     assert cell["core_mm3"] > 0, cell
     held_to_its_layers(cell)
-    if name == "bowed-up":
-        # Its layers' own core, read on a 0.1 mm grid of points each in its own layer: less
-        # than the straight bar's, 18,267 mm³, as its sloped faces' shells are grown into it.
-        assert cell["core_mm3"] == pytest.approx(BOWED_UP_CORE, rel=0.01)
     found = infill.core(Settings(pattern="grid", infill=20, infill_angle=0), MATERIALS["petg"])
     up, first, second = np.eye(3)[2], np.eye(3)[0], np.eye(3)[1]
     along = infill.pulled(found.stiffness(up, first, second), first)
@@ -569,9 +561,10 @@ def test_parts_beside_a_printed_one_keep_elements_of_their_own(cae: Any) -> None
     held_to_its_layers(pinned.numbers["printed"]["tile"][0])
 
 
-#: How far each layer's core read from the part's mesh may be from OCCT's on its B-rep: their
-#: edges' mean distance apart, in mm, the mesh's chord being 0.003 mm, and their areas, in %
-#: (mqucifer/print-shop#363).
+#: How far each layer's core read from the part's mesh may be from OCCT's on its B-rep: the
+#: largest distance between their outlines, and the mean, in mm, the mesh's chord being
+#: 0.003 mm, and their areas, in % (mqucifer/print-shop#363).
+SLICED_FARTHEST_MM = 0.01
 SLICED_APART_MM = 0.005
 SLICED_AREA_PCT = 0.1
 
@@ -582,8 +575,12 @@ def test_each_layer_read_from_the_mesh_orca_slices_is_the_b_rep_s_within_its_cho
     """The Sponsor's decision (mqucifer/print-shop#363): each layer is read from the triangle
     mesh Orca slices, at its own 0.003 mm chord and 0.5 rad, by GEOS, not OCCT on the B-rep
     (`slices`). On the beam, its halves, the tile, chamfered or not, and the bowed bars, at 12
-    of its layers each, its core is OCCT's on the B-rep within `SLICED_APART_MM` of edge and
-    `SLICED_AREA_PCT` of area (`cae_cases/layers_bound.py`)."""
+    of its layers each and at each of its flat faces' levels, its core is OCCT's on the B-rep
+    within `SLICED_FARTHEST_MM` at its farthest, `SLICED_APART_MM` on the mean, and
+    `SLICED_AREA_PCT` of area (`cae_cases/layers_bound.py`). And the bar bowed along its
+    layers' core, as its elements hold it read exactly, is OCCT's on its B-rep, every layer, to
+    1%: a truth read apart from the mesh Orca slices and the read's own `Layered`, less than
+    the straight bar's, 18,267 mm³, as its sloped faces' shells are grown into it."""
     work: Path = cae.work
     shutil.copy(CASES / "layers_bound.py", work / "layers_bound.py")
     done = host.run(["layers_bound.py"], work, python=True, image=host.CAE_IMAGE)
@@ -591,9 +588,16 @@ def test_each_layer_read_from_the_mesh_orca_slices_is_the_b_rep_s_within_its_cho
     found = json.loads(done.stdout.strip().splitlines()[-1])
     assert set(found) >= {"beam", "tile", "tile-chamfered", "bowed", "bowed-up", "bowed-notched"}
     for name, read in found.items():
-        assert read["layers"] == 12, (name, read)
-        assert read["apart_mm"] <= SLICED_APART_MM, (name, read)
+        assert read["layers"] >= 12, (name, read)
+        assert read["apart_mm"] <= SLICED_FARTHEST_MM, (name, read)
+        assert read["mean_mm"] <= SLICED_APART_MM, (name, read)
         assert read["area_pct"] <= SLICED_AREA_PCT, (name, read)
+    at = ",".join(f"{v:g}" for v in json.loads((work / "load/bowed-at.json").read_text())[
+        "bowed-up"])  # fmt: skip
+    printed = cae("load", "load/printed-bowed-up.json", "--weight", "1", "--at", at)
+    cell = printed.numbers["printed"]["bar"][0]
+    truth = found["bowed-up"]["brep_core_mm3"]
+    assert truth < 18267 and cell["core_mm3"] == pytest.approx(truth, rel=0.01), (cell, truth)
 
 
 #: How far apart the slotted bar's two meshes may read its core's worst cells once meshed again

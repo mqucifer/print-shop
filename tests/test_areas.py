@@ -86,3 +86,47 @@ def test_a_polygon_s_area_inside_rings_holes_and_all_is_its_arithmetic() -> None
     triangle = np.array([[[0.0, 0], [5, 0], [0, 5]]])
     found = areas.inside_rings(triangle, np.array([3]), [circle])[0]
     assert found == pytest.approx(math.pi * 9 / 4, rel=1e-3)
+
+
+def test_a_section_is_told_from_another_by_where_its_features_are() -> None:
+    """mqucifer/print-shop#363's review: a layer's rings were reused where its section had the
+    same area, length and box as one read, so a hole drilled at 45° through a block reused the
+    first layer's rings all the way up. A section is told by its rings themselves."""
+    import shapely
+
+    from print_shop.bench import slices
+
+    class Drilled:
+        """A block 20 across, a hole 4 across moving 1 mm along x for each mm up."""
+
+        def section(self, at: float) -> object:
+            block = shapely.box(0, 0, 20, 20)
+            return block.difference(shapely.Point(6 + at, 10).buffer(2, quad_segs=16))
+
+    mesh = Drilled()
+    assert slices.profile(mesh, 2.0) != slices.profile(mesh, 3.0)  # type: ignore[arg-type]
+    assert slices.profile(mesh, 2.0) == slices.profile(mesh, 2.0)  # type: ignore[arg-type]
+
+
+def test_a_layer_stands_for_another_only_where_its_section_moves_too_little_to_matter() -> None:
+    """mqucifer/print-shop#363's review: a layer read every 1 mm stood for those between it and
+    the next beside a face leaning under 30° from upright, where the section moves 0.23 mm in
+    1 mm, a quarter of a 2-wall skin. Each layer's lean, as its section moves for its height
+    (`Mesh.leans`), bounds how far a layer read stands for it (`classify.stands_for`): under
+    `classify.STRIDE_MOVE_MM`."""
+    from print_shop.bench import classify, slices
+
+    lean = math.tan(math.radians(13))
+    # A wall leaning 13° from upright over z 0 to 10, and one upright beside it.
+    points = np.array([[0, 0, 0], [0, 10, 0], [10 * lean, 0, 10], [10 * lean, 10, 10],
+                       [20, 0, 0], [20, 10, 0], [20, 0, 10], [20, 10, 10]], dtype=float)
+    triangles = np.array([[0, 1, 2], [1, 3, 2], [4, 6, 5], [5, 6, 7]])
+    mesh = slices.Mesh(points, triangles, 2)
+    leans = mesh.leans(50, 0.0, 0.2)
+    assert leans.max() == pytest.approx(lean, rel=1e-6)
+    # Read every 1 mm, five layers apart: a layer 0.2 mm from the one read moves 0.046 mm.
+    assert classify.stands_for(leans, 11, 10, 0.2)
+    assert not classify.stands_for(leans, 12, 10, 0.2)
+    # Beside an upright wall alone, the section doesn't move: it stands for all five.
+    upright = slices.Mesh(points[4:] - [20, 0, 0], triangles[2:] - 4, 2).leans(50, 0.0, 0.2)
+    assert classify.stands_for(upright, 12, 10, 0.2)

@@ -138,8 +138,10 @@ def test_a_point_is_in_a_layer_s_area_by_its_rings_holes_and_all() -> None:
 
 
 def test_a_share_is_its_step_an_eighth_apart() -> None:
+    # Toward core, the soft side: any core is an eighth at least (mqucifer/print-shop#363's
+    # review).
     assert classify.step_of(np.array([0.0, 0.06, 0.07, 0.5, 0.99, 1.0])).tolist() == [
-        0, 0, 1, 4, 8, 8]
+        0, 1, 1, 4, 8, 8]
 
 
 def test_an_element_s_64_points_are_each_an_equal_part_of_it() -> None:
@@ -281,3 +283,11 @@ def test_a_layer_that_can_t_be_read_fails_the_band_check_never_borrowed() -> Non
     assert unread is not None and "1 of its layers" in unread
     assert classify.Bands(4, 1.5 * as_printed.SHORT, 0.0, 0).fails() is not None
     assert classify.Bands(4, 0.0, 1.5 * as_printed.AGREE, 0).fails() is not None
+
+
+def test_a_share_steps_toward_core_never_away() -> None:
+    """mqucifer/print-shop#363's review: a share stepped to the nearest eighth read an element
+    with less core than it has, stiffer and stronger. It steps toward core, the soft side: no
+    core is none, any is at least an eighth, all is all."""
+    share = np.array([0.0, 1e-12, 0.01, 0.124, 0.126, 0.51, 0.99, 1.0])
+    assert classify.step_of(share).tolist() == [0, 0, 1, 1, 2, 5, 8, 8]

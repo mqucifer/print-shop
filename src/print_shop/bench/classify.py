@@ -164,6 +164,7 @@ class Layered:
         self.bottom_most = max([settings.bottom or 0 for settings in self._all_settings()]
                                ) * self.height  # fmt: skip
         self._full: set[int] | None = None
+        self._leans: np.ndarray | None = None
 
     def _all_settings(self) -> list[Settings]:
         base = self.printed.settings
@@ -350,7 +351,7 @@ class Layered:
 
     def profile(self, at: float) -> tuple[Any, ...]:
         """The part's section at `at` along its layers, as what tells it from another: its
-        area, length and box to a micrometre (`slices.profile`)."""
+        rings themselves (`slices.profile`)."""
         return slices.profile(self.mesh(), at)
 
     def _less_islands(self, faces: list[Any], at: float) -> list[Any]:
@@ -399,7 +400,11 @@ class Layered:
             self._full = self.full_layers()
         if layer in self._full or self.stride <= 1:
             return layer
-        return int(min(self.count - 1, round(layer / self.stride) * self.stride))
+        read = int(min(self.count - 1, round(layer / self.stride) * self.stride))
+        if self._leans is None:
+            self._leans = self.mesh().leans(self.count, self.low, self.height,
+                                            STRIDE_MOVE_MM / STRIDE_MM)  # fmt: skip
+        return read if stands_for(self._leans, layer, read, self.height) else layer
 
     def full_layers(self) -> set[int]:
         """Every layer within reach of a face that makes shells, one leaning `SHELL_DEGREES` or
@@ -437,6 +442,9 @@ class Layered:
 #: whose section moves with its height, as a bowed leg's, has no two layers alike, and each
 #: layer's OCCT offsets and booleans were most of its reading.
 STRIDE_MM = 1.0
+#: How far a part's section may move between a layer and the one read for it, in mm
+#: (`stands_for`, mqucifer/print-shop#363's review): a 2-wall skin's 0.87 mm by a twentieth.
+STRIDE_MOVE_MM = 0.05
 #: How far outside a layer's section, or past the part's lowest or highest layer, a point is
 #: still in it (`Layered.holds`), in mm: the sections are the mesh's, within its 0.003 mm chord
 #: of the B-rep, and a node mitred onto a held face lands within a micrometre or so of it.
@@ -822,8 +830,10 @@ def boundary(corners: np.ndarray, numbers: np.ndarray) -> tuple[np.ndarray, np.n
 
 
 def step_of(share: np.ndarray) -> np.ndarray:
-    """Each share as its step, 0 for skin to `STEPS` for core: an eighth's of 8 middles."""
-    return np.clip(np.rint(share * STEPS), 0, STEPS).astype(int)
+    """Each share as its step, 0 for skin to `STEPS` for core, toward core: the softer side,
+    so an element is never read with less core than it has (mqucifer/print-shop#363's
+    review); a share within a hair of a step is that step's."""
+    return np.clip(np.ceil(share * STEPS - 1e-6), 0, STEPS).astype(int)
 
 
 # The check
@@ -854,6 +864,9 @@ class Bands:
     #: The most of a band's volume whose core is in the wrong place: each element's share as
     #: the model has it against its own exact core by the rings, element by element.
     misplaced: float = 0.0
+    #: The most a layer read on its own, the farthest in its band from the one standing for
+    #: it, differs from it in core, as a share of the layer.
+    strided: float = 0.0
 
     def fails(self) -> str | None:
         """Why it doesn't hold, in words, or None where it does: a layer it couldn't read,
@@ -869,6 +882,10 @@ class Bands:
         if self.over > as_printed.AGREE:
             return (f"its mesh's core is over Orca's in a band of its layers by "
                     f"{100 * self.over:.1f}% of the band, past {100 * as_printed.AGREE:.0f}%")
+        if self.strided > as_printed.SHORT:
+            return (f"a layer of its read by another standing for it differs from its own core "
+                    f"by {100 * self.strided:.1f}% of the layer, past "
+                    f"{100 * as_printed.SHORT:.0f}%: its section moved between them")
         if self.misplaced > as_printed.SHORT:
             return (f"its mesh's core is in the wrong place in a band of its layers by "
                     f"{100 * self.misplaced:.1f}% of the band, past "
@@ -1046,8 +1063,51 @@ def exact_checked(layered: Layered, found: Exact, share: np.ndarray, band: float
     apart = np.abs(share * found.whole - own) / np.maximum(found.whole, 1e-12)
     wrong = np.bincount(bands, weights=volume * apart[element], minlength=count)
     misplaced = float(np.max(np.where(full, wrong / ratio, 0.0), initial=0.0))
+    strided = _strided(layered, found, where, count)
     return Bands(int(full.sum()), max(short, 0.0), max(over, 0.0), len(layered.unread),
-                 misplaced)
+                 misplaced, strided)
+
+
+def _strided(layered: Layered, found: Exact, where: np.ndarray, count: int) -> float:
+    """The most, over its bands, that a layer read on its own differs in core from the layer
+    standing for it, what's in one and not the other, as a share of the layer's elements'
+    volume there (`exact_checked`): in
+    each band the layer farthest from its own, its section the furthest moved; for each of its
+    cells. None where it's read layer by layer."""
+    if not hasattr(layered, "read_at"):
+        return 0.0
+    rows = found.spans
+    layer_volume = np.bincount(rows[:, 1].astype(int), weights=rows[:, 2],
+                               minlength=layered.count)  # fmt: skip
+    worst = 0.0
+    for band in range(count):
+        mine = np.flatnonzero(where == band)
+        apart = [(abs(k - layered.read_at(int(k))), int(k)) for k in mine]
+        far, k = max(apart, default=(0, -1))
+        if far == 0 or layer_volume[k] <= 0:
+            continue
+        stood = layered.read_at(k)
+        for cell in layered.cells:
+            own = layered.sparse(k, cell) or []
+            read = layered.sparse(stood, cell) or []
+            moved = _apart(own, read) * layered.height
+            worst = max(worst, moved / float(layer_volume[k]))
+    return worst
+
+
+def _apart(one: list[np.ndarray], other: list[np.ndarray]) -> float:
+    """The area in one set of rings and not the other, each by the even-odd rule: what a
+    layer standing for another moved, shrank or grew by, a section moved alike in area too."""
+    import shapely
+
+    def shape(rings: list[np.ndarray]) -> Any:
+        found: Any = shapely.Polygon()
+        for ring in rings:
+            if len(ring) >= 3:
+                found = found.symmetric_difference(shapely.Polygon(ring).buffer(0))
+        return found
+
+    return float(shape(one).symmetric_difference(shape(other)).area)
 
 
 def _edge_of(where: np.ndarray, up: int, core_at: Callable[[np.ndarray], np.ndarray],
@@ -1067,6 +1127,15 @@ def _edge_of(where: np.ndarray, up: int, core_at: Callable[[np.ndarray], np.ndar
         found[ended] = way * (k - 0.5) * step
         going[ended] = False
     return found
+
+
+def stands_for(leans: np.ndarray, layer: int, read: int, height: float) -> bool:
+    """Whether the layer `read` may stand for `layer` (`Layered.read_at`): the part's section,
+    by the most the layers between lean (`slices.Mesh.leans`), moves less than
+    `STRIDE_MOVE_MM` between them."""
+    low, high = sorted((layer, read))
+    moved = float(leans[low : high + 1].max(initial=0.0)) * abs(layer - read) * height
+    return moved < STRIDE_MOVE_MM
 
 
 def element_averaged(middles: np.ndarray, strains: np.ndarray, weights: np.ndarray,

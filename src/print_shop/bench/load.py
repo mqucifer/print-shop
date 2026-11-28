@@ -1136,6 +1136,10 @@ class _Model:
         middles = to_own(points[rows[:, :3]].mean(axis=1))
         ways = normals @ turn
         cells = layered.cell_of(middles)
+        # Each wedge takes off its element's cell's core, the one the solid under it has, as
+        # `classify.shares` reads it by its middle; its depth is its own face's cell's skin.
+        owners = wedges.face_elements(wired)
+        own_cells = layered.cell_of(to_own(points[wired[owners, :4]].mean(axis=1)))
         of = layered.cells
         depth = wedges.depths(
             ways, layered.layers, layered.up,
@@ -1165,7 +1169,7 @@ class _Model:
         def apart(given: np.ndarray) -> np.ndarray:
             return layered.outside_by(to_own(np.asarray(given, dtype=float)))
 
-        built = wedges.layer(points, rows, normals, depth, cells, over_core & ~held, inside,
+        built = wedges.layer(points, rows, normals, depth, own_cells, over_core & ~held, inside,
                              planes=held, apart=apart)
         built.thin = int((~over_core & ~held).sum())
         built.held = int(held.sum())
@@ -2518,11 +2522,6 @@ class _Model:
         assembly's axes, which it read, how much, and its element's size."""
         if not len(averaged.rows):
             return []
-        import FreeCAD as App
-        import Part
-
-        held_faces = [*self.fixed, *sum(self.standing.values(), [])]
-        zone = (self.held_mesh() or (0.0, 0.0))[1]
         near = max(REFINE_SIZE_CELLS * cell, HELD_FINEST)
         reach = max(REFINE_CELLS * cell, HELD_ZONE)
         element = whose[averaged.rows]
@@ -2532,26 +2531,17 @@ class _Model:
         across = 100 * np.einsum("i,nij,j->n", way, averaged.strain, way)
         stretch = 100 * np.abs(np.linalg.eigvalsh(averaged.strain)).max(axis=1)
         found: dict[tuple[int, ...], dict[str, Any]] = {}
-        by_held: dict[tuple[int, ...], bool] = {}
         for key, value, limit in (("across", across, read.get("across_limit_pct")),
                                   ("stretch", stretch, read.get("stretch_limit_pct"))):
             if not limit:
                 continue
             share = value / float(limit)
-            hit = np.flatnonzero((share >= 1 - REFINE_MARGIN) & (sized > REFINE_OVER * near))
+            hit = np.flatnonzero((share >= min(1 - REFINE_MARGIN, REFINE_UNRESOLVED))
+                                 & (sized > REFINE_OVER * near))
             for row in hit[np.argsort(-share[hit])]:
                 box = tuple(np.floor(averaged.at[row] / reach).astype(int).tolist())
                 if box in found and found[box]["share"] >= share[row]:
                     continue
-                if zone and held_faces:
-                    # Within a held face's zone, it's meshed as the held face is: told once
-                    # for each box, by its first row, the highest.
-                    if box not in by_held:
-                        vertex = Part.Vertex(App.Vector(*averaged.at[row]))
-                        by_held[box] = min(f.distToShape(vertex)[0]
-                                           for f in held_faces) <= zone  # fmt: skip
-                    if by_held[box]:
-                        continue
                 found[box] = {"at": _list(averaged.at[row], 3), "reading": key,
                               "pct": round(float(value[row]), 4), "share": float(share[row]),
                               "mesh_mm": round(float(sized[row]), 3)}
@@ -2950,10 +2940,17 @@ HELD_ZONE = 3.0
 #: meshes read its cell within 6% of each other; at its cell, 16%; at twice it, as a held face
 #: is meshed, 37%. Out two cells, a real part's core read a tenth over what it read out three;
 #: out four, the slotted bar's two meshes agreed best, within 2% either way, at 1.2 times three's
-#: time, so four. Gated on nearness alone, a real part whose two meshes agreed it held, well under
-#: its limit, was refined, at several times its read's cost. Within a held face's zone it's
-#: meshed as held.
+#: time, so four. A held face's zone is refined as anywhere else. A core whose worst cell is
+#: unresolved is refined from `REFINE_UNRESOLVED` of its limit, in doubt or not; and the
+#: coarser mesh at `REFINE_COARSER` times the finer's size (mqucifer/print-shop#363's review).
 REFINE_DOUBT = 0.10
+#: And a core whose worst cell is unresolved, in elements coarser than its aim, is refined
+#: where it reads this share of its limit or more, in doubt or not (mqucifer/print-shop#363's
+#: review): such a cell's reading is the mesh's, not its own, and nothing under 90% was.
+REFINE_UNRESOLVED = 0.60
+#: The coarser mesh refined at this many times the finer's size, so the second check reads
+#: the mesh there and not gmsh's spread at one size (`coarser_refine`).
+REFINE_COARSER = 1.5
 #: Over its limit by more than this many times it on both meshes, a read fails beyond doubt,
 #: past what a coarse cell over-reads (`_fails_beyond_doubt`): a real leg's core read 1.4 times
 #: its refined figure in a coarse cell of a few elements.
@@ -3366,22 +3363,32 @@ def refined(fine: dict[str, Any], coarse: dict[str, Any], size: float) -> list[R
             reach = max(REFINE_CELLS * cell, HELD_ZONE)
             if near >= size:
                 continue
-            doubt = False
-            for value, limit in (("across_layers_pct", "across_limit_pct"),
-                                 ("stretch_pct", "stretch_limit_pct")):
+            least = None
+            aim = REFINE_OVER * near
+            for key, value, limit in (("across", "across_layers_pct", "across_limit_pct"),
+                                      ("stretch", "stretch_pct", "stretch_limit_pct")):
                 most = core.get(limit)
                 readings = [float(r) for r in (core.get(value), other.get(value)) if r]
                 if not most or not readings:
                     continue
+                share = max(r / float(most) for r in readings)
+                sizes = [one.get(f"{key}_cell_mesh_mm") for one in (core, other)]
+                unresolved = any(size is not None and size > aim for size in sizes)
                 # Either side of its limit, within `REFINE_DOUBT` under it, or over it but
-                # not beyond doubt (`_fails_beyond_doubt`, already ruled out).
-                if max(r / float(most) for r in readings) >= 1 - REFINE_DOUBT:
-                    doubt = True
-            if not doubt:
+                # not beyond doubt (`_fails_beyond_doubt`, already ruled out): its places
+                # within `REFINE_MARGIN`. Or its worst cell unresolved, in elements coarser
+                # than its aim, and over `REFINE_UNRESOLVED` of it: its places from that share.
+                if share >= 1 - REFINE_DOUBT:
+                    least = min(least or 1.0, 1 - REFINE_MARGIN)
+                elif unresolved and share >= REFINE_UNRESOLVED:
+                    least = min(least or 1.0, REFINE_UNRESOLVED)
+            if least is None:
                 continue
             for one in [*(core.get("near_limit") or []), *(other.get("near_limit") or [])]:
                 limit_pct = core.get(f"{one['reading']}_limit_pct")
                 share = float(one["pct"]) / float(limit_pct) if limit_pct else 0.0
+                if share < least:
+                    continue
                 box = tuple(int(v // reach) for v in one["at"])
                 if box in found and found[box][0] >= share:
                     continue
@@ -3393,6 +3400,12 @@ def refined(fine: dict[str, Any], coarse: dict[str, Any], size: float) -> list[R
     for _, place in ordered:
         place[3]["of"] = len(ordered)
     return [place for _, place in ordered[:REFINE_MOST]]
+
+
+def coarser_refine(places: list[Refine]) -> list[Refine]:
+    """The places a read's coarser mesh is refined round: the finer's, at `REFINE_COARSER`
+    times its size there, as the coarser mesh is coarser elsewhere."""
+    return [(at, REFINE_COARSER * near, half, why) for at, near, half, why in places]
 
 
 def _fails_beyond_doubt(fine: dict[str, Any], coarse: dict[str, Any]) -> bool:
@@ -3839,7 +3852,7 @@ def _run(
                     "refined": places}
             coarse = _solved(
                 assembly, placed, args, round(size * COARSER, 3), cores=cores,
-                coarser_of=fine["closes"], refine=places,
+                coarser_of=fine["closes"], refine=coarser_refine(places),
             )
     force = float(sum(np.linalg.norm(one["force"]) for one in fine["raw_loads"]))
     if fine.get("refined"):

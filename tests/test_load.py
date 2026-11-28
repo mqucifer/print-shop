@@ -1704,6 +1704,21 @@ def test_a_core_read_near_its_limit_in_coarse_elements_is_meshed_again_finer() -
     nearer = {"parts": {"leg": {**over["parts"]["leg"], "across_layers_pct": 1.3,
                                 "across_limit_pct": 1.0}}}
     assert load.refined(nearer, nearer, 20.0)
+    # Under its limit and out of doubt, but its worst cell unresolved, in elements many times
+    # its aim, and reading over `REFINE_UNRESOLVED` of it: refined, as such a cell's reading is
+    # the mesh's (mqucifer/print-shop#363's review). Resolved, or under that share: not.
+    coarse = {"stretch_pct": 0.7 * 1.51, "stretch_cell_mesh_mm": 20.0,
+              "across_cell_mesh_mm": 20.0}
+    assert load.refined(_read_with(coarse), _read_with(coarse), 20.0)
+    resolved = {**coarse, "stretch_cell_mesh_mm": near, "across_cell_mesh_mm": near}
+    assert load.refined(_read_with(resolved), _read_with(resolved), 20.0) == []
+    low = {**coarse, "stretch_pct": 0.5 * 1.51}
+    assert load.refined(_read_with(low), _read_with(low), 20.0) == []
+    # The coarser mesh refined at `REFINE_COARSER` times the finer's size, so the second check
+    # reads the mesh there, not gmsh's spread at one size.
+    places = load.refined(over, under, 20.0)
+    assert [p[1] for p in load.coarser_refine(places)] == [
+        pytest.approx(load.REFINE_COARSER * p[1]) for p in places]
     # No place near its limit in coarse elements: read as it was.
     bare = _read_with({"across_layers_pct": 0.55, "near_limit": []})
     assert load.refined(bare, bare, 20.0) == []
