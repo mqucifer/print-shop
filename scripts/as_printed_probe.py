@@ -19,7 +19,8 @@ It runs `load` as the bench does, in its second image under `load`'s own limits
 - for each printed part, by its number, and each of its cells, by its number: how many of its
   elements are all skin, all core, a laminate along a face, a column along an edge and in
   series where three faces meet, and how far its mesh's core is from Orca's layers' in its
-  bands, short and over, as a share of a band.
+  bands, short and over, as a share of a band; its skin's wedges, its faces with none and why,
+  and how many were made shallower; each core's figures over its cell, and at its elements.
 
 Nothing of any part's name, shape or place is printed. `load`'s own reply stays in the folder's
 `bench-out/`, as any `load`'s does.
@@ -166,7 +167,11 @@ def main(argv: list[str]) -> int:
                   f"{cell.get('column_elements')}, in series {cell.get('series_elements')}; its "
                   f"core against Orca's layers in {cell.get('bands')} bands: short "
                   f"{cell.get('band_short_pct')}%, over {cell.get('band_over_pct')}%; layers "
-                  f"unread {cell.get('layers_unread')}", flush=True)
+                  f"unread {cell.get('layers_unread')}; its skin {cell.get('wedges')} wedges of "
+                  f"the part's {cell.get('part_wedges')} on {cell.get('faces')} faces, none on "
+                  f"{cell.get('faces_held')} held, {cell.get('faces_thin')} thin, "
+                  f"{cell.get('faces_outside')} leaving the part, {cell.get('faces_inverted')} "
+                  f"turned over; {cell.get('wedges_thinned')} made shallower", flush=True)
     return 0
 
 
