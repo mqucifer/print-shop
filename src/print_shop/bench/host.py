@@ -14,6 +14,7 @@ for whichever of them isn't built yet.
 
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import subprocess
@@ -161,23 +162,51 @@ def container(
     image: str = IMAGE,
     env: dict[str, str] | None = None,
     memory: str | None = None,
+    docker: tuple[str, ...] = ("docker",),
+    mounts: tuple[str, str] | None = None,
+    cpuset: str | None = None,
+    labels: dict[str, str] | None = None,
+    by_id: bool = False,
+    deadline: int | None = None,
+    pull: bool = True,
 ) -> list[str]:
     """The `docker run` for a command over a working directory, in either image under the same
     limits, but for the memory a command may be given (`memory_for`). It holds no secret. `env`
-    is more of its environment, none of it a secret either."""
+    is more of its environment, none of it a secret either.
+
+    On another host (`remote`, mqucifer/print-shop#373) it's the same run, by that host's
+    `docker` (`docker -H ssh://HOST`): `mounts` are what /work and the bench's code are there,
+    in place of `work` and this checkout's package, and `cpuset` the cores it's pinned to. It
+    runs the image `by_id`, the ID checked here, never a tag that may since have moved; it's
+    `labels`ed with its memory, so any process can count it without inspecting it; and a
+    `deadline` kills it inside its container (`timeout`), whatever became of this host. Where
+    not `pull`, Docker never fetches an image it hasn't (`--pull never`)."""
     memory = MEMORY if memory is None else memory
+    found_id = image_id(image)
+    if by_id and found_id is None:
+        raise RuntimeError(missing(image))
+    run_as = found_id if by_id and found_id is not None else image
+    if deadline is not None:
+        command = ["timeout", "-s", "KILL", str(deadline), *command]
+    marked = [word for key, value in (labels or {}).items()
+              for word in ("--label", f"{key}={value}")]
     user = f"{os.getuid()}:{os.getgid()}"
     more = [word for key, value in (env or {}).items() for word in ("-e", f"{key}={value}")]
+    work_from, code_from = mounts or (str(work.resolve()), str(HERE))
+    pinned = ["--cpuset-cpus", cpuset] if cpuset else []
     return [
-        "docker",
+        *docker,
         "run",
+        *([] if pull else ["--pull", "never"]),
         "--rm",
         "--name",
         name,
+        *marked,
         "--network",
         "none",
         "--cpus",
         CPUS,
+        *pinned,
         "--memory",
         memory,
         "--memory-swap",
@@ -207,17 +236,17 @@ def container(
         "-e",
         f"BENCH_IMAGE={image}",
         "-e",
-        f"BENCH_IMAGE_ID={image_id(image) or 'unknown'}",
+        f"BENCH_IMAGE_ID={found_id or 'unknown'}",
         "-e",
         f"BENCH_CODE={code_version()}",
         *more,
         "-v",
-        f"{work.resolve()}:/work",
+        f"{work_from}:/work",
         "-v",
-        f"{HERE}:{MOUNT}:ro",
+        f"{code_from}:{MOUNT}:ro",
         "-w",
         workdir,
-        image,
+        run_as,
         *command,
     ]
 
@@ -338,6 +367,14 @@ def run(
     image: str | None = None,
     trace: list[str] | None = None,
     name: str | None = None,
+    docker: tuple[str, ...] = ("docker",),
+    mounts: tuple[str, str] | None = None,
+    cpuset: str | None = None,
+    more_env: dict[str, str] | None = None,
+    labels: dict[str, str] | None = None,
+    by_id: bool = False,
+    margin: int | None = None,
+    pull: bool = True,
 ) -> subprocess.CompletedProcess[str]:
     """Run a bench command, or a script with `python=True`, in a container over `work`. A command
     runs in its own image; a script in the first, or in `image`, where `CAE_IMAGE`'s Python has
@@ -345,7 +382,10 @@ def run(
     it; otherwise a command has its own (`timeout_for`), and `load` may take up a longer one
     (`offered`). What it says as it goes (`STEP_LINE`, `MEMORY_LINE`) isn't passed on, but put
     in `trace` where one's given. Its container is `name`, or a new one's: a caller that names it
-    can stop it (`job.stop_here`)."""
+    can stop it (`job.stop_here`). `docker`, `mounts` and `cpuset` run it on another host, as
+    `container` says; `more_env` is more of its environment there, as the host's name, and
+    `labels` and `by_id` as `container` says. A `margin` gives it a deadline of its own, in its
+    container: that many seconds past the longest it may run."""
     name = name or f"print-bench-{uuid.uuid4().hex[:12]}"
     longer = None
     if timeout is None:
@@ -360,7 +400,7 @@ def run(
     # The command's own limit, so a command that can see it coming stops before it and says
     # where it got to (`load` in two passes, mqucifer/print-shop#301); and the longer one it may
     # take up (mqucifer/print-shop#325).
-    env = {"BENCH_TIMEOUT": str(timeout)}
+    env = {"BENCH_TIMEOUT": str(timeout), **(more_env or {})}
     if longer is not None:
         env[OFFER] = str(longer)
     memory = MEMORY if python else memory_for(args)
@@ -371,10 +411,20 @@ def run(
         image=image or (IMAGE if python else image_for(args)),
         env=env,
         memory=memory,
+        docker=docker,
+        mounts=mounts,
+        cpuset=cpuset,
+        labels=labels,
+        by_id=by_id,
+        deadline=None if margin is None else max(timeout, longer or 0) + margin,
+        pull=pull,
     )
     done, limit, could = _waited(argv, timeout, longer)
     if done is None:
-        subprocess.run(["docker", "kill", name], capture_output=True, check=False)
+        # Bounded: a host that stopped answering mustn't hold the study here for ever.
+        with contextlib.suppress(subprocess.TimeoutExpired):
+            subprocess.run([*docker, "kill", name], capture_output=True, check=False,
+                           timeout=KILL_TIMEOUT)
         stopped = list(STOPPED_SAID)
         if trace is not None:
             trace.extend(stopped)
@@ -452,6 +502,8 @@ def past(limit: int, could: bool, said: list[str] | None = None) -> str:
     return message + _where(said or []) + "\n"
 
 
+#: How long a `docker kill` of a command past its limit may take, in s.
+KILL_TIMEOUT = 60
 #: How often the host looks whether a command has ended, or taken up its longer limit, in s.
 POLL = 0.5
 
@@ -606,6 +658,11 @@ def main(argv: list[str]) -> int:
         return build(*argv[1:2])
     if argv[:1] == ["check"]:
         return check()
+    if argv[:1] in (["hosts"], ["send"]):
+        # The remote hosts the settings name (mqucifer/print-shop#373).
+        from .remote import main as remote_main
+
+        return remote_main(argv)
     work = Path.cwd()
     # `python script.py` in the first image, `freecad script.py` in the second.
     python = argv[:1] in (["python"], ["freecad"])

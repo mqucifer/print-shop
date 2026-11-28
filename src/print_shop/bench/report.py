@@ -60,6 +60,10 @@ def how_it_ran() -> dict[str, Any]:
         "network_up": up,
         "network_routes": len(routes.splitlines()) - 1 if routes else None,
         "cpu_max": read("/sys/fs/cgroup/cpu.max"),
+        # The cores it was pinned to, where it was (`--cpuset-cpus`, mqucifer/print-shop#373), and
+        # the host that ran it, where it was a study's job: "here", or a remote's name.
+        "cpus_pinned": read("/sys/fs/cgroup/cpuset.cpus") or None,
+        "host": os.environ.get("BENCH_HOST"),
         "memory_max": read("/sys/fs/cgroup/memory.max"),
         # The most the container has held so far, in bytes (mqucifer/print-shop#295): read as
         # the reply is saved, so the whole command's peak, where the kernel keeps one.

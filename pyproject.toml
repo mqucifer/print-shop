@@ -57,6 +57,7 @@ markers = [
     "assembly: a cae test of a whole furniture assembly, run by CI in a job of its own (mqucifer/print-shop#295)",
     "proof: a cae proof too long for CI's job, run by hand on the Mac with -m proof (mqucifer/print-shop#325)",
     "printed: a cae test reading a part as printed, minutes a read, in CI's cae-printed job (mqucifer/print-shop#363)",
+    "remote: runs bench jobs on a real remote host over SSH; runs only with PRINT_SHOP_TEST_REMOTE=SSH-TARGET (mqucifer/print-shop#373)",
 ]
 
 [tool.ruff]
