@@ -884,7 +884,7 @@ def test_every_volume_is_labelled_and_stale_ones_are_cleared_before_a_study(
     (root / "volumes" / "model-weights").mkdir()
     (root / "running").mkdir(exist_ok=True)
     (root / "running" / "print-bench-bbbbbbbbbbbb").write_text("3072")
-    assert there.clear_stale() == ["print-bench-aaaaaaaaaaaa-work"]
+    assert there.clear_stale() == (["print-bench-aaaaaaaaaaaa-work"], [])
     left = sorted(p.name for p in (root / "volumes").iterdir() if p.is_dir())
     assert left == ["model-weights", "print-bench-bbbbbbbbbbbb-work",
                     "print-bench-cccccccccccc-work"]
@@ -923,3 +923,37 @@ def test_every_run_there_never_pulls(tmp_path: Path) -> None:
     there.run(_job(tmp_path / "job"), (0, 1))
     runs = [e["argv"] for e in _log(root) if e.get("argv", [""])[0] == "run"]
     assert runs and all(a[1:3] == ["--pull", "never"] for a in runs)
+
+
+# --------------------------------------------------------------------------
+# The third review's clean-ups
+# --------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("fails", ["hold", "count"])
+def test_a_reservation_that_fails_after_its_hold_leaves_nothing_held(
+    tmp_path: Path, fails: str,
+) -> None:
+    """SSH failing as the hold is made (made, then no reply), or as the count is read again
+    after: the reservation is let go and its hold removed, by its own name, before it's raised."""
+    root = tmp_path / "spark"
+    there = _remote(root)
+    (root / f"{fails}_fails").write_text("")
+    with pytest.raises(HostLost):
+        there.reserve(3072)
+    assert there.held() == set() and not there._holds
+    removed = [n for e in _log(root) for n in e.get("rm", []) if n.endswith("-hold")]
+    assert removed and not [p for p in (root / "running").iterdir() if p.name.endswith("-hold")]
+
+
+def test_clear_stale_says_what_it_removed_and_what_it_couldnt(tmp_path: Path) -> None:
+    root = tmp_path / "spark"
+    there = _remote(root)
+    old = str(int(time.time()) - remote.STALE_S - 60)
+    for job in ("print-bench-aaaaaaaaaaaa", "print-bench-bbbbbbbbbbbb"):
+        (root / "volumes" / f"{job}-work").mkdir()
+        (root / "volumes" / f"{job}-work.labels").write_text(json.dumps(
+            {"print-shop.bench.job": job, "print-shop.bench.created": old}))
+    (root / "rm_fails").write_text("print-bench-bbbbbbbbbbbb-work")
+    assert there.clear_stale() == (["print-bench-aaaaaaaaaaaa-work"],
+                                   ["print-bench-bbbbbbbbbbbb-work"])

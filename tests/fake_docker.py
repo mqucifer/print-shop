@@ -132,6 +132,9 @@ def _run(argv: list[str], root: Path) -> int:
     if "-d" in flags:
         # A hold: it runs, as `sleep` does, until it's removed.
         (running / options["--name"][0]).write_text(said.strip())
+        if (root / "hold_fails").exists():
+            print("ssh: connection reset by peer", file=sys.stderr)
+            return 255
         print("0" * 64)
         return 0
     mounts = _mounts(options.get("-v", []), root)
@@ -242,11 +245,18 @@ def main(argv: list[str]) -> int:
             print(name)
             return 0
         case ["volume", "rm", "-f", *names]:
+            failing = (root / "rm_fails").read_text().split() if (
+                root / "rm_fails").exists() else []
             for name in names:
+                if name in failing:
+                    print(f"Error response from daemon: remove {name}: volume is in use",
+                          file=sys.stderr)
+                    continue
                 shutil.rmtree(root / "volumes" / name, ignore_errors=True)
                 (root / "volumes" / f"{name}.labels").unlink(missing_ok=True)
+                print(name)
             _log(root, {"volume": "rm", "names": names})
-            return 0
+            return 1 if any(n in failing for n in names) else 0
         case ["volume", "ls", "--filter", _, "--format", _]:
             for path in sorted((root / "volumes").glob("*.labels")):
                 labels = json.loads(path.read_text())
@@ -271,6 +281,11 @@ def main(argv: list[str]) -> int:
             _log(root, {"kill": name})
             return 0
         case ["ps", "-a", "--filter", _, "--format", _] | ["ps", "--filter", _, "--format", _]:
+            holding = (root / "running").exists() and any(
+                p.name.endswith("-hold") for p in (root / "running").iterdir())
+            if (root / "count_fails").exists() and holding:
+                print("ssh: connection reset by peer", file=sys.stderr)
+                return 255
             others = root / "others"
             if others.exists():
                 print(others.read_text(), end="")

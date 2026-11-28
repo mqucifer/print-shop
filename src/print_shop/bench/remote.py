@@ -41,6 +41,7 @@ Standard library only: this runs outside the image.
 
 from __future__ import annotations
 
+import contextlib
 import io
 import os
 import re
@@ -476,14 +477,18 @@ class Remote:
             # disk: so another process counts it whole while its files go over, before its own
             # container starts. Then counted again, now another's hold made at the same moment
             # shows, and let go where the two together don't fit.
-            self._hold(name, memory_mb)
             self._held[name] = memory_mb
             try:
+                self._hold(name, memory_mb)
                 self._room(free, disk, memory_mb, pending, self.others(self._held), len(self._held))
-            except NoRoom:
+            except BaseException:
+                # NoRoom, or SSH failing as the hold was made or the count read again: the
+                # reservation is let go, and its hold removed by its own name where it can be,
+                # though `docker run -d` may have made it before it failed to say so.
                 self._held.pop(name, None)
                 self._holds.discard(name)
-                self._call("rm", "-f", f"{name}-hold", check=False, timeout=60)
+                with contextlib.suppress(HostLost):
+                    self._call("rm", "-f", f"{name}-hold", check=False, timeout=60)
                 raise
             return name
 
@@ -635,9 +640,10 @@ class Remote:
             for name in names:
                 self._call("kill", name, check=False, timeout=60)
 
-    def clear_stale(self) -> list[str]:
+    def clear_stale(self) -> tuple[list[str], list[str]]:
         """Remove print-shop's volumes on the host that a process left (its label's), older
-        than `STALE_S`, whose job's container is gone; and say which, by name. Nothing else."""
+        than `STALE_S`, whose job's container is gone. Nothing else. Which it removed, and which
+        it tried to and couldn't, by name: Docker says each one it removed."""
         listed = self._call("volume", "ls", "--filter", f"label={JOB_LABEL}", "--format",
                             f'{{{{.Name}}}} {{{{.Label "{JOB_LABEL}"}}}} '
                             f'{{{{.Label "{CREATED_LABEL}"}}}}')
@@ -653,9 +659,11 @@ class Remote:
             if (now - int(made) > STALE_S and job not in mine
                     and not any(a.startswith(job) for a in alive)):
                 stale.append(volume)
-        if stale:
-            self._call("volume", "rm", "-f", *stale, check=False, timeout=120)
-        return stale
+        if not stale:
+            return [], []
+        gone = set(self._call("volume", "rm", "-f", *stale, check=False,
+                              timeout=120).stdout.decode(errors="replace").split())
+        return [v for v in stale if v in gone], [v for v in stale if v not in gone]
 
     def _sized(self, stderr: bytes, said: str) -> None:
         """Say a job whose /work came to more than `WORK_GB`, as `du -sk` gave it."""

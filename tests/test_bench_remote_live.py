@@ -118,7 +118,9 @@ def there() -> Remote:
     found = Remote(stated)
     assert found.refused() is None, "its images are this host's, by ID"
     # As a study does before it starts there: print-shop's own volumes an earlier one left.
-    print(f"\nvolumes left by earlier runs, removed: {found.clear_stale() or 'none'}")
+    removed, kept = found.clear_stale()
+    print(f"\nvolumes left by earlier runs, removed: {removed or 'none'}, couldn't: "
+          f"{kept or 'none'}")
     return found
 
 

@@ -119,9 +119,13 @@ def _with_remotes(here: Slots | Pool, env: dict[str, str]) -> Slots | Pool:
             print(f"not reading on {stated.name}: {why}", file=sys.stderr, flush=True)
             continue
         # What an earlier process left there past its deadline, its own label's, said.
-        for volume in found.clear_stale():
+        removed, kept = found.clear_stale()
+        for volume in removed:
             print(f"removed {volume} on {stated.name}: left by an earlier study",
                   file=sys.stderr, flush=True)
+        for volume in kept:
+            print(f"couldn't remove {volume} on {stated.name}, left by an earlier study: "
+                  "remove it there with `docker volume rm`", file=sys.stderr, flush=True)
         remotes.append(found)
     return Pool(here, remotes) if remotes and isinstance(here, Slots) else here
 
