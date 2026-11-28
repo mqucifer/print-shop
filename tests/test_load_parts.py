@@ -1339,6 +1339,33 @@ def test_the_bands_probe_says_how_it_was_read_and_what_stopped_the_whole_by_kind
     ]
 
 
+def test_the_bands_probe_counts_elements_turned_inside_out_and_those_in_no_band_s_leading() -> None:
+    """mqucifer/print-shop#382: the probe says a band's bound read for elements turned inside out
+    in its leading by its kind, and where they leave the reply no answer, how many there are and
+    how many are in no glass band's leading, by counts alone. Made-up replies only."""
+    probe = _bands_probe()
+    assert probe.kinds(
+        "CalculiX solved nothing: an element of the mesh, at most 7 mm, is turned inside out, and "
+        "each one it found is in a glass band's leading, frame-a's, the faces nearest it within "
+        "the band: 3 element(s), the first in frame-a"
+    ) == ["inverted in a band's leading"]
+    stopped = {
+        "verdict": "NO ANSWER",
+        "why": "CalculiX solved nothing: an element of the mesh, at most 7 mm, is turned inside "
+        "out: 5 element(s), the first in leg-2, round (1, 2, 3), its longest side 0.0400 mm; 2 of "
+        "the 5 in no glass band's leading, so no band is left out for them. One with a curved "
+        "side on a small hole or a tight round can be: give a finer --mesh",
+    }
+    said = probe.inverted(stopped)
+    assert said == ["turned inside out: 5 element(s)", "in no glass band's leading: 2 of 5"]
+    assert not any(n in " ".join(said) for n in ("leg-2", "0.0400", "7 mm"))
+    unfound = dict(stopped, why=stopped["why"].split("; 2 of")[0] + "; whether they're in a glass "
+                   "band's leading couldn't be found: load stopped ...")  # fmt: skip
+    assert probe.inverted(unfound)[1:] == ["in a glass band's leading: couldn't be found"]
+    assert probe.inverted({"verdict": "OK", "why": stopped["why"]}) == []
+    assert probe.inverted({"verdict": "NO ANSWER", "why": "gmsh made no mesh"}) == []
+
+
 # The operator's cold review of mqucifer/print-shop#376
 
 

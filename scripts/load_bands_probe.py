@@ -12,12 +12,13 @@ never its reasons; whether the container was killed; whether the whole was read,
 two, or each band left out, under a weight or lifted with its weight kept; what stopped the
 whole, as a kind (`time`, `memory meshing`, `memory reading the mesh back`, `memory setting
 the mesh up`, `memory in load's own process`, `memory writing CalculiX's input`, `memory reading
-CalculiX's results`, `memory solving`, `no mesh`, `unparted`, `other`),
-never its words; each mesh's elements and nodes as `load` set it up, counts, and the container's
-memory then; how many parts were read without their band and how many of those had their
-band's weight hung from where it met them; the try's and the band's seconds; and each step as
-`load_trace.py` says it. No figure of a part, joint, load or mesh size is printed, and the reply
-`load` saves stays where `load` saves it.
+CalculiX's results`, `memory solving`, `inverted in a band's leading`, `no mesh`, `unparted`,
+`other`), never its words; where it's no answer for elements turned inside out, how many, and how
+many of them are in no glass band's leading (mqucifer/print-shop#382); each mesh's elements
+and nodes as `load` set it up, counts, and the container's memory then; how many parts were read
+without their band and how many of those had their band's weight hung from where it met them;
+the try's and the band's seconds; and each step as `load_trace.py` says it. No figure of a part,
+joint, load or mesh size is printed, and the reply `load` saves stays where `load` saves it.
 """
 
 from __future__ import annotations
@@ -36,6 +37,7 @@ from print_shop.bench import host  # noqa: E402
 
 #: What stopped a whole, by its words, as a kind: the first that matches each part of a why.
 KINDS = (
+    ("inverted in a band's leading", re.compile(r"each one it found is in a glass band's leading")),
     ("time", re.compile(r"met the container's time|wouldn't end inside the container's")),
     ("memory meshing", re.compile(r"gmsh made no mesh.*met the container's memory")),
     ("memory reading the mesh back", re.compile(r"GiB read back, where the container's memory")),
@@ -116,6 +118,28 @@ def summary(record: dict[str, Any]) -> list[str]:
     return lines
 
 
+#: `load`'s counts where elements turned inside out leave it no answer (mqucifer/print-shop#382).
+INVERTED = re.compile(r"turned inside out: (\d+) element\(s\)")
+ELSEWHERE = re.compile(r"; (\d+) of the (\d+) in no glass band's leading")
+UNFOUND = "whether they're in a glass band's leading couldn't be found"
+
+
+def inverted(record: dict[str, Any]) -> list[str]:
+    """Where the reply is no answer for elements turned inside out, their counts alone: how
+    many, and how many in no glass band's leading, or that it couldn't be found."""
+    why = str(record.get("why", ""))
+    if record.get("verdict") != "NO ANSWER" or not why.startswith("CalculiX solved nothing"):
+        return []
+    found = INVERTED.search(why)
+    lines = [f"turned inside out: {found.group(1) if found else 'uncounted'} element(s)"]
+    elsewhere = ELSEWHERE.search(why)
+    if elsewhere:
+        lines.append(f"in no glass band's leading: {elsewhere.group(1)} of {elsewhere.group(2)}")
+    elif UNFOUND in why:
+        lines.append("in a glass band's leading: couldn't be found")
+    return lines
+
+
 def main(argv: list[str]) -> int:
     if argv[:1] != ["load"] or len(argv) < 2:
         print("give a load command: load ASSEMBLY.json ARGS...")
@@ -132,7 +156,8 @@ def main(argv: list[str]) -> int:
         print("killed by the kernel")
     saved = re.search(r"saved: (\S+)\.txt and \.json", done.stdout)
     if saved:
-        for line in summary(json.loads((Path.cwd() / f"{saved.group(1)}.json").read_text())):
+        record = json.loads((Path.cwd() / f"{saved.group(1)}.json").read_text())
+        for line in summary(record) + inverted(record):
             print(line)
     else:
         print("nothing saved")
