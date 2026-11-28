@@ -1280,9 +1280,33 @@ def tile() -> None:
     shape = shape.cut(box((20, 25, TILE_T - 4), (40, 35, TILE_T + 1)))
     shape = shape.fuse(Part.makeCylinder(3, 4, App.Vector(30, 25, TILE_T - 4))).removeSplitter()
     save(shape, out / "tile.step")
-    for kind, extra in (("", {}), ("printed-", {"print": {**PRINT, "walls": 2, "infill": 20}})):
+    printing = {"print": {**PRINT, "walls": 2, "infill": 20}}
+    for kind, extra in (("", {}), ("printed-", printing)):
         row = {"name": "tile", "file": "tile.step", "layers": "z", **extra}
         assembly(out / f"{kind}tile.json", [row], held=[{"plane": "z=0", "how": "fixed"}])
+    # Its top's four outer edges chamfered 1 mm, its skin on sloped faces (mqucifer/print-shop#363).
+    def on_rim(edge: Any) -> bool:
+        span = edge.BoundBox
+        return bool(type(edge.Curve).__name__ == "Line" and span.ZMin > TILE_T - 1e-6
+                    and (min(span.XMax, span.YMax) < 1e-6
+                         or max(span.XMin, span.YMin) > TILE_SIDE - 1e-6))
+
+    save(shape.makeChamfer(1.0, [e for e in shape.Edges if on_rim(e)]),
+         out / "tile-chamfered.step")
+    row = {"name": "tile", "file": "tile-chamfered.step", "layers": "z", **printing}
+    assembly(out / "printed-tile-chamfered.json", [row],
+             held=[{"plane": "z=0", "how": "fixed"}])
+    # And with a solid pin bonded in each of its holes, below its counterbore: parts beside a
+    # printed one, each to keep elements of its own (mqucifer/print-shop#363's real tile).
+    rows: Rows = [{"name": "tile", "file": "tile.step", "layers": "z", **printing}]
+    joints: Rows = []
+    for k, (x, y) in enumerate(((10, 10), (50, 10), (10, 50), (50, 50)), 1):
+        pin = Part.makeCylinder(TILE_HOLE_R, TILE_T - TILE_BORE_DEEP, App.Vector(x, y, 0))
+        save(pin, out / f"tile-pin-{k}.step")
+        rows.append({"name": f"pin{k}", "file": f"tile-pin-{k}.step", "layers": "z"})
+        joints.append({"between": ["tile", f"pin{k}"], "kind": "bonded"})
+    assembly(out / "printed-tile-pinned.json", rows, joints,
+             [{"plane": "z=0", "how": "fixed"}])  # fmt: skip
 
 
 #: The capped top (mqucifer/print-shop#346): its side and thickness, the counterbore's radius

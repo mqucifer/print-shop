@@ -268,9 +268,8 @@ def llm_chat(config: LLMConfig, stop: threading.Event | None = None) -> Chat:
 
 
 def _load_memory(case: Case) -> int:
-    """The memory `load` runs in under a case, in MiB: its container's own (`host.memory_for`),
-    a part read as printed's, as every candidate is (mqucifer/print-shop#363)."""
-    return megabytes(host.memory_for(["load", "-", *case.args], printed=True))
+    """The memory `load` runs in under a case, in MiB: its container's own (`host.memory_for`)."""
+    return megabytes(host.memory_for(["load", "-", *case.args]))
 
 
 def read_candidate(part: StudyPart, candidate: Candidate,

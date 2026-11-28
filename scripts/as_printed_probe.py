@@ -6,8 +6,8 @@ Run from the folder the assembly is in, with the words `load` would be given:
     uv run python <print-shop>/scripts/as_printed_probe.py ASSEMBLY.json --weight KG --at X,Y,Z
         [any other of load's words]
 
-It runs `load` as the bench does, in its second image under the limits a read as printed has
-(`host.PRINTED_MEMORY`, `host.PRINTED`), and says of it only counts, verdicts and seconds:
+It runs `load` as the bench does, in its second image under `load`'s own limits
+(`host.memory_for`, `host.timeout_for`), and says of it only counts, verdicts and seconds:
 
 - the mesh's elements and nodes, the seconds it meshed in and solved in, the seconds in all,
   and the most memory the container held;
@@ -103,7 +103,7 @@ def main(argv: list[str]) -> int:
     args = ["load", *argv]
     printed = host.reads_printed(args, work)
     print(f"read as printed: {'yes' if printed else 'no'}; limits "
-          f"{host.memory_for(args, printed)} and {host.timeout_for(args, printed)} s", flush=True)
+          f"{host.memory_for(args)} and {host.timeout_for(args)} s", flush=True)
     names = [str(p.get("name")) for p in json.loads((work / argv[0]).read_text()).get("parts", [])]
     began = time.time()
     trace: list[str] = []

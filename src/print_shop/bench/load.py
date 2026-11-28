@@ -134,6 +134,7 @@ from . import (
     load_through,
     progress,
     way_in,
+    wedges,
 )
 from .assembly import AXES, DIAMETER, Assembly, Held, Joint, PartAt, read
 from .cae import ccx_one_thread, freecad, give_back, gmsh, tidy_mesh, tidy_solve
@@ -570,6 +571,14 @@ class _Model:
         #: core, -1 for a part read solid; and each printed part's cells as read (`_classify`).
         self.element_step: np.ndarray | None = None
         self.printed_cells: dict[str, list[dict[str, Any]]] = {}
+        #: Each printed part's skin as wedges on its faces (`wedges.layer`), and all of them
+        #: numbered as CalculiX takes them: their nodes, their part, their stiffness and set.
+        self.skin_layers: dict[str, wedges.Layer] = {}
+        self.wedge_numbers = np.zeros((0, 15), dtype=int)
+        self.wedge_part = np.zeros(0, dtype=int)
+        self.wedge_tensor = np.zeros((0, 3, 3, 3, 3))
+        self.wedge_set: list[str] = []
+        self._wedge_rows: np.ndarray | None = None
         #: Each set's map from its elements' strain to its core's own (`classify.core_strain`).
         self.core_strains: list[np.ndarray] = []
         #: Which of each element's `classify.POINTS` points are core, as its layers have it.
@@ -688,47 +697,6 @@ class _Model:
         as well, its skin and core read from its layers (mqucifer/print-shop#363)."""
         return [solid]
 
-    def _near_walls(self, sizes: str) -> str:
-        """gmsh's local sizes, `sizes`, and each printed part's faces meshed at `NEAR` of its
-        walls, out to its walls' depth and growing to the mesh's own past it, so that its
-        walls' band is a few elements deep (mqucifer/print-shop#363): the least of them all."""
-        if not self.cores:
-            return sizes
-        walls = min(layered.cells[0].walls_mm for layered in self.cores.values())
-        near = self.size_near()
-        if near >= self.size:
-            return sizes
-        surfaces = sorted({
-            int(self._face_name(face).removeprefix("Face"))
-            for part, solid in zip(self.assembly.parts, self.solids, strict=True)
-            if part.name in self.cores
-            for face in solid.Faces
-        })
-        taken = [int(n) for n in re.findall(r"^Field\[(\d+)\]", sizes, re.M)]
-        distance = max(taken, default=0) + 1
-        threshold = distance + 1
-        lines = [
-            "// the printed parts' faces, meshed at their walls (mqucifer/print-shop#363)",
-            f"Field[{distance}] = Distance;",
-            f"Field[{distance}].SurfacesList = {{{', '.join(map(str, surfaces))}}};",
-            f"Field[{distance}].Sampling = {close_faces.SAMPLING};",
-            f"Field[{threshold}] = Threshold;",
-            f"Field[{threshold}].InField = {distance};",
-            f"Field[{threshold}].SizeMin = {near:.6g};",
-            f"Field[{threshold}].SizeMax = {self.size:.6g};",
-            f"Field[{threshold}].DistMin = {walls:.6g};",
-            f"Field[{threshold}].DistMax = {walls + close_faces.GRADE * (self.size - near):.6g};",
-            f"Field[{threshold}].StopAtDistMax = 1;",
-        ]
-        least = re.search(r"^Field\[(\d+)\] = Min;\nField\[\1\]\.FieldsList = \{([^}]*)\};",
-                          sizes, re.M)  # fmt: skip
-        if least is None:
-            return "\n".join([*lines, f"Background Field = {threshold};", ""]) + sizes
-        listed = f"{least.group(2)}, {threshold}"
-        joined = sizes.replace(least.group(0), f"Field[{least.group(1)}] = Min;\n"
-                               f"Field[{least.group(1)}].FieldsList = {{{listed}}};")
-        return "\n".join(lines) + "\n" + joined
-
     def _classify(self) -> None:
         """Each element of each printed part read by its layers (`classify.shares`,
         mqucifer/print-shop#363): skin, core, or a share of each in `classify.STEPS` steps. A
@@ -770,10 +738,20 @@ class _Model:
 
             corners = points[corner_rows[mine]]
             own = to_own(corners.reshape(-1, 3)).reshape(-1, 4, 3)
-            read = classify.shares(layered, corners, to_own)
+            true = classify.shares(layered, corners, to_own)
+            # Its skin as wedges on its faces (`wedges`): where one lies over the solid, the
+            # solid is core, and the wedge the skin less the core counted twice under it.
+            skin_layer = self._skin_layer(k, layered, points, row, [elements[i] for i in mine],
+                                          to_own)  # fmt: skip
+            self.skin_layers[part.name] = skin_layer
+            in_wedge = wedges.covered(true.points @ turn.T + at, corners.mean(axis=1),
+                                      skin_layer)  # fmt: skip
+            covered = in_wedge & ~true.core
+            material = true.core | covered
+            read = classify.Read(true.cells, material.mean(axis=1), true.points, material)
             step_of = classify.step_of(read.share)
             steps[mine] = step_of
-            core_points[mine] = read.core
+            core_points[mine] = true.core
             mixed = (step_of > 0) & (step_of < classify.STEPS)
             faces, normals = classify.boundary(own, numbers[mine])
             ways, blend = classify.band_normals(read, mixed, own.mean(axis=1), faces, normals)
@@ -815,20 +793,37 @@ class _Model:
             edges = own[:, 1:] - own[:, :1]
             volume = np.abs(np.einsum("ni,ni->n", np.cross(edges[:, 0], edges[:, 1]),
                                       edges[:, 2])) / 6  # fmt: skip
-            bands = classify.checked(layered, own, read, classify.band_for(self.size_near()))
+            wedge_volume, _ = wedges.volumes(skin_layer.places)
+            # What of the solid a wedge lies over, at the same points Orca's core is read at:
+            # where that's core by its layers, a wedge is deeper than its skin.
+            point_volume = np.repeat(volume / classify.POINTS, classify.POINTS).reshape(
+                -1, classify.POINTS)
+            bands = classify.checked(layered, own, read, classify.band_for(self.size),
+                                     less=(true.points.reshape(-1, 3),
+                                           (in_wedge * point_volume).ravel()),
+                                     orca=true.core)
+            # Each region's own volume and core, at each point's own cell, not its element's: the
+            # mesh is coarser than a band of layers or a box's edge.
+            point_cells = layered.cell_of(true.points.reshape(-1, 3)).reshape(
+                -1, classify.POINTS)
             said = []
             for c in np.unique(read.cells):
                 cell = layered.cells[int(c)]
                 in_cell = read.cells == c
                 said.append({
+                    **infill.core(cell.settings, part.material).said(),
                     "cell": cell.name,
                     "settings": cell.settings.given(),
                     "said": cell.settings.said(),
                     "walls_mm": round(cell.walls_mm, 3),
                     "top_mm": round(cell.top_mm, 3),
                     "bottom_mm": round(cell.bottom_mm, 3),
-                    "volume_mm3": round(float(volume[in_cell].sum()), 1),
-                    "core_mm3": round(float((read.share * volume)[in_cell].sum()), 1),
+                    "volume_mm3": round(float(point_volume[point_cells == c].sum()), 1),
+                    "core_mm3": round(float((true.core * point_volume)[point_cells == c].sum()), 1),
+                    "wedges": int((skin_layer.cells == c).sum()),
+                    "wedges_mm3": round(float(wedge_volume[skin_layer.cells == c].sum()), 1),
+                    "covered_mm3": round(float((covered * point_volume)[point_cells == c].sum()),
+                                         1),  # fmt: skip
                     # The scale its core's strain is read at (`_core_read`).
                     "cell_mm": round(infill.cell_mm(
                         str(cell.settings.pattern), float(cell.settings.infill or 0),
@@ -844,10 +839,14 @@ class _Model:
                     "series_elements": int((in_cell & mixed & (blend == classify.SERIES)).sum()),
                     "layers_unread": bands.unread,
                     "bands": bands.bands,
-                    "band_mm": classify.band_for(self.size_near()),
+                    "band_mm": classify.band_for(self.size),
+                    # Its faces' triangles with no wedge, and why (`wedges.layer`).
+                    "faces_thin": skin_layer.thin, "faces_outside": skin_layer.outside,
+                    "faces_inverted": skin_layer.inverted, "faces_held": skin_layer.held,
+                    "wedges_thinned": skin_layer.thinned,
+                    "faces": skin_layer.triangles, "part_wedges": len(skin_layer.wedges),
                     "band_short_pct": round(100 * bands.short, 2),
                     "band_over_pct": round(100 * bands.over, 2),
-                    **infill.core(cell.settings, part.material).said(),
                 })
             self.printed_cells[part.name] = said
         self.element_step = steps
@@ -856,15 +855,86 @@ class _Model:
         self.core_tensors = tensors
         self.core_strains = recovered
         self.core_points = core_points
+        self._number_wedges(order, points, skin)
 
-    def size_near(self) -> float:
-        """The mesh's size at a printed part's faces (`_near_walls`), in mm: `NEAR` of its
-        walls, on both of a solve's meshes, so that its second check reads a coarser mesh
-        inside it, not a coarser band of its walls (mqucifer/print-shop#363)."""
-        if not self.cores:
-            return self.size
-        walls = min(float(layered.cells[0].walls_mm) for layered in self.cores.values())
-        return float(min(self.size, NEAR * walls))
+    def _number_wedges(self, order: list[int], points: np.ndarray, skin: np.ndarray) -> None:
+        """Each printed part's wedges (`skin_layers`) numbered as CalculiX takes them: their new
+        nodes after the mesh's, added to `nodes`, and each wedge's stiffness the skin's less its
+        cell's core, which the solid under it already is (mqucifer/print-shop#363)."""
+        base = max(self.nodes) + 1
+        numbers, parts, tensors, cells = [], [], [], []
+        frame_of = {p.name: _frame(p) for p in self.assembly.parts}
+        for k, part in enumerate(self.assembly.parts):
+            layer = self.skin_layers.get(part.name)
+            if layer is None or not len(layer.wedges):
+                continue
+            layered = self.cores[part.name]
+            for i, point in enumerate(layer.new):
+                self.nodes[base + i] = np.asarray(point, dtype=float)
+            known = np.array(order)
+            rows = layer.wedges
+            mapped = np.where(rows < len(points), known[np.minimum(rows, len(points) - 1)],
+                              base + rows - len(points))  # fmt: skip
+            base += len(layer.new)
+            numbers.append(mapped)
+            parts.append(np.full(len(rows), k))
+            for c in layer.cells:
+                cell = layered.cells[int(c)]
+                core = infill.core(cell.settings, part.material).stiffness(*frame_of[part.name])
+                tensors.append(skin - core)
+                cells.append(f"{k}_{int(c)}")
+        if not numbers:
+            return
+        self.wedge_numbers = np.concatenate(numbers)
+        self.wedge_part = np.concatenate(parts)
+        self.wedge_tensor = np.array(tensors)
+        self.wedge_set = cells
+
+    def _skin_layer(self, k: int, layered: classify.Layered, points: np.ndarray,
+                    row: dict[int, int], elements: list[int], to_own: Any) -> wedges.Layer:
+        """A printed part's skin as wedges on its faces (`wedges.layer`, mqucifer/print-shop#363):
+        each of its boundary triangles as deep as its cell's skin is there, where its layers
+        have core behind it, its inner nodes held within the part's own solid."""
+        import FreeCAD as App
+
+        part = self.assembly.parts[k]
+        given = np.array([self.fem.getElementNodes(e) for e in elements])
+        wired = np.vectorize(row.__getitem__)(given)
+        rows, normals = wedges.faces_of(wired, points, MIDS)
+        turn = part.matrix()
+        middles = to_own(points[rows[:, :3]].mean(axis=1))
+        ways = normals @ turn
+        cells = layered.cell_of(middles)
+        of = layered.cells
+        depth = wedges.depths(
+            ways, layered.layers, layered.up,
+            np.array([of[c].walls_mm for c in cells]), np.array([of[c].top_mm for c in cells]),
+            np.array([of[c].bottom_mm for c in cells]))
+        solid = self.solids[k]
+
+        def inside(given: np.ndarray) -> np.ndarray:
+            return np.array([solid.isInside(App.Vector(*p), 1e-6, True) for p in given],
+                            dtype=bool)  # fmt: skip
+
+        # Room behind its skin for the skin of the face across from it, and Orca's opening of
+        # the core between, or the two faces' wedges would overlap: a web or a fin thinner
+        # than that is all skin, as its layers read it.
+        opening = np.array([2 * as_printed.open_radius(of[c].settings.line_width,
+                                                       of[c].settings.layer_height)
+                            for c in cells])  # fmt: skip
+        behind = points[rows[:, :3]].mean(axis=1) - (
+            wedges.BEHIND * depth + opening)[:, None] * normals
+        over_core = inside(behind)
+        # A held face's skin is held: a wedge there, its outer face held and its inner tied to
+        # nothing but its neighbours, would be strained by them alone. Its solid's layers read it.
+        held_nodes = {row[n] for f in [*self.fixed, *sum(self.standing.values(), [])]
+                      for n in self.fem.getNodesByFace(f) if n in row}  # fmt: skip
+        held = np.array([all(int(n) in held_nodes for n in r[:3]) for r in rows], dtype=bool)
+
+        built = wedges.layer(points, rows, normals, depth, cells, over_core & ~held, inside)
+        built.thin = int((~over_core & ~held).sum())
+        built.held = int(held.sum())
+        return built
 
     def _face_name(self, face: Any) -> str:
         # Numbered from the joined shape as it is now.
@@ -997,9 +1067,7 @@ class _Model:
         # the start (mqucifer/print-shop#346).
         with step("gmsh's mesh of the joined parts"):
             tools = self._gmsh(
-                GmshTools, mesh,
-                self._near_walls(close_faces.fields(self.closes, self.size, self.local_scale)),
-            )
+                GmshTools, mesh, close_faces.fields(self.closes, self.size, self.local_scale))
         said = None if mesh.FemMesh.VolumeCount else _gmsh_said(tools)
         for _ in range(RETRIES):
             if said is None or not CROSSED.search(said):
@@ -1017,7 +1085,7 @@ class _Model:
             if not more:
                 break
             with step("gmsh's mesh of the joined parts, finer where faces were close"):
-                tools = self._gmsh(GmshTools, mesh, self._near_walls(sizes))
+                tools = self._gmsh(GmshTools, mesh, sizes)
             said = None if mesh.FemMesh.VolumeCount else _gmsh_said(tools)
         words = said
         if said is not None:
@@ -1312,6 +1380,9 @@ class _Model:
             written += elements(f"CORE{number}", mine)
             written += f"*MATERIAL, NAME=CORE{number}\n" + _aniso(tensor)
             lines += f"*SOLID SECTION, ELSET=CORE{number}, MATERIAL=CORE{number}\n"
+        written += self._wedges_written()
+        lines += "".join(f"*SOLID SECTION, ELSET=WEDGE{name}, MATERIAL=WEDGE{name}\n"
+                         for name in dict.fromkeys(self.wedge_set))
         start, end = sections[0].span()
         text = text[:start] + written + lines.rstrip("\n") + text[end:]
         Path(path).write_text(text)
@@ -1320,6 +1391,50 @@ class _Model:
             [isotropic(material_of.modulus_mpa, material_of.poisson), *self.core_tensors]
         )
         self.element_kind = kinds + 1
+
+    def _wedges_written(self) -> str:
+        """The printed parts' wedges as CalculiX's input: their new nodes, in `Nall` so their
+        movement is printed with the rest; each set's C3D15s, numbered after every element of
+        the mesh's; and each set's material, the skin's stiffness less its cell's core."""
+        if not len(self.wedge_numbers):
+            return ""
+        new = sorted(n for n in self.nodes if n > max(self.fem.Nodes))
+        text = "*NODE, NSET=Nall\n" + "".join(
+            f"{n}, {self.nodes[n][0]:.9g}, {self.nodes[n][1]:.9g}, {self.nodes[n][2]:.9g}\n"
+            for n in new)
+        first = max([*self.fem.Volumes, *self.fem.Faces, *self.fem.Edges, 0]) + 1
+        self.wedge_elements = np.arange(first, first + len(self.wedge_numbers))
+        by_set: dict[str, list[int]] = {}
+        for k, name in enumerate(self.wedge_set):
+            by_set.setdefault(name, []).append(k)
+        for name, which in by_set.items():
+            text += f"*ELEMENT, TYPE=C3D15, ELSET=WEDGE{name}\n" + "".join(
+                f"{self.wedge_elements[k]}, "
+                + ", ".join(map(str, self.wedge_numbers[k][:8])) + ",\n"
+                + ", ".join(map(str, self.wedge_numbers[k][8:])) + "\n"
+                for k in which)
+            text += f"*MATERIAL, NAME=WEDGE{name}\n" + _aniso(self.wedge_tensor[which[0]])
+        return text
+
+    def _wedge_wired(self) -> np.ndarray:
+        """Each wedge's 15 nodes as rows of the solved nodes."""
+        if self._wedge_rows is None:
+            self._wedge_rows = np.vectorize(self.row.__getitem__, otypes=[int])(
+                self.wedge_numbers) if len(self.wedge_numbers) else np.zeros((0, 15), dtype=int)
+        return self._wedge_rows
+
+    def _wedge_forces(self, moved: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+        """The force each wedge puts on each of its nodes, with each node `moved`, and their
+        rows, by CalculiX's own nine points (`wedges.forces`)."""
+        rows = self._wedge_wired()
+        if not len(rows):
+            return rows, np.zeros((0, 15, 3))
+        found = np.zeros((len(rows), 15, 3))
+        for start in range(0, len(rows), GROUP):
+            some = slice(start, start + GROUP)
+            found[some] = wedges.forces(self.points[rows[some]], moved[rows[some]],
+                                        self.wedge_tensor[some])  # fmt: skip
+        return rows, found
 
     def _stiff(self, rows: slice | None = None) -> tuple[Any, Any, np.ndarray | None]:
         """The elements' stiffness for `element_forces`, of `rows`: the material's modulus and
@@ -1412,8 +1527,8 @@ class _Model:
             text = _cload(text, left, self.row)
         self.residuals = runs
         why = (
-            "a part is read as printed, meshed finer at its faces, so it's solved by CalculiX's "
-            "iterative solver, which holds it in a fraction of the direct one's memory,"
+            "a part is read as printed, and it's solved by CalculiX's iterative solver, as it "
+            "was asked to be,"
             if printed
             else f"CalculiX's direct solver met the container's memory, {limit / 2**30:g} GiB, "
             "as the container's own count of what it stopped for memory says, so it's solved by "
@@ -1476,7 +1591,12 @@ class _Model:
         # To CalculiX's seven figures where it printed them, as the balance reads them.
         moved = self.printed if self.printed is not None else self.moved
         forces = element_forces(self.points[wired], moved[wired], *self._stiff())
-        return self._left(wired, forces)
+        left = self._left(wired, forces)
+        rows, pushed = self._wedge_forces(moved)
+        np.add.at(left, rows, -pushed)
+        for node, axes in self.constrained.items():
+            left[self.row[node], sorted(axes)] = 0.0
+        return left
 
     def _left(self, wired: np.ndarray, forces: np.ndarray) -> np.ndarray:
         """What's left unbalanced at each node, as rows, of the elements' `forces`."""
@@ -1505,6 +1625,14 @@ class _Model:
             forces = element_forces(places, moved[rows], *these)
             np.add.at(left, rows, -forces)
             stiff = element_stiffness(places, *these)
+            np.add.at(allowed, rows, np.einsum("naibk,nbk->nai", np.abs(stiff), apart[rows]))
+        # And each printed part's skin's wedges (mqucifer/print-shop#363).
+        rows_w = self._wedge_wired()
+        for start in range(0, len(rows_w), GROUP):
+            rows = rows_w[start : start + GROUP]
+            places, tensor = self.points[rows], self.wedge_tensor[start : start + GROUP]
+            np.add.at(left, rows, -wedges.forces(places, moved[rows], tensor))
+            stiff = wedges.stiffness(places, tensor)
             np.add.at(allowed, rows, np.einsum("naibk,nbk->nai", np.abs(stiff), apart[rows]))
         for node, push in self.pushed.items():
             left[self.row[node]] += push
@@ -1607,9 +1735,12 @@ class _Model:
             for number in range(len(self.core_solids)):
                 self.core_rows[number] = np.unique(wired[self.element_core == number])
         self.within = {}
+        rows_w, pushed_w = self._wedge_forces(moved)
         for k, name in enumerate(names):
             total = np.zeros((len(self.points), 3))
             np.add.at(total, wired[owned[k]], forces[owned[k]])
+            mine = self.wedge_part == k
+            np.add.at(total, rows_w[mine], pushed_w[mine])
             self.within[name] = total
         # What's put on each part from outside, node by node.
         self.outside = {name: np.zeros((len(self.points), 3)) for name in names}
@@ -1978,9 +2109,9 @@ class _Model:
         """One part's worst pull across its layers and largest stretch any way. A printed part
         (mqucifer/print-shop#337) is read so on its skin, against the material's own limits,
         and each of its cores against its own (`infill.Core.read`), as `cores`."""
-        if part.name not in self.skin_rows:
+        if part.name not in self.cores:
             return self._read_rows(part, self.part_rows[part.name])
-        found = self._read_rows(part, self.skin_rows[part.name])
+        found = self._skin_read(part)
         found["printed"] = True
         found["skin_nodes"] = found.pop("nodes")
         found["nodes"] = len(self.part_rows[part.name])
@@ -2059,8 +2190,50 @@ class _Model:
 
     def _read_rows(self, part: PartAt, rows: np.ndarray) -> dict[str, Any]:
         """The worst pull across its layers and largest stretch any way, of a part's `rows`."""
+        found = self._read_tensors(part, self.strain[rows], self.points[rows])
+        found["nodes"] = len(rows)
+        return found
+
+    def _skin_read(self, part: PartAt) -> dict[str, Any]:
+        """A printed part's skin (mqucifer/print-shop#363): its wedges' own strain, at each
+        one's nine integration points, within a tenth of its depth of its faces, as CalculiX
+        reads an element's own, never at a node on a held face's singular edge, from its
+        nodes' movement to CalculiX's seven figures; and CalculiX's at the nodes of its
+        solid's elements that are skin, where its layers have skin no wedge lies over, as in a
+        web too thin for infill: the worse of each, against the material's own limits."""
+        k = [p.name for p in self.assembly.parts].index(part.name)
+        rows = self.skin_rows.get(part.name, np.zeros(0, dtype=int))
+        read = []
+        if len(rows):
+            read.append(self._read_rows(part, rows))
+        mine = np.flatnonzero(self.wedge_part == k)
+        if len(mine):
+            moved = self.printed if self.printed is not None else self.moved
+            wired = self._wedge_wired()[mine]
+            strain, at = [], []
+            for start in range(0, len(wired), GROUP):
+                some = wired[start : start + GROUP]
+                one, where = wedges.strains(self.points[some], moved[some], wedges.POINTS)
+                strain.append(one.reshape(-1, 3, 3))
+                at.append(where.reshape(-1, 3))
+            found = self._read_tensors(part, np.concatenate(strain), np.concatenate(at))
+            found["nodes"] = len(np.unique(wired))
+            read.append(found)
+        if not read:
+            raise NoAnswer(f"the part {part.name} is read as printed, and has no skin to read")
+        best = dict(max(read, key=lambda r: r["across_layers_pct"]))
+        most = max(read, key=lambda r: r["stretch_pct"])
+        for key in ("stretch_pct", "stretch_is", "stretch_at", "stretch_from_layers_deg"):
+            best[key] = most[key]
+        best["nodes"] = sum(r["nodes"] for r in read)
+        best["wedges"] = len(mine)
+        return best
+
+    def _read_tensors(self, part: PartAt, strain: np.ndarray, places: np.ndarray
+                      ) -> dict[str, Any]:
+        """The worst pull across its layers and largest stretch any way, of strains at
+        `places`."""
         way = part.layers_way()
-        strain = self.strain[rows]
         across = np.einsum("i,nij,j->n", way, strain, way)
         values, vectors = np.linalg.eigh(strain)
         pick = np.abs(values).argmax(axis=1)
@@ -2071,16 +2244,15 @@ class _Model:
             "material": part.material.name,
             "layers": _list(way),
             "across_layers_pct": 100 * max(float(across[worst]), 0.0),
-            "across_at": _list(self.points[rows[worst]], 3),
+            "across_at": _list(places[worst], 3),
             "across_limit_pct": part.material.across_pct,
             "stretch_pct": 100 * float(stretch[most]),
             "stretch_is": "pull" if values[most][pick[most]] > 0 else "push",
-            "stretch_at": _list(self.points[rows[most]], 3),
+            "stretch_at": _list(places[most], 3),
             "stretch_from_layers_deg": math.degrees(
                 math.asin(min(1.0, abs(float(along @ way))))
             ),
             "stretch_limit_pct": part.material.along_pct,
-            "nodes": len(rows),
         }
 
     def joint_read(self, joint: Joint) -> dict[str, Any]:
@@ -2384,16 +2556,10 @@ _SUMMED = re.compile(
 CROSSED = re.compile(r"intersect", re.I)
 #: How many of the faces nearest where gmsh's triangles cross are named.
 NEAREST = 4
-#: A printed part's faces are meshed at this many times its walls (`_Model._near_walls`,
-#: mqucifer/print-shop#363): its walls' band about an element deep, a part's skin read mostly
-#: by elements all skin or laminates of it. The planted beam of `tests/test_load_printed_cae.py`
-#: reads 6% softer than the sandwich beam's formula at it, and 24% at twice its walls.
-NEAR = 1.25
 #: Whether a part read as printed is solved by CalculiX's iterative solver from the start
 #: (`_Model.solve`, mqucifer/print-shop#363). It isn't: the direct solver reads the planted beam
-#: in a quarter of the time, in `host.PRINTED_MEMORY`, and the iterative one solves it where
-#: the direct one meets the container's memory. `tests/cae_cases/load_forced.py` turns it on to
-#: hold its figures to the direct solver's.
+#: faster, and the iterative one solves it where the direct one meets the container's memory.
+#: `tests/cae_cases/load_forced.py` turns it on to hold its figures to the direct solver's.
 ITERATE_PRINTED = False
 #: CalculiX's words for each element it finds turned inside out, with its number.
 INVERTED = re.compile(r"determinant in element\s+(\d+)")
@@ -3138,6 +3304,7 @@ def _run(
         f"a mesh of at most {size:g} mm ({fine['nodes']} nodes, {fine['elements']} elements, "
         f"meshed in {fine['mesh_s']} s and solved in {fine['solve_s']} s)"
         + _straight_said(fine)
+        + (f"; {fine['iterated']}" if fine.get("iterated") else "")
         if two_pass is None
         else "in two passes, each one's meshes below"
     )
@@ -3368,7 +3535,16 @@ def _as_printed(assembly: Assembly, report: Report, printed: dict[str, list[dict
                 f"face and {cell['bottom_mm']:.2f} mm over each bottom one, round a core of "
                 f"{cell['core_mm3']:.0f} mm³ of its {cell['volume_mm3']:.0f}"
                 + ("" if cell["core_mm3"] > 0 else ": its walls and shells fill it, so it's solid")
-                + f"; its mesh read element by element as Orca's layers lay it: "
+                + f"; its skin laid on its faces as {cell['wedges']} wedges as deep as it is, "
+                f"each the skin less the core under it, on {cell['faces']} triangles less "
+                f"{cell['faces_held']} on held faces, {cell['faces_thin']} where its layers "
+                f"have no core behind its skin, as a web too thin for infill, "
+                f"{cell['faces_outside']} whose wedge would leave the part and "
+                f"{cell['faces_inverted']} whose wedge would be too sharp or turned over, each "
+                f"read by its layers instead, and {cell['wedges_thinned']} made shallower to "
+                f"stand, the rest of their skin read by its layers; and its mesh read element "
+                f"by element as Orca's "
+                f"layers lay it, where no wedge lies: "
                 f"{cell['skin_elements']} all skin, {cell['core_elements']} all core, "
                 f"{cell['laminate_elements']} a laminate of the two along the nearest face, "
                 f"{cell['column_elements']} side by side along an edge where two bands meet "
@@ -3377,8 +3553,8 @@ def _as_printed(assembly: Assembly, report: Report, printed: dict[str, list[dict
                 f"layers' core in {cell['bands']} bands {cell['band_mm']:g} mm thick, short by "
                 f"{cell['band_short_pct']:.1f}% of a band at most, within "
                 f"{100 * as_printed.SHORT:.0f}%, and over by {cell['band_over_pct']:.1f}%, "
-                f"within {100 * as_printed.AGREE:.0f}%; its skin's strain read at its elements' "
-                f"own points, and its core's averaged over its own cell, "
+                f"within {100 * as_printed.AGREE:.0f}%; its skin's strain read at its wedges' and "
+                f"its elements' own points, and its core's averaged over its own cell, "
                 + (f"{cell['cell_mm']:.2f} mm each way" if cell.get("cell_mm") else "its lines'")
                 + ", over what of it is core: its stiffness is its cell's mean, so a peak "
                 "finer than that, as a held face's corner makes on a fine mesh, isn't one "

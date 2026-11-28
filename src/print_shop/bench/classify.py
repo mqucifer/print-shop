@@ -658,11 +658,15 @@ class Bands:
         return None
 
 
-def checked(layered: Layered, corners_own: np.ndarray, read: Read, band: float = BAND) -> Bands:
+def checked(layered: Layered, corners_own: np.ndarray, read: Read, band: float = BAND,
+            less: tuple[np.ndarray, np.ndarray] | None = None,
+            orca: np.ndarray | None = None) -> Bands:
     """The mesh's core held to Orca's, band by band of the part's layers, `band` thick
     (mqucifer/print-shop#363): in each band, the mesh's core, each element's share spread
-    evenly over it, against Orca's, each element read at its points in their own layers;
-    what's short and over as a share of the part's volume in the band."""
+    evenly over it, less what of it the skin's wedges lie over (`less`, their middles in the
+    part's own axes and their volumes), against Orca's, each element read at its points in
+    their own layers (`orca`, `read`'s own unless given); what's short and over as a share of
+    the part's volume in the band."""
     axis = layered.layers
     edges = corners_own[:, 1:] - corners_own[:, :1]
     volume = np.abs(np.einsum("ni,ni->n", np.cross(edges[:, 0], edges[:, 1]), edges[:, 2])) / 6
@@ -675,12 +679,16 @@ def checked(layered: Layered, corners_own: np.ndarray, read: Read, band: float =
     each = np.repeat(volume / POINTS, POINTS)
     flat = where.ravel()
     part = np.bincount(flat, weights=each, minlength=count)
-    orca = np.bincount(flat, weights=each * read.core.ravel(), minlength=count)
+    truth = read.core if orca is None else orca
+    orca_core = np.bincount(flat, weights=each * truth.ravel(), minlength=count)
     mesh = np.bincount(flat, weights=each * np.repeat(read.share, POINTS), minlength=count)
+    if less is not None and len(less[1]):
+        at = np.clip(np.floor((less[0][:, axis] - layered.low) / band), 0, count - 1).astype(int)
+        mesh = mesh - np.bincount(at, weights=less[1], minlength=count)
     full = part > 0
     ratio = np.where(full, part, 1.0)
-    short = float(np.max(np.where(full, (orca - mesh) / ratio, 0.0), initial=0.0))
-    over = float(np.max(np.where(full, (mesh - orca) / ratio, 0.0), initial=0.0))
+    short = float(np.max(np.where(full, (orca_core - mesh) / ratio, 0.0), initial=0.0))
+    over = float(np.max(np.where(full, (mesh - orca_core) / ratio, 0.0), initial=0.0))
     return Bands(int(full.sum()), max(short, 0.0), max(over, 0.0), len(layered.unread))
 
 

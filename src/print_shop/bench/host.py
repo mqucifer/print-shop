@@ -78,14 +78,6 @@ TWO_PASSES = 3600
 #: at once: two of these are 8 of it. Every other command, and a `load` without `--parts`,
 #: keeps `MEMORY`, so what each proves of the 3 GiB stands.
 TWO_PASSES_MEMORY = "4g"
-#: And for a `load` that reads a part as printed (mqucifer/print-shop#363): its faces meshed at
-#: its walls, about four times the elements a part read solid has, and CalculiX's direct solver,
-#: which reads it in a quarter of the iterative one's time. The planted beam of
-#: `tests/test_load_printed_cae.py` held 4.6 GiB at the most, solved in 119 s, and 329 s in all;
-#: by the iterative solver, 1.6 GiB, solved in 560 s, 1,163 s in all. Past this memory, `load`
-#: solves by the iterative one (`load._Model._iterated`).
-PRINTED_MEMORY = "6g"
-PRINTED = 1800
 OFFER = "BENCH_TIMEOUT_TWO_PASSES"
 TAKEN = "bench: two passes take the longer limit"
 ABLE = "bench: two passes could read it"
@@ -260,20 +252,18 @@ def helper(module: str, args: list[str]) -> list[str]:
     return ["python", "-I", "-c", entry, *args]
 
 
-def timeout_for(args: list[str], printed: bool = False) -> int:
+def timeout_for(args: list[str]) -> int:
     """How long a bench command may run: `TIMEOUT`, or its own in `TIMEOUTS`, or `TWO_PASSES`
-    for a `load` that asks for two passes with `--parts`, or `PRINTED` for one that reads a part
-    as printed (`reads_printed`)."""
+    for a `load` that asks for two passes with `--parts`."""
     if asks_two_passes(args):
         return TWO_PASSES
-    if printed and command_word(args) == "load":
-        return PRINTED
     return TIMEOUTS.get(command_word(args) or "", TIMEOUT)
 
 
 def reads_printed(args: list[str], folder: Path | None) -> bool:
     """Whether a bench command is a `load` of an assembly file in `folder` that gives a part a
-    `print`, read as printed (mqucifer/print-shop#363), its memory and time its own."""
+    `print`, read as printed (mqucifer/print-shop#363): its skin as wedges on its faces, at
+    `load`'s own mesh, memory and time."""
     word = command_word(args)
     if word != "load" or folder is None:
         return False
@@ -294,23 +284,15 @@ def asks_two_passes(args: list[str]) -> bool:
     return word == "load" and "--parts" in args[args.index(word) + 1 :]
 
 
-def memory_for(args: list[str], printed: bool = False) -> str:
+def memory_for(args: list[str]) -> str:
     """The memory a bench command runs in: `TWO_PASSES_MEMORY` for a `load` that asks for two
-    passes with `--parts`, `PRINTED_MEMORY` for one that reads a part as printed, and `MEMORY`
-    for every other."""
-    if asks_two_passes(args):
-        return TWO_PASSES_MEMORY
-    if printed and command_word(args) == "load":
-        return PRINTED_MEMORY
-    return MEMORY
+    passes with `--parts`, and `MEMORY` for every other."""
+    return TWO_PASSES_MEMORY if asks_two_passes(args) else MEMORY
 
 
-def offered(args: list[str], printed: bool = False) -> int | None:
+def offered(args: list[str]) -> int | None:
     """The longer limit a bench command may take up as it runs, or None: `TWO_PASSES` for a
-    `load` that may come to two passes, where it isn't already given it. A part read as
-    printed is read in one pass only, in its own time (`PRINTED`)."""
-    if printed:
-        return None
+    `load` that may come to two passes, where it isn't already given it."""
     if command_word(args) == "load" and timeout_for(args) < TWO_PASSES:
         return TWO_PASSES
     return None
@@ -334,10 +316,9 @@ def run(
     can stop it (`job.stop_here`)."""
     name = name or f"print-bench-{uuid.uuid4().hex[:12]}"
     longer = None
-    printed = not python and reads_printed(args, work)
     if timeout is None:
-        timeout = TIMEOUT if python else timeout_for(args, printed)
-        longer = None if python else offered(args, printed)
+        timeout = TIMEOUT if python else timeout_for(args)
+        longer = None if python else offered(args)
     if python and image == CAE_IMAGE:
         start = "import sys, runpy; sys.path.append('/opt/conda/lib'); del sys.argv[0]; "
         start += "runpy.run_path(sys.argv[0], run_name='__main__')"
@@ -350,7 +331,7 @@ def run(
     env = {"BENCH_TIMEOUT": str(timeout)}
     if longer is not None:
         env[OFFER] = str(longer)
-    memory = MEMORY if python else memory_for(args, printed)
+    memory = MEMORY if python else memory_for(args)
     argv = container(
         work,
         command,

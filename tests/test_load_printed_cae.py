@@ -38,9 +38,10 @@ LENGTH, WIDTH, DEPTH, MODULUS, G = 115.0, 20.0, 10.0, 1500.0, 9.80665
 #: load is spread over a patch whose middle is nearer the root (`test_cae.py`), and the printed
 #: ones the same, so they're held to it within 8%.
 AGREE = 0.08
-#: How far a core read over its own cell may be apart on the beam at twice its walls' mesh at its
-#: faces and at 1.25 of them (mqucifer/print-shop#363).
-CELL_AGREE = 0.10
+#: How far the beam's second, coarser mesh may read it from its first (mqucifer/print-shop#363):
+#: its movement, and its skin and core, each at its own scale.
+SECOND_MOVES = 0.03
+SECOND_AGREE = 0.15
 
 
 @dataclass
@@ -135,15 +136,20 @@ def worst(answer: Answer) -> float:
 
 
 def held_to_its_layers(cell: dict[str, Any]) -> None:
-    """A printed cell's mesh holds its core as Orca's layers do, in each band of its walls'
-    depth (`classify.checked`): short of it by no more than `as_printed.SHORT`, the unsafe
-    side, and over it by no more than `as_printed.AGREE`; every layer read; and every element
-    told skin, core or one blend of them."""
+    """A printed cell's mesh holds its core as Orca's layers do, band by band of its layers,
+    its wedges' volume less (`classify.checked`): short of it by no more than
+    `as_printed.SHORT`, the unsafe side, and over it by no more than `as_printed.AGREE`; every
+    layer read; and every element told skin, core or one blend of them."""
     assert cell["layers_unread"] == 0, cell
     assert cell["band_short_pct"] <= 100 * as_printed.SHORT, cell
     assert cell["band_over_pct"] <= 100 * as_printed.AGREE, cell
     kinds = ("skin", "core", "laminate", "column", "series")
     assert sum(cell[f"{k}_elements"] for k in kinds) == cell["elements"], cell
+    # Its skin as wedges on its faces: every triangle but those held, thin, leaving the part
+    # or turned inside out (`wedges.layer`).
+    assert cell["wedges"] > 0, cell
+    left = ("held", "thin", "outside", "inverted")
+    assert cell["part_wedges"] + sum(cell[f"faces_{k}"] for k in left) == cell["faces"], cell
 
 
 def bar(answer: Answer, walls: int, density: int) -> None:
@@ -218,12 +224,12 @@ def forced(cae: Any, mode: str, *args: str) -> Answer:
 
 
 def test_the_iterative_solver_reads_a_printed_part_as_the_direct_one_does(cae: Any) -> None:
-    """The beam at 2 walls and 20%, its faces meshed at twice its walls, by CalculiX's direct
-    solver and by its iterative one from the start, balanced by `load`'s corrections
-    (`cae_cases/load_forced.py`, `near-wide`): the same movement and the same verdict, to the
-    balance's own tolerance, a part in a thousand."""
-    direct = forced(cae, "near-wide", "load", "load/printed-2-20.json", *TIP)
-    iterated = forced(cae, "near-wide-iterative", "load", "load/printed-2-20.json", *TIP)
+    """The beam at 2 walls and 20%, its skin a layer of wedges on its faces, by CalculiX's
+    direct solver and by its iterative one from the start, balanced by `load`'s corrections
+    (`cae_cases/load_forced.py`, `iterative`): the same movement, verdict, skin and core, to
+    the balance's own tolerance, a part in a thousand."""
+    direct = cae("load", "load/printed-2-20.json", *TIP)
+    iterated = forced(cae, "iterative", "load", "load/printed-2-20.json", *TIP)
     assert direct.verdict == iterated.verdict != "NO ANSWER", direct.text + iterated.text
     assert "iterative" not in direct.text and "iterative" in iterated.text
     assert iterated.numbers["moves_mm"] == pytest.approx(direct.numbers["moves_mm"], rel=1e-3)
@@ -234,22 +240,24 @@ def test_the_iterative_solver_reads_a_printed_part_as_the_direct_one_does(cae: A
             direct.numbers["parts"]["beam"]["cores"][0][key], rel=1e-3)
 
 
-def test_a_core_read_over_its_own_cell_reads_the_same_on_a_finer_mesh(cae: Any) -> None:
-    """mqucifer/print-shop#363: at its elements, the beam's core at its clamped root reads as
-    the mesh at its faces makes it, the clamp's corner resolved finer each time, 1.21% across
-    its layers at twice its walls and 2.03% at 1.25 of them; averaged over its own cell, as its
-    stiffness is, it reads the same on both within `CELL_AGREE`, and in the order of the cut
-    core's 0.166% at main's 5 mm mesh."""
-    wide = forced(cae, "near-wide", "load", "load/printed-2-20.json", *TIP)
+def test_the_second_check_reads_the_wedges_meshed_again_with_the_solid(cae: Any) -> None:
+    """mqucifer/print-shop#363: the beam's skin is laid as wedges on each mesh's own faces, so
+    its coarser mesh is a second reading of it: it moves within `SECOND_MOVES` of the first,
+    and its skin and core, each read at its own scale, within `SECOND_AGREE`; and its core's
+    peak at its elements is left unjudged beside its cell's."""
     fine = cae("load", "load/printed-2-20.json", *TIP)
-    read = [a.numbers["parts"]["beam"]["cores"][0] for a in (wide, fine)]
-    assert read[1]["at_elements_across_layers_pct"] > 1.3 * read[0][
-        "at_elements_across_layers_pct"]
-    for key in ("across_layers_pct", "stretch_pct"):
-        assert read[1][key] == pytest.approx(read[0][key], rel=CELL_AGREE), (key, read)
-    assert 0.1 < read[1]["across_layers_pct"] < 0.5
+    place = fine.numbers["loads"][0]
+    first = place.get("mesh_moves_mm", place["moves_mm"])
+    assert place["coarse_moves_mm"] == pytest.approx(first, rel=SECOND_MOVES)
+    beam = fine.numbers["parts"]["beam"]
+    for one in (beam, beam["cores"][0]):
+        for key in ("across_layers_pct", "stretch_pct"):
+            assert one[f"coarse_{key}"] == pytest.approx(one[key], rel=SECOND_AGREE), (key, one)
+    core = beam["cores"][0]
+    assert core["at_elements_stretch_pct"] > core["stretch_pct"]
     assert "averaged over its own cell, 4.07 mm each way" in fine.text
-    assert "its skin's strain read at its elements' own points" in fine.text
+    assert "its skin laid on its faces as" in fine.text
+    assert "its skin's strain read at its wedges' and its elements' own points" in fine.text
 
 
 def test_a_core_truly_overloaded_at_its_root_fails_there(cae: Any) -> None:
@@ -326,8 +334,9 @@ def test_a_band_of_layers_is_read_in_the_part_s_own_axes_and_a_box_wins_over_it(
     assert cells["the part"]["settings"]["infill"] == 20
     # The band holds the beam's lower 5 mm beyond the box, its bottom shells and walls left out.
     side = as_printed.wall_thickness(2, 0.45, 0.2)
+    # Read at 64 points of each 5 mm element, its edges sampled so (mqucifer/print-shop#363).
     assert cells["band"]["core_mm3"] == pytest.approx(
-        (120 - side - 30) * (20 - 2 * side) * (5 - 0.6), rel=0.01)
+        (120 - side - 30) * (20 - 2 * side) * (5 - 0.6), rel=0.06)
 
 
 def test_a_printed_part_s_joint_carries_what_statics_says(cae: Any) -> None:
@@ -341,7 +350,11 @@ def test_a_printed_part_s_joint_carries_what_statics_says(cae: Any) -> None:
     assert two.verdict == "OK", two.text
     joint = two.numbers["joints"]["root+tip"]
     assert joint["statics_force_n"] == pytest.approx([0, 0, -G], abs=1e-4)
-    assert joint["force_n"] == pytest.approx(joint["statics_force_n"], abs=0.003 * G)
+    # Within 1.5% of the weight: each node's movement is read to CalculiX's seven figures,
+    # some 4e-6 mm where the halves move 4 mm, and across a skin's wedge 0.8 mm deep that's a
+    # strain of 5e-6, about half a percent of what the weight makes; across the solid halves'
+    # 5 mm elements a sixth of it, and they read within 0.04% (mqucifer/print-shop#363).
+    assert joint["force_n"] == pytest.approx(joint["statics_force_n"], abs=0.015 * G)
     assert joint["moment_nmm"] == pytest.approx(joint["statics_moment_nmm"], abs=1.0)
     assert joint["bolt_pull_n"] == pytest.approx(joint["bolt_pull_statics_n"], rel=2e-3)
     for name in ("root", "tip"):
@@ -450,8 +463,9 @@ def test_a_bowed_bar_reads_as_printed_between_solid_and_its_core_alone(
     held_to_its_layers(cell)
     if name == "bowed-up":
         side = as_printed.wall_thickness(2, 0.45, 0.2)
+        # Sampled at 64 points of each of its elements, about a millimetre apart at its size.
         assert cell["core_mm3"] == pytest.approx((120 - 2 * side) * (20 - 2 * side) * 8.4,
-                                                 rel=0.01)  # fmt: skip
+                                                 rel=0.03)  # fmt: skip
     found = infill.core(Settings(pattern="grid", infill=20, infill_angle=0), MATERIALS["petg"])
     up, first, second = np.eye(3)[2], np.eye(3)[0], np.eye(3)[1]
     along = infill.pulled(found.stiffness(up, first, second), first)
@@ -499,9 +513,10 @@ def test_a_web_too_thin_for_infill_reads_solid_and_its_bosses_skin_and_core(cae:
         held_to_its_layers(cell)
         read[name] = cell
     assert read["web"]["core_mm3"] == pytest.approx(2 * boss, rel=0.02)
-    # The wide web's 0.37 mm of core between the bosses' own, through its height less shells.
+    # The wide web's 0.37 mm of core between the bosses' own, through its height less shells,
+    # most of it found by 64 points of each 5 mm element.
     strip = (2.0 - 2 * side) * (40.0 - 2 * (6.0 - side)) * (20.0 - 1.6)
-    assert read["web-wide"]["core_mm3"] > 2 * boss + 0.9 * strip
+    assert read["web-wide"]["core_mm3"] > 2 * boss + 0.7 * strip
 
 
 def test_a_tile_of_planes_and_cylinders_reads_as_printed(cae: Any) -> None:
@@ -516,3 +531,31 @@ def test_a_tile_of_planes_and_cylinders_reads_as_printed(cae: Any) -> None:
     assert "inside out" not in printed.text
     held_to_its_layers(printed.numbers["printed"]["tile"][0])
     assert printed.numbers["moves_mm"] > solid.numbers["moves_mm"]
+
+
+def test_a_chamfered_tile_s_sloped_faces_read_as_printed(cae: Any) -> None:
+    """The tile with its top's outer edges chamfered 1 mm at 45°, its skin's depth there its
+    walls' or its shells' along their own way, whichever is deeper (`wedges.depths`): none of
+    its wedges turned inside out, its core held to its layers, and it moves more than the plain
+    tile, less stiff by its chamfer."""
+    plain = cae("load", "load/printed-tile.json", "--weight", "1", "--at", "55,55,8")
+    sloped = cae("load", "load/printed-tile-chamfered.json", "--weight", "1", "--at", "55,55,8")
+    assert sloped.verdict != "NO ANSWER", sloped.text
+    assert "inside out" not in sloped.text and "nonpositive jacobian" not in sloped.text
+    cell = sloped.numbers["printed"]["tile"][0]
+    held_to_its_layers(cell)
+    # Where a wedge would turn over at the chamfer's narrow strip, there's none, and it's said.
+    assert f"{cell['faces_inverted']} whose wedge would be too sharp or turned over" in sloped.text
+    assert sloped.numbers["moves_mm"] > plain.numbers["moves_mm"]
+
+
+def test_parts_beside_a_printed_one_keep_elements_of_their_own(cae: Any) -> None:
+    """The printed tile with a solid pin bonded in each hole: each pin keeps elements of its own
+    and is read, as a real tile's eight neighbours weren't when its faces were meshed at its
+    walls (mqucifer/print-shop#363); its skin's wedges lie on the faces it meets them by too."""
+    pinned = cae("load", "load/printed-tile-pinned.json", "--weight", "1", "--at", "55,55,8")
+    assert pinned.verdict != "NO ANSWER", pinned.text
+    for k in range(1, 5):
+        assert pinned.numbers["parts"][f"pin{k}"]["nodes"] > 0, pinned.numbers["parts"]
+        assert not pinned.numbers["parts"][f"pin{k}"].get("printed")
+    held_to_its_layers(pinned.numbers["printed"]["tile"][0])
