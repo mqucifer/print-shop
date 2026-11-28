@@ -3324,7 +3324,11 @@ def refined(fine: dict[str, Any], coarse: dict[str, Any], size: float) -> list[R
     box `REFINE_CELLS` cells or `HELD_ZONE` across, the highest first, `REFINE_MOST` at the
     most. Each is meshed at `REFINE_SIZE_CELLS` of its cell, no finer than `HELD_FINEST`, out
     that box each way; none where that's no finer than the mesh. A verdict not in doubt, or a
-    core read in elements near its cell, is read as it was."""
+    core read in elements near its cell, is read as it was; and so is a read that fails beyond
+    doubt already, any part's skin or core over its limit by more than `REFINE_DOUBT` on both
+    meshes, which no finer mesh round another place would turn."""
+    if _fails_beyond_doubt(fine, coarse):
+        return []
     found: dict[tuple[int, ...], tuple[float, Refine]] = {}
     for name, part in fine.get("parts", {}).items():
         theirs = (coarse.get("parts", {}).get(name) or {}).get("cores") or []
@@ -3364,6 +3368,25 @@ def refined(fine: dict[str, Any], coarse: dict[str, Any], size: float) -> list[R
     for _, place in ordered:
         place[3]["of"] = len(ordered)
     return [place for _, place in ordered[:REFINE_MOST]]
+
+
+def _fails_beyond_doubt(fine: dict[str, Any], coarse: dict[str, Any]) -> bool:
+    """Whether any part's skin or core reads over its limit by more than `REFINE_DOUBT` on both
+    meshes, across its layers or its stretch (`refined`)."""
+    pairs = (("across_layers_pct", "across_limit_pct"), ("stretch_pct", "stretch_limit_pct"))
+    for name, part in fine.get("parts", {}).items():
+        theirs = coarse.get("parts", {}).get(name) or {}
+        readers = [(part, theirs)]
+        readers += list(zip(part.get("cores", []) or [], theirs.get("cores", []) or [],
+                            strict=False))  # fmt: skip
+        for mine, other in readers:
+            for value, limit in pairs:
+                most = mine.get(limit)
+                if not most or mine.get(value) is None or other.get(value) is None:
+                    continue
+                if min(float(mine[value]), float(other[value])) > (1 + REFINE_DOUBT) * float(most):
+                    return True
+    return False
 
 
 def refined_said(places: list[Refine] | None) -> str:

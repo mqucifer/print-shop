@@ -1646,7 +1646,7 @@ def test_a_triangle_taken_by_its_corners_lies_on_the_face_or_is_left_out() -> No
     assert not lies_on(flat + [0, 0, 0.01], flat.mean(axis=0), up, 0.0)
 
 
-def _read_with(core: dict[str, object]) -> dict[str, object]:
+def _read_with(core: dict[str, Any]) -> dict[str, Any]:
     base = {"cell_mm": 1.2, "cell": "the part", "across_layers_pct": 0.1,
             "across_limit_pct": 0.481, "stretch_pct": 0.2, "stretch_limit_pct": 1.51,
             "near_limit": [{"at": [0.0, 0.0, 0.0], "reading": "across", "pct": 0.5,
@@ -1682,6 +1682,13 @@ def test_a_core_read_near_its_limit_in_coarse_elements_is_meshed_again_finer() -
     # Both well over it: a FAIL either way.
     high = _read_with({"across_layers_pct": 1.5})
     assert load.refined(high, high, 20.0) == []
+    # Another reading over its limit beyond doubt on both meshes, its skin's here: a FAIL
+    # whatever this core reads, so nothing's refined.
+    failing = {"parts": {"leg": {**over["parts"]["leg"], "across_layers_pct": 2.0,
+                                 "across_limit_pct": 1.0}}}
+    failing_too = {"parts": {"leg": {**under["parts"]["leg"], "across_layers_pct": 1.9,
+                                     "across_limit_pct": 1.0}}}
+    assert load.refined(failing, failing_too, 20.0) == []
     # No place near its limit in coarse elements: read as it was.
     bare = _read_with({"across_layers_pct": 0.55, "near_limit": []})
     assert load.refined(bare, bare, 20.0) == []
